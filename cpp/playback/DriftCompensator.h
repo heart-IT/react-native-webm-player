@@ -1,0 +1,357 @@
+// Clock drift + burst catchup compensation for playback speed adjustment.
+//
+// Two independent ratio sources combined into one playback speed:
+//   1. DriftCompensator: long-term clock drift (0.01-0.5% over 30+ minutes)
+//   2. CatchupController: burst backlog drain (up to 5% speedup after bursts)
+//
+// Both ratios are multiplied to produce a single Speex resampler ratio.
+// The Speex resampler provides higher-quality resampling than linear
+// interpolation, eliminating metallic aliasing artifacts.
+//
+// Threading:
+// - DriftCompensator::updateDrift() called from JS thread (frame arrival)
+// - CatchupController::update() called from audio callback
+// - SpeexDriftResampler::process() called from audio callback
+#pragma once
+
+#include <atomic>
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstring>
+#include <speex/speex_resampler.h>
+#include "common/MediaConfig.h"
+#include "common/CompilerHints.h"
+#include "common/MediaLog.h"
+
+namespace media {
+
+namespace drift_config {
+    constexpr int64_t kMeasurementWindowUs = 30'000'000;
+    constexpr uint32_t kMinSamplesForDrift = 1500;
+    constexpr float kMaxRatioDeviation = 0.05f;
+    constexpr int32_t kMinDriftPpm = 50;
+    constexpr int32_t kMaxDriftPpm = 5000;
+    constexpr float kRatioSmoothingAlphaMin = 0.01f;
+    constexpr float kRatioSmoothingAlphaMax = 0.04f;
+    constexpr float kRatioSmoothingAlphaDefault = 0.02f;
+}
+
+// Clock drift compensator — computes target ratio from cumulative drift.
+// Lock-free, called from JS thread (updateDrift) and audio callback (currentRatio).
+class DriftCompensator {
+public:
+    void updateDrift(int64_t cumulativeDriftUs, int64_t measurementWindowUs,
+                     uint32_t sampleCount, float networkStability = 0.5f) noexcept {
+        if (measurementWindowUs <= 0 || sampleCount < drift_config::kMinSamplesForDrift) {
+            return;
+        }
+
+        int64_t driftPpm = (cumulativeDriftUs * 1'000'000) / measurementWindowUs;
+        driftPpm = std::clamp(driftPpm,
+                              static_cast<int64_t>(-drift_config::kMaxDriftPpm),
+                              static_cast<int64_t>(drift_config::kMaxDriftPpm));
+
+        driftPpm_.store(static_cast<int32_t>(driftPpm), std::memory_order_relaxed);
+
+        float targetRatio = 1.0f;
+        if (std::abs(driftPpm) >= drift_config::kMinDriftPpm) {
+            targetRatio = 1.0f + static_cast<float>(driftPpm) / 1'000'000.0f;
+            targetRatio = std::clamp(targetRatio,
+                                     1.0f - drift_config::kMaxRatioDeviation,
+                                     1.0f + drift_config::kMaxRatioDeviation);
+        }
+
+        float alpha = drift_config::kRatioSmoothingAlphaMax -
+                      networkStability * (drift_config::kRatioSmoothingAlphaMax -
+                                          drift_config::kRatioSmoothingAlphaMin);
+
+        storeTargetAlpha(targetRatio, alpha);
+    }
+
+    // Audio callback only — smoothed drift ratio.
+    [[nodiscard]] HOT_FUNCTION
+    float currentRatio() noexcept {
+        auto [target, alpha] = loadTargetAlpha();
+
+        float smoothed = smoothedRatio_.load(std::memory_order_relaxed);
+        smoothed = smoothed + alpha * (target - smoothed);
+        smoothedRatio_.store(smoothed, std::memory_order_relaxed);
+
+        return smoothed;
+    }
+
+    [[nodiscard]] bool isActive() const noexcept {
+        int32_t ppm = std::abs(driftPpm_.load(std::memory_order_relaxed));
+        return ppm >= drift_config::kMinDriftPpm;
+    }
+
+    [[nodiscard]] int32_t driftPpm() const noexcept {
+        return driftPpm_.load(std::memory_order_relaxed);
+    }
+
+    void reset() noexcept {
+        driftPpm_.store(0, std::memory_order_relaxed);
+        storeTargetAlpha(1.0f, drift_config::kRatioSmoothingAlphaDefault);
+        smoothedRatio_.store(1.0f, std::memory_order_relaxed);
+    }
+
+private:
+    void storeTargetAlpha(float target, float alpha) noexcept {
+        uint64_t packed;
+        uint32_t t, a;
+        std::memcpy(&t, &target, sizeof(t));
+        std::memcpy(&a, &alpha, sizeof(a));
+        packed = (static_cast<uint64_t>(t) << 32) | static_cast<uint64_t>(a);
+        targetAlpha_.store(packed, std::memory_order_relaxed);
+    }
+
+    struct TargetAlpha { float target; float alpha; };
+    [[nodiscard]] TargetAlpha loadTargetAlpha() const noexcept {
+        uint64_t packed = targetAlpha_.load(std::memory_order_relaxed);
+        uint32_t t = static_cast<uint32_t>(packed >> 32);
+        uint32_t a = static_cast<uint32_t>(packed);
+        float target, alpha;
+        std::memcpy(&target, &t, sizeof(target));
+        std::memcpy(&alpha, &a, sizeof(alpha));
+        return {target, alpha};
+    }
+
+    static constexpr uint64_t packFloats(float hi, float lo) noexcept {
+        return (static_cast<uint64_t>(std::bit_cast<uint32_t>(hi)) << 32)
+             | std::bit_cast<uint32_t>(lo);
+    }
+
+    std::atomic<int32_t> driftPpm_{0};
+    std::atomic<uint64_t> targetAlpha_{
+        packFloats(1.0f, drift_config::kRatioSmoothingAlphaDefault)};
+    std::atomic<float> smoothedRatio_{1.0f};
+};
+
+// Buffer-depth-driven catchup — computes speedup ratio from buffer excess.
+// Audio callback only (single-threaded), no atomics needed for internal state.
+class CatchupController {
+public:
+    // Update catchup ratio based on current buffer depth vs target.
+    // Called from audio callback before resampling.
+    // Returns combined catchup ratio (1.0 = no catchup, >1.0 = speeding up).
+    [[nodiscard]] HOT_FUNCTION
+    float update(int64_t bufferedUs, int64_t targetUs) noexcept {
+        int64_t excessUs = bufferedUs - targetUs - config::catchup::kExcessThresholdUs;
+
+        float targetRatio = 1.0f;
+        if (excessUs > 0) {
+            float bias = static_cast<float>(excessUs) * config::catchup::kExcessToRatioGain;
+            targetRatio = 1.0f + std::min(bias, config::catchup::kMaxSpeedupRatio - 1.0f);
+        }
+
+        // Asymmetric smoothing: decay toward unity faster than ramp up.
+        // Reduces sustained pitch wobble when buffer normalizes after burst.
+        float alpha = (targetRatio < smoothedRatio_)
+            ? config::catchup::kDecayAlpha       // decaying toward unity: faster
+            : config::catchup::kSmoothingAlpha;  // ramping up: slower (less audible)
+        smoothedRatio_ += alpha * (targetRatio - smoothedRatio_);
+        // Dead-zone: snap to unity when both target and smoothed are near 1.0.
+        // Only snap when the target itself is unity — otherwise the dead-zone
+        // traps the smoothed ratio at 1.0 and prevents convergence
+        // (per-step change α * bias can be smaller than the dead-zone width).
+        if (targetRatio == 1.0f &&
+            std::abs(smoothedRatio_ - 1.0f) < config::catchup::kDeadZoneThreshold) {
+            smoothedRatio_ = 1.0f;
+            ++deadZoneSnaps_;
+        }
+        return smoothedRatio_;
+    }
+
+    [[nodiscard]] float currentRatio() const noexcept { return smoothedRatio_; }
+
+    // Diagnostic: number of times dead-zone snapped ratio to unity.
+    // Audio callback thread only — no atomic needed.
+    [[nodiscard]] uint64_t deadZoneSnaps() const noexcept { return deadZoneSnaps_; }
+
+    void reset() noexcept {
+        smoothedRatio_ = 1.0f;
+        deadZoneSnaps_ = 0;
+    }
+
+    // Reset ratio to unity without clearing diagnostic counters.
+    // Use after fast-drain where the ratio is stale but the snap count
+    // should remain cumulative for the session lifetime.
+    void resetRatio() noexcept {
+        smoothedRatio_ = 1.0f;
+    }
+
+private:
+    float smoothedRatio_ = 1.0f;
+    uint64_t deadZoneSnaps_ = 0;
+};
+
+// Speex-based resampler for drift/catchup compensation.
+// Initialized once at slot creation with a non-unity ratio to pre-allocate
+// filter tables. Ratio updates via set_rate_frac are RT-safe when the
+// reduced denominator doesn't exceed the pre-allocated table size.
+//
+// Quality 3 (~80dB stopband) eliminates the aliasing artifacts that
+// linear interpolation produced at voice frequencies.
+class SpeexDriftResampler {
+    // Speex quality for drift resampling. Quality 3 provides ~80dB stopband
+    // attenuation with 48-tap filter — sufficient for ±10% ratio changes on voice.
+    static constexpr int kDriftResamplerQuality = 3;
+
+    // Denominator scale for fractional rate expression.
+    // ratio = inRate / outRate. We express this as:
+    //   num = kRateDenom * ratio (rounded)
+    //   den = kRateDenom
+    // Higher denominator = finer ratio granularity.
+    //
+    // CRITICAL: Must be prime. Speex computes GCD(num, den) to reduce
+    // the fraction, and the reduced den_rate determines sinc table size.
+    // A composite denominator (e.g. 100000 = 2^5 * 5^5) produces wildly
+    // varying den_rate values as the ratio changes:
+    //   ratio 1.0001 → num=100010, GCD=10 → den=10000
+    //   ratio 1.005  → num=100500, GCD=500 → den=200
+    // Each change triggers update_filter() which may reallocate the sinc
+    // table (malloc on the audio thread → crash) or change table indexing
+    // (sinc_table OOB → EXC_BAD_ACCESS on iOS AURemoteIO thread).
+    // A prime denominator guarantees GCD(num, den)=1 for all num values
+    // not divisible by den (impossible in our ratio range), so den_rate
+    // stays constant and update_filter() never reallocates.
+    static constexpr spx_uint32_t kRateDenom = 99991;  // prime, ~0.001% precision
+
+    // Maximum combined ratio: drift (kMaxRatioDeviation) + catchup (kMaxSpeedupRatio).
+    // Both multiply: max = (1 + 0.05) * 1.05 = 1.1025. Round up for safety.
+    static constexpr float kMaxCombinedRatio =
+        (1.0f + drift_config::kMaxRatioDeviation) * config::catchup::kMaxSpeedupRatio;
+
+    // Minimum combined ratio: drift slowdown only (no catchup slowdown).
+    // min = 1 - 0.05 = 0.95.
+    static constexpr float kMinCombinedRatio =
+        1.0f - drift_config::kMaxRatioDeviation;
+
+    // Pre-init ratio: initialize with the maximum combined ratio so Speex
+    // allocates filter tables large enough for any ratio we'll use. Subsequent
+    // set_rate_frac calls with smaller ratios at the same quality won't realloc.
+    static constexpr spx_uint32_t kPreInitNum =
+        static_cast<spx_uint32_t>(static_cast<float>(kRateDenom) * kMaxCombinedRatio + 1.0f);
+
+public:
+    SpeexDriftResampler() = default;
+    ~SpeexDriftResampler() noexcept { destroy(); }
+
+    SpeexDriftResampler(const SpeexDriftResampler&) = delete;
+    SpeexDriftResampler& operator=(const SpeexDriftResampler&) = delete;
+
+    bool init() noexcept {
+        destroy();
+
+        int err = 0;
+        // Init with max ratio to force sinc table allocation at the largest
+        // size we'll ever need. With a prime kRateDenom, GCD(kPreInitNum,
+        // kRateDenom) = 1, so den_rate = kRateDenom and Speex allocates
+        // the full sinc table. All subsequent setRatio() calls produce the
+        // same den_rate (prime guarantees GCD=1), so update_filter() never
+        // reallocates — making setRatio() RT-safe on the audio thread.
+        state_ = speex_resampler_init(1, kPreInitNum, kRateDenom,
+                                       kDriftResamplerQuality, &err);
+        if (!state_ || err != RESAMPLER_ERR_SUCCESS) {
+            MEDIA_LOG_E("SpeexDriftResampler: init failed (err=%d)", err);
+            state_ = nullptr;
+            return false;
+        }
+
+        // Set to near-unity ratio (not exact unity) to keep den_rate = kRateDenom.
+        // Exact unity (kRateDenom/kRateDenom) reduces to 1/1, which changes
+        // den_rate and triggers sinc table resize on the next setRatio() call.
+        // kRateDenom+1 is coprime with kRateDenom (prime), so den_rate stays.
+        // The fast path in readSamples() skips the resampler for ratio ~= 1.0
+        // anyway, so this near-unity init ratio produces no audible effect.
+        speex_resampler_set_rate_frac(state_, kRateDenom + 1, kRateDenom,
+                                      config::audio::kSampleRate,
+                                      config::audio::kSampleRate);
+        currentNum_ = kRateDenom + 1;
+        return true;
+    }
+
+    void destroy() noexcept {
+        if (state_) {
+            speex_resampler_destroy(state_);
+            state_ = nullptr;
+        }
+        currentNum_ = kRateDenom + 1;
+    }
+
+    // Update the resampling ratio. ratio > 1.0 = speed up (consume more input).
+    // Expressed as fractional rate: inputRate = ratio * kRateDenom, outputRate = kRateDenom.
+    // RT-safe when filter tables are pre-allocated (no realloc for same-order ratios).
+    void setRatio(float ratio) noexcept {
+        if (!state_) return;
+
+        // Clamp to the full combined range (drift * catchup).
+        // Min: drift slowdown only (0.95).
+        // Max: drift speedup * catchup speedup (1.05 * 1.05 = 1.1025).
+        ratio = std::clamp(ratio, kMinCombinedRatio, kMaxCombinedRatio);
+        auto num = static_cast<spx_uint32_t>(static_cast<float>(kRateDenom) * ratio + 0.5f);
+
+        if (num == currentNum_) return;
+        currentNum_ = num;
+
+        // set_rate_frac with in_rate/out_rate set to actual sample rates for
+        // correct internal cutoff frequency calculation
+        auto inRate = static_cast<spx_uint32_t>(
+            static_cast<float>(config::audio::kSampleRate) * ratio + 0.5f);
+        speex_resampler_set_rate_frac(state_, num, kRateDenom,
+                                      inRate,
+                                      static_cast<spx_uint32_t>(config::audio::kSampleRate));
+    }
+
+    // Process samples through the Speex resampler.
+    // Returns number of output samples written.
+    // inputConsumed is set to number of input samples consumed.
+    [[nodiscard]] HOT_FUNCTION
+    size_t process(const float* input, size_t inputSamples,
+                   float* output, size_t maxOutputSamples,
+                   size_t& inputConsumed) noexcept {
+        if (!state_ || inputSamples == 0 || maxOutputSamples == 0) {
+            inputConsumed = 0;
+            return 0;
+        }
+
+        auto inLen = static_cast<spx_uint32_t>(inputSamples);
+        auto outLen = static_cast<spx_uint32_t>(maxOutputSamples);
+
+        int err = speex_resampler_process_float(state_, 0, input, &inLen, output, &outLen);
+        if (err != RESAMPLER_ERR_SUCCESS) {
+            inputConsumed = 0;
+            return 0;
+        }
+
+        inputConsumed = static_cast<size_t>(inLen);
+        return static_cast<size_t>(outLen);
+    }
+
+    // Check if ratio is close enough to unity that resampling can be skipped
+    [[nodiscard]] bool isUnity() const noexcept {
+        // Near-unity init value (kRateDenom+1) or exact kRateDenom
+        return currentNum_ <= kRateDenom + 1;
+    }
+
+    void reset() noexcept {
+        if (state_) {
+            speex_resampler_reset_mem(state_);
+            // Near-unity, not exact unity — keeps den_rate = kRateDenom (prime).
+            // See init() comment for rationale.
+            speex_resampler_set_rate_frac(state_, kRateDenom + 1, kRateDenom,
+                                          config::audio::kSampleRate,
+                                          config::audio::kSampleRate);
+        }
+        currentNum_ = kRateDenom + 1;
+    }
+
+    [[nodiscard]] bool isInitialized() const noexcept { return state_ != nullptr; }
+
+private:
+    SpeexResamplerState* state_{nullptr};
+    spx_uint32_t currentNum_{kRateDenom + 1};
+};
+
+}  // namespace media

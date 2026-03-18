@@ -1,0 +1,11 @@
+lib/
+node_modules/
+android/build/
+ios/build/
+example/android/build/
+example/ios/build/
+*.lock
+*.txt
+tests/sanitizer/build*/
+CLAUDE.md
+docs/PRODUCTION_AUDIT.md

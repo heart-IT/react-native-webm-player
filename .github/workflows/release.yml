@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip npm publish)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build
+        run: yarn prepare
+
+      - name: Run tests
+        run: yarn test
+
+      - name: Typecheck
+        run: yarn typecheck
+
+      - name: Verify CI passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "Checking CI status for $SHA"
+          STATUS=$(gh api "repos/${{ github.repository }}/commits/$SHA/status" --jq '.state')
+          if [ "$STATUS" != "success" ]; then
+            echo "::error::CI has not passed for this commit (status=$STATUS). Push to main and wait for CI before tagging."
+            exit 1
+          fi
+
+      - name: Publish to npm
+        if: ${{ github.event.inputs.dry_run != 'true' && startsWith(github.ref, 'refs/tags/') }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry run publish
+        if: ${{ github.event.inputs.dry_run == 'true' || !startsWith(github.ref, 'refs/tags/') }}
+        run: npm publish --dry-run
