@@ -862,11 +862,29 @@ private:
     jsi::Value setAudioFocusCallback(jsi::Runtime& rt, const jsi::Value& callback) {
         if (callback.isNull() || callback.isUndefined()) {
             audioFocusCallback_.reset();
+            media::AudioSessionManager::instance().setAudioFocusCallback(nullptr);
             return jsi::Value(true);
         }
         if (!callback.isObject() || !callback.asObject(rt).isFunction(rt))
             throw jsi::JSError(rt, "setAudioFocusCallback requires a function or null");
         audioFocusCallback_ = std::make_shared<jsi::Function>(callback.asObject(rt).asFunction(rt));
+
+        auto weakOwner = weakOwner_;
+        auto* orch = this;
+        media::AudioSessionManager::instance().setAudioFocusCallback(
+            [weakOwner, orch](media::AudioFocusState state) {
+                if (!weakOwner.lock() || !orch->audioFocusCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
+                int stateInt = static_cast<int>(state);
+                orch->callInvoker_->invokeAsync([weakOwner, orch, stateInt]() {
+                    if (!weakOwner.lock() || !orch->runtime_ || !orch->audioFocusCallback_) return;
+                    try {
+                        orch->audioFocusCallback_->call(*orch->runtime_, jsi::Value(stateInt));
+                    } catch (const std::exception& e) {
+                        MEDIA_LOG_E("PipelineOrchestrator: audio focus callback error: %s", e.what());
+                    }
+                });
+            });
+
         return jsi::Value(true);
     }
 

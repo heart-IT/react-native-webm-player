@@ -88,6 +88,11 @@ public:
         return currentDeviceId_;
     }
 
+    void setAudioFocusCallback(AudioFocusCallback cb) noexcept {
+        std::lock_guard<std::mutex> lk(mutex_);
+        audioFocusCallback_ = std::move(cb);
+    }
+
     // Wire drift reset callback into RouteHandler (used by MediaPipelineModule)
     void setDriftResetCallback(std::function<void()> fn) noexcept {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -156,6 +161,7 @@ private:
     AudioRouteCallback routeCallback_;
     StreamRestartCallback restartCallback_;
     std::function<void()> driftResetCallback_;
+    AudioFocusCallback audioFocusCallback_;
 
     // Reactive route handler (replaces RoutingStateMachine)
     RouteHandler routeHandler_;

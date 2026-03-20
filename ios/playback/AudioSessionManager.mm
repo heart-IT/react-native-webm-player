@@ -280,6 +280,19 @@ void AudioSessionManager::registerNotifications() noexcept {
 
                         MEDIA_LOG_I("AVAudioSession interruption: began=%d shouldResume=%d", began, shouldResume);
 
+                        // Map iOS interruption to AudioFocusState for JS parity with Android
+                        {
+                            AudioFocusState focusState = began
+                                ? AudioFocusState::LostTransient
+                                : AudioFocusState::Gained;
+                            AudioFocusCallback focusCb;
+                            {
+                                std::lock_guard<std::mutex> lk(this->mutex_);
+                                focusCb = this->audioFocusCallback_;
+                            }
+                            if (focusCb) focusCb(focusState);
+                        }
+
                         // On interruption end with shouldResume, re-activate session and restart streams
                         if (!began && shouldResume) {
                             StreamRestartCallback restartCb;
