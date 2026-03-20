@@ -21,6 +21,7 @@
 #include "AudioRouteTypes.h"
 #include "HealthWatchdog.h"
 #include "ClipBuffer.h"
+#include "StallRecoveryController.h"
 #include "demux/WebmDemuxer.h"
 #include "video/VideoFrameQueue.h"
 #include "video/VideoSurfaceRegistry.h"
@@ -431,6 +432,8 @@ private:
         if (!buffer) return jsi::Value(false);
 
         clipBuffer_.appendBytes(buffer.data, buffer.size);
+        stallRecovery_.onDataReceived();
+
         if (timeshifting_) {
             livePendingBuffer_.insert(livePendingBuffer_.end(), buffer.data, buffer.data + buffer.size);
             return jsi::Value(true);
@@ -560,6 +563,17 @@ private:
         levels.setProperty(rt, "rmsDbfs", static_cast<double>(metrics.rmsDbfs));
         levels.setProperty(rt, "clipCount", static_cast<double>(metrics.clipCount));
         result.setProperty(rt, "levels", std::move(levels));
+
+        jsi::Object stall(rt);
+        auto sm = stallRecovery_.metrics();
+        stall.setProperty(rt, "state", stallStateToString(sm.currentState));
+        stall.setProperty(rt, "stallCount", static_cast<int>(sm.stallCount));
+        stall.setProperty(rt, "recoveryCount", static_cast<int>(sm.recoveryCount));
+        stall.setProperty(rt, "keyFrameRequests", static_cast<int>(sm.keyFrameRequests));
+        stall.setProperty(rt, "totalStallMs", static_cast<double>(sm.totalStallDurationUs) / 1000.0);
+        stall.setProperty(rt, "lastStallMs", static_cast<double>(sm.lastStallDurationUs) / 1000.0);
+        stall.setProperty(rt, "longestStallMs", static_cast<double>(sm.longestStallUs) / 1000.0);
+        result.setProperty(rt, "stall", std::move(stall));
 
         jsi::Object demux(rt);
         auto dm = demuxer_.demuxerMetrics();
@@ -692,6 +706,18 @@ private:
                 snap.videoFramesDecoded = vm.framesDecoded.load(std::memory_order_relaxed);
                 snap.videoFramesDropped = vm.framesDropped.load(std::memory_order_relaxed);
             }
+
+            // Evaluate stall recovery state on each health cycle
+            orch->stallRecovery_.evaluate();
+
+            // Check if buffer has recovered after a stall
+            if (orch->stallRecovery_.state() == media::StallState::Recovering) {
+                int64_t decoded = orch->session_.decodedDurationUs();
+                if (decoded >= media::config::stall::kRecoveryBufferThresholdUs) {
+                    orch->stallRecovery_.onBufferSufficient();
+                }
+            }
+
             return snap;
         };
 
@@ -729,6 +755,13 @@ private:
                 }
             });
         };
+
+        // Wire stall recovery into health evaluation cycle
+        stallRecovery_.setVideoKeyFrameRequestFn([weakOwner, orch]() {
+            if (!weakOwner.lock()) return;
+            if (orch->videoQueue_) orch->videoQueue_->requestKeyFrame();
+            media::VideoSurfaceRegistry::instance().requestKeyFrame();
+        });
 
         session_.setHealthWatchdog(
             std::make_unique<media::HealthWatchdog>(std::move(readMetrics), std::move(onHealthChange)));
@@ -787,6 +820,7 @@ private:
         std::lock_guard<std::mutex> lk(lifecycleMtx_);
         demuxer_.reset();
         clipBuffer_.reset();
+        stallRecovery_.reset();
         session_.resetStreamState();
         if (videoQueue_) videoQueue_->reset();
         return jsi::Value(true);
@@ -809,14 +843,20 @@ private:
         if (!keyFrameNeededCallback_ || !callInvoker_) return;
         auto weakOwner = weakOwner_;
         auto* orch = this;
-        media::VideoSurfaceRegistry::instance().setKeyFrameRequestFn([weakOwner, orch]() {
+
+        auto jsKeyFrameNotifier = [weakOwner, orch]() {
             if (!weakOwner.lock() || !orch->keyFrameNeededCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
             orch->callInvoker_->invokeAsync([weakOwner, orch]() {
                 if (!weakOwner.lock() || !orch->runtime_ || !orch->keyFrameNeededCallback_) return;
                 try { orch->keyFrameNeededCallback_->call(*orch->runtime_); }
                 catch (const std::exception& e) { MEDIA_LOG_E("PipelineOrchestrator: keyframe callback error: %s", e.what()); }
             });
-        });
+        };
+
+        media::VideoSurfaceRegistry::instance().setKeyFrameRequestFn(jsKeyFrameNotifier);
+
+        // Stall recovery also fires keyframe requests via the same JS callback
+        stallRecovery_.setKeyFrameRequestFn(jsKeyFrameNotifier);
     }
 
     jsi::Value setAudioFocusCallback(jsi::Runtime& rt, const jsi::Value& callback) {
@@ -891,6 +931,7 @@ private:
     media::MediaSession session_;
     media::demux::WebmDemuxer demuxer_;
     media::ClipBuffer clipBuffer_;
+    media::StallRecoveryController stallRecovery_;
     media::VideoFrameQueue* videoQueue_{nullptr};
     media::AVSyncCoordinator* syncCoordinator_{nullptr};
 

@@ -90,11 +90,20 @@ export interface PlayerMetrics {
     catchupRatio: number
   }
   levels: {
-    peakLevel: number       // Linear 0.0-1.0+ (>1.0 = clipping)
-    rmsLevel: number        // Linear RMS
-    peakDbfs: number        // dBFS peak (-100 = silence)
-    rmsDbfs: number         // dBFS RMS
-    clipCount: number       // Frames that exceeded 1.0
+    peakLevel: number
+    rmsLevel: number
+    peakDbfs: number
+    rmsDbfs: number
+    clipCount: number
+  }
+  stall: {
+    state: string           // healthy | detecting | stalled | recovering | failed
+    stallCount: number
+    recoveryCount: number
+    keyFrameRequests: number
+    totalStallMs: number
+    lastStallMs: number
+    longestStallMs: number
   }
   demux: {
     totalBytesFed: number
