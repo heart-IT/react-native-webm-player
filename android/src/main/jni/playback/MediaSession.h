@@ -91,6 +91,13 @@ struct SessionMetrics {
     float currentGain = 1.0f;
     int64_t bufferedDurationUs = 0;   // total audio buffered (encoded + decoded)
     int64_t decodedDurationUs = 0;    // decoded audio ready for playback
+
+    // Audio level metering (post-gain, from audio callback)
+    float peakLevel = 0.0f;         // Linear 0.0-1.0+ (>1.0 = clipping)
+    float rmsLevel = 0.0f;          // Linear RMS
+    float peakDbfs = -100.0f;       // dBFS peak
+    float rmsDbfs = -100.0f;        // dBFS RMS
+    uint64_t clipCount = 0;         // Frames that exceeded 1.0
 };
 
 class MediaSession {
@@ -417,6 +424,14 @@ public:
             m.bufferedDurationUs = audio_.bufferedDurationUs();
             m.decodedDurationUs = audio_.decodedDurationUs();
         }
+
+        // Audio level metering
+        const auto& meter = mixer_.levelMeter();
+        m.peakLevel = meter.peakLevel();
+        m.rmsLevel = meter.rmsLevel();
+        m.peakDbfs = AudioLevelMeter::toDbfs(m.peakLevel);
+        m.rmsDbfs = AudioLevelMeter::toDbfs(m.rmsLevel);
+        m.clipCount = meter.clipCount();
 
         // Audio output health metrics
         if (audio) {

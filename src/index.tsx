@@ -89,6 +89,13 @@ export interface PlayerMetrics {
     currentRatio: number
     catchupRatio: number
   }
+  levels: {
+    peakLevel: number       // Linear 0.0-1.0+ (>1.0 = clipping)
+    rmsLevel: number        // Linear RMS
+    peakDbfs: number        // dBFS peak (-100 = silence)
+    rmsDbfs: number         // dBFS RMS
+    clipCount: number       // Frames that exceeded 1.0
+  }
   demux: {
     totalBytesFed: number
     feedDataCalls: number

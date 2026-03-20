@@ -553,6 +553,14 @@ private:
         pipeline.setProperty(rt, "decodedDurationUs", static_cast<double>(metrics.decodedDurationUs));
         result.setProperty(rt, "pipeline", std::move(pipeline));
 
+        jsi::Object levels(rt);
+        levels.setProperty(rt, "peakLevel", static_cast<double>(metrics.peakLevel));
+        levels.setProperty(rt, "rmsLevel", static_cast<double>(metrics.rmsLevel));
+        levels.setProperty(rt, "peakDbfs", static_cast<double>(metrics.peakDbfs));
+        levels.setProperty(rt, "rmsDbfs", static_cast<double>(metrics.rmsDbfs));
+        levels.setProperty(rt, "clipCount", static_cast<double>(metrics.clipCount));
+        result.setProperty(rt, "levels", std::move(levels));
+
         jsi::Object demux(rt);
         auto dm = demuxer_.demuxerMetrics();
         demux.setProperty(rt, "totalBytesFed", static_cast<double>(dm.totalBytesFed));

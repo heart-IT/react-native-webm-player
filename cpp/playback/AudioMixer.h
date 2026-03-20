@@ -11,6 +11,104 @@
 
 namespace media {
 
+// Lock-free audio level meter. Computes peak and RMS per callback,
+// stores results in atomics for non-RT readers (metrics, JS).
+// All computation in mix() hot path — no allocations, no locks.
+class AudioLevelMeter {
+public:
+    // Update levels from output buffer. Called from audio callback only.
+    HOT_FUNCTION
+    void update(const float* samples, size_t count) noexcept {
+        if (count == 0) {
+            peakLevel_.store(0.0f, std::memory_order_relaxed);
+            rmsLevel_.store(0.0f, std::memory_order_relaxed);
+            return;
+        }
+
+        float peak = 0.0f;
+        float sumSquares = 0.0f;
+
+#if MEDIA_HAS_NEON
+        float32x4_t vPeak = vdupq_n_f32(0.0f);
+        float32x4_t vSum = vdupq_n_f32(0.0f);
+        size_t i = 0;
+        size_t simdCount = count & ~size_t{3};
+        for (; i < simdCount; i += 4) {
+            float32x4_t v = vld1q_f32(samples + i);
+            float32x4_t absV = vabsq_f32(v);
+            vPeak = vmaxq_f32(vPeak, absV);
+            vSum = vmlaq_f32(vSum, v, v);
+        }
+        peak = vmaxvq_f32(vPeak);
+        sumSquares = vaddvq_f32(vSum);
+        for (; i < count; ++i) {
+            float absVal = samples[i] < 0 ? -samples[i] : samples[i];
+            if (absVal > peak) peak = absVal;
+            sumSquares += samples[i] * samples[i];
+        }
+#elif MEDIA_HAS_SSE
+        __m128 vPeak = _mm_setzero_ps();
+        __m128 vSum = _mm_setzero_ps();
+        __m128 signMask = _mm_set1_ps(-0.0f);
+        size_t i = 0;
+        size_t simdCount = count & ~size_t{3};
+        for (; i < simdCount; i += 4) {
+            __m128 v = _mm_loadu_ps(samples + i);
+            __m128 absV = _mm_andnot_ps(signMask, v);
+            vPeak = _mm_max_ps(vPeak, absV);
+            vSum = _mm_add_ps(vSum, _mm_mul_ps(v, v));
+        }
+        // Horizontal max and sum
+        alignas(16) float peakArr[4], sumArr[4];
+        _mm_store_ps(peakArr, vPeak);
+        _mm_store_ps(sumArr, vSum);
+        peak = std::max({peakArr[0], peakArr[1], peakArr[2], peakArr[3]});
+        sumSquares = sumArr[0] + sumArr[1] + sumArr[2] + sumArr[3];
+        for (; i < count; ++i) {
+            float absVal = samples[i] < 0 ? -samples[i] : samples[i];
+            if (absVal > peak) peak = absVal;
+            sumSquares += samples[i] * samples[i];
+        }
+#else
+        for (size_t i = 0; i < count; ++i) {
+            float absVal = samples[i] < 0 ? -samples[i] : samples[i];
+            if (absVal > peak) peak = absVal;
+            sumSquares += samples[i] * samples[i];
+        }
+#endif
+
+        float rms = std::sqrt(sumSquares / static_cast<float>(count));
+
+        peakLevel_.store(peak, std::memory_order_relaxed);
+        rmsLevel_.store(rms, std::memory_order_relaxed);
+
+        if (peak >= 1.0f) {
+            clipCount_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    void silence() noexcept {
+        peakLevel_.store(0.0f, std::memory_order_relaxed);
+        rmsLevel_.store(0.0f, std::memory_order_relaxed);
+    }
+
+    // Read from any thread (metrics, JS)
+    [[nodiscard]] float peakLevel() const noexcept { return peakLevel_.load(std::memory_order_relaxed); }
+    [[nodiscard]] float rmsLevel() const noexcept { return rmsLevel_.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t clipCount() const noexcept { return clipCount_.load(std::memory_order_relaxed); }
+
+    // Convert linear level to dBFS. Returns -infinity for zero input.
+    static float toDbfs(float linear) noexcept {
+        if (linear <= 0.0f) return -100.0f;
+        return 20.0f * std::log10(linear);
+    }
+
+private:
+    std::atomic<float> peakLevel_{0.0f};
+    std::atomic<float> rmsLevel_{0.0f};
+    std::atomic<uint64_t> clipCount_{0};
+};
+
 namespace mixer_constants {
     constexpr float kZeroGainThreshold = 0.001f;
     constexpr float kUnityGainTolerance = 0.001f;
@@ -26,6 +124,8 @@ public:
 
     void setChannel(AudioDecodeChannel* ch) noexcept { channel_ = ch; }
 
+    [[nodiscard]] const AudioLevelMeter& levelMeter() const noexcept { return levelMeter_; }
+
     [[nodiscard]] size_t mix(float* output, size_t frameCount) noexcept {
         if (UNLIKELY(!channel_)) return 0;
 
@@ -39,6 +139,7 @@ public:
                      currentGain < mixer_constants::kZeroGainThreshold)) {
             wasContributing_ = false;
             std::memset(output, 0, sampleCount * sizeof(float));
+            levelMeter_.silence();
             return 0;
         }
 
@@ -70,6 +171,7 @@ public:
 
             std::memset(output, 0, sampleCount * sizeof(float));
             currentGain_ = 0.0f;
+            levelMeter_.silence();
             return 0;
         }
 
@@ -95,6 +197,8 @@ public:
         }
 
         currentGain_ = targetGain;
+
+        levelMeter_.update(output, read);
 
         // Store tail samples for fade-out if channel stops contributing
         size_t tailStart = (read > kFadeSamples) ? read - kFadeSamples : 0;
@@ -188,6 +292,7 @@ private:
     float currentGain_ = 0.0f;
     bool wasContributing_ = false;
     std::array<float, kFadeSamples> fadeBuffer_{};
+    AudioLevelMeter levelMeter_;
 };
 
 }  // namespace media
