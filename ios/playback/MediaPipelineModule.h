@@ -77,6 +77,8 @@ private:
     facebook::jsi::Value getPlaybackState(facebook::jsi::Runtime& rt);
     facebook::jsi::Value setBufferTarget(facebook::jsi::Runtime& rt, double audioMs, double videoMs);
     facebook::jsi::Value setAudioFocusCallback(facebook::jsi::Runtime& rt, const facebook::jsi::Value& callback);
+    facebook::jsi::Value seekTo(facebook::jsi::Runtime& rt, double offsetSeconds);
+    facebook::jsi::Value getBufferRangeSeconds(facebook::jsi::Runtime& rt);
 
     void setupAudioRouteCallback(facebook::jsi::Runtime& rt);
     void setupHealthWatchdog();
@@ -96,6 +98,8 @@ private:
     std::shared_ptr<facebook::jsi::Function> keyFrameNeededCallback_;
     std::shared_ptr<facebook::jsi::Function> audioFocusCallback_;
     bool autoPausedByFocus_{false};
+    bool timeshifting_{false};
+    std::vector<uint8_t> livePendingBuffer_;
     facebook::jsi::Runtime* runtime_{nullptr};
 };
 

@@ -112,7 +112,9 @@ enum class MethodId : uint8_t {
     SetStreamStatus,
     SetPlaybackRate,
     SetClipBufferDuration,
-    CaptureClip
+    CaptureClip,
+    SeekTo,
+    GetBufferRangeSeconds
 };
 
 namespace {
@@ -148,6 +150,8 @@ MethodId lookupMethod(const std::string& name) noexcept {
     if (name == "setPlaybackRate") return MethodId::SetPlaybackRate;
     if (name == "setClipBufferDuration") return MethodId::SetClipBufferDuration;
     if (name == "captureClip") return MethodId::CaptureClip;
+    if (name == "seekTo") return MethodId::SeekTo;
+    if (name == "getBufferRangeSeconds") return MethodId::GetBufferRangeSeconds;
     return MethodId::Unknown;
 }
 
@@ -481,6 +485,22 @@ jsi::Value MediaPipelineModule::get(jsi::Runtime& rt, const jsi::PropNameID& nam
                             }));
                 });
 
+        case MethodId::SeekTo:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (count < 1 || !args[0].isNumber()) {
+                        throw jsi::JSError(rt, "seekTo requires (offsetSeconds: number)");
+                    }
+                    double offset = args[0].asNumber();
+                    return seekTo(rt, offset);
+                });
+
+        case MethodId::GetBufferRangeSeconds:
+            return jsi::Function::createFromHostFunction(rt, name, 0,
+                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    return getBufferRangeSeconds(*runtime_);
+                });
+
         case MethodId::Unknown:
         default:
             return jsi::Value::undefined();
@@ -489,7 +509,7 @@ jsi::Value MediaPipelineModule::get(jsi::Runtime& rt, const jsi::PropNameID& nam
 
 std::vector<jsi::PropNameID> MediaPipelineModule::getPropertyNames(jsi::Runtime& rt) {
     std::vector<jsi::PropNameID> names;
-    names.reserve(30);
+    names.reserve(34);
     names.push_back(jsi::PropNameID::forAscii(rt, "feedData"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setMuted"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setGain"));
@@ -520,6 +540,8 @@ std::vector<jsi::PropNameID> MediaPipelineModule::getPropertyNames(jsi::Runtime&
     names.push_back(jsi::PropNameID::forAscii(rt, "setPlaybackRate"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setClipBufferDuration"));
     names.push_back(jsi::PropNameID::forAscii(rt, "captureClip"));
+    names.push_back(jsi::PropNameID::forAscii(rt, "seekTo"));
+    names.push_back(jsi::PropNameID::forAscii(rt, "getBufferRangeSeconds"));
     return names;
 }
 
@@ -536,6 +558,11 @@ jsi::Value MediaPipelineModule::feedData(jsi::Runtime& rt,
     if (!buffer) return jsi::Value(false);
 
     clipBuffer_.appendBytes(buffer.data, buffer.size);
+
+    if (timeshifting_) {
+        livePendingBuffer_.insert(livePendingBuffer_.end(), buffer.data, buffer.data + buffer.size);
+        return jsi::Value(true);
+    }
 
     auto result = demuxer_.feedData(buffer.data, buffer.size);
 
@@ -1098,6 +1125,100 @@ jsi::Value MediaPipelineModule::setAudioFocusCallback(jsi::Runtime& rt, const js
     audioFocusCallback_ = std::make_shared<jsi::Function>(callback.asObject(rt).asFunction(rt));
     MEDIA_LOG_I("MediaPipelineModule: audio focus callback set");
     return jsi::Value(true);
+}
+
+jsi::Value MediaPipelineModule::seekTo(jsi::Runtime&, double offsetSeconds) {
+    if (!session_.isRunning()) return jsi::Value(false);
+    if (!clipBuffer_.isEnabled()) return jsi::Value(false);
+
+    if (offsetSeconds >= 0) {
+        demuxer_.reset();
+        session_.resetStreamState();
+        if (videoQueue_) videoQueue_->reset();
+        if (!livePendingBuffer_.empty()) {
+            auto result = demuxer_.feedData(livePendingBuffer_.data(), livePendingBuffer_.size());
+            for (const auto& pkt : result.audioPackets) {
+                session_.pushAudioFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.durationUs);
+            }
+            if (videoQueue_) {
+                for (const auto& pkt : result.videoPackets) {
+                    videoQueue_->pushEncodedFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.isKeyFrame);
+                }
+            }
+            livePendingBuffer_.clear();
+        }
+        return jsi::Value(true);
+    }
+
+    int64_t currentPts = session_.currentTimeUs();
+    int64_t targetPts = currentPts + static_cast<int64_t>(offsetSeconds * 1'000'000.0);
+
+    auto clipResult = clipBuffer_.extractFromPts(targetPts);
+    if (!clipResult.error.empty()) {
+        MEDIA_LOG_W("seekTo: %s", clipResult.error.c_str());
+        return jsi::Value(false);
+    }
+
+    timeshifting_ = true;
+    livePendingBuffer_.clear();
+
+    demuxer_.reset();
+    session_.resetStreamState();
+    if (videoQueue_) videoQueue_->reset();
+    if (syncCoordinator_) syncCoordinator_->reset();
+
+    constexpr size_t kChunkSize = 65536;
+    const uint8_t* ptr = clipResult.data.data();
+    size_t remaining = clipResult.data.size();
+
+    while (remaining > 0) {
+        size_t chunk = std::min(remaining, kChunkSize);
+        auto result = demuxer_.feedData(ptr, chunk);
+
+        if (demuxer_.hasStreamHeader() && !clipBuffer_.hasStreamHeader()) {
+            const auto& hdr = demuxer_.streamHeader();
+            clipBuffer_.setStreamHeader(hdr.data(), hdr.size());
+        }
+
+        for (const auto& pkt : result.audioPackets) {
+            session_.pushAudioFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.durationUs);
+        }
+        if (videoQueue_) {
+            for (const auto& pkt : result.videoPackets) {
+                videoQueue_->pushEncodedFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.isKeyFrame);
+            }
+        }
+        ptr += chunk;
+        remaining -= chunk;
+    }
+
+    if (!livePendingBuffer_.empty()) {
+        const uint8_t* livePtr = livePendingBuffer_.data();
+        size_t liveRemaining = livePendingBuffer_.size();
+        while (liveRemaining > 0) {
+            size_t chunk = std::min(liveRemaining, kChunkSize);
+            auto result = demuxer_.feedData(livePtr, chunk);
+            for (const auto& pkt : result.audioPackets) {
+                session_.pushAudioFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.durationUs);
+            }
+            if (videoQueue_) {
+                for (const auto& pkt : result.videoPackets) {
+                    videoQueue_->pushEncodedFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.isKeyFrame);
+                }
+            }
+            livePtr += chunk;
+            liveRemaining -= chunk;
+        }
+        livePendingBuffer_.clear();
+    }
+
+    timeshifting_ = false;
+    MEDIA_LOG_I("seekTo: completed seek to %.1fs", offsetSeconds);
+    return jsi::Value(true);
+}
+
+jsi::Value MediaPipelineModule::getBufferRangeSeconds(jsi::Runtime&) {
+    return jsi::Value(static_cast<double>(clipBuffer_.availableRangeSeconds()));
 }
 
 }  // namespace mediamodule

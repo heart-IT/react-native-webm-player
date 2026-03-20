@@ -262,6 +262,8 @@ interface MediaPipelineJSI {
   setPlaybackRate(rate: number): boolean
   setClipBufferDuration(seconds: number): boolean
   captureClip(lastNSeconds: number): Promise<string>
+  seekTo(offsetSeconds: number): boolean
+  getBufferRangeSeconds(): number
 }
 
 declare global {
@@ -344,7 +346,9 @@ export const MediaPipeline = {
   setClipBufferDuration: (seconds: number): boolean =>
     getMediaPipeline().setClipBufferDuration(seconds),
   captureClip: (lastNSeconds: number): Promise<string> =>
-    getMediaPipeline().captureClip(lastNSeconds)
+    getMediaPipeline().captureClip(lastNSeconds),
+  seekTo: (offsetSeconds: number): boolean => getMediaPipeline().seekTo(offsetSeconds),
+  getBufferRangeSeconds: (): number => getMediaPipeline().getBufferRangeSeconds()
 }
 
 // --- VideoView Native Component ---

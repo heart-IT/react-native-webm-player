@@ -209,6 +209,77 @@ public:
         return {std::move(output), {}};
     }
 
+    // Extract bytes from an absolute PTS target through the newest cluster.
+    // Used by seekTo() to re-feed buffered data through the demuxer.
+    [[nodiscard]] ClipResult extractFromPts(int64_t targetPtsUs) const noexcept {
+        std::lock_guard<std::mutex> lk(mutex_);
+
+        if (streamHeader_.empty()) return {{}, "no stream header available"};
+        if (clusterCount_ == 0) return {{}, "no clusters buffered"};
+
+        size_t count = std::min(clusterCount_, config::clip::kMaxClusters);
+        size_t newestIdx = (clusterWriteIdx_ + config::clip::kMaxClusters - 1) % config::clip::kMaxClusters;
+
+        // Find nearest keyframe cluster at or before targetPtsUs
+        int startIdx = -1;
+        for (size_t i = 0; i < count; ++i) {
+            size_t idx = (clusterWriteIdx_ + config::clip::kMaxClusters - 1 - i) % config::clip::kMaxClusters;
+            const auto& c = clusters_[idx];
+            if (totalBytesWritten_ - c.byteCounter > ringBuffer_.size()) break;
+            if (c.hasKeyFrame && c.firstPtsUs <= targetPtsUs) {
+                startIdx = static_cast<int>(idx);
+                break;
+            }
+        }
+        if (startIdx < 0) return {{}, "no keyframe found at target position"};
+
+        size_t clipDataSize = 0;
+        std::vector<size_t> indices;
+        for (size_t idx = static_cast<size_t>(startIdx); ; ) {
+            const auto& c = clusters_[idx];
+            if (totalBytesWritten_ - c.byteCounter > ringBuffer_.size()) {
+                return {{}, "data overwritten during extraction"};
+            }
+            clipDataSize += c.size;
+            indices.push_back(idx);
+            if (idx == newestIdx) break;
+            idx = (idx + 1) % config::clip::kMaxClusters;
+            if (indices.size() > count) break;
+        }
+
+        std::vector<uint8_t> output(streamHeader_.size() + clipDataSize);
+        std::memcpy(output.data(), streamHeader_.data(), streamHeader_.size());
+        size_t outPos = streamHeader_.size();
+        size_t cap = ringBuffer_.size();
+        for (size_t idx : indices) {
+            const auto& c = clusters_[idx];
+            copyFromRing(output.data() + outPos, c.ringOffset, c.size, cap);
+            outPos += c.size;
+        }
+        return {std::move(output), {}};
+    }
+
+    // How far back (in seconds) the buffer extends from the newest data.
+    [[nodiscard]] float availableRangeSeconds() const noexcept {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (clusterCount_ < 2) return 0.0f;
+
+        size_t count = std::min(clusterCount_, config::clip::kMaxClusters);
+        size_t newestIdx = (clusterWriteIdx_ + config::clip::kMaxClusters - 1) % config::clip::kMaxClusters;
+        int64_t newestPts = clusters_[newestIdx].firstPtsUs;
+
+        // Walk backward to find oldest valid cluster
+        int64_t oldestPts = newestPts;
+        for (size_t i = count; i > 0; --i) {
+            size_t idx = (clusterWriteIdx_ + config::clip::kMaxClusters - i) % config::clip::kMaxClusters;
+            const auto& c = clusters_[idx];
+            if (totalBytesWritten_ - c.byteCounter > ringBuffer_.size()) continue;
+            oldestPts = c.firstPtsUs;
+            break;
+        }
+        return static_cast<float>(newestPts - oldestPts) / 1'000'000.0f;
+    }
+
     void reset() noexcept {
         std::lock_guard<std::mutex> lk(mutex_);
         writePos_ = 0;
