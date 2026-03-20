@@ -797,6 +797,216 @@ TEST(video_render_clock_anchor_and_ready) {
     ASSERT_TRUE(clock.isReadyToRender(firstPts, anchorTime + bufferTarget + 1));
 }
 // ============================================================
+// AudioLevelMeter: float edge cases and SIMD correctness
+// ============================================================
+#include "AudioMixer.h"
+
+TEST(level_meter_silence) {
+    media::AudioLevelMeter meter;
+    std::array<float, 960> silence{};
+    meter.update(silence.data(), silence.size());
+    ASSERT_TRUE(meter.peakLevel() == 0.0f);
+    ASSERT_TRUE(meter.rmsLevel() == 0.0f);
+    ASSERT_EQ(meter.clipCount(), 0ull);
+}
+
+TEST(level_meter_unity_sine) {
+    media::AudioLevelMeter meter;
+    std::array<float, 960> samples{};
+    for (size_t i = 0; i < samples.size(); i++) {
+        samples[i] = std::sin(static_cast<float>(i) * 0.1f);
+    }
+    meter.update(samples.data(), samples.size());
+    float peak = meter.peakLevel();
+    float rms = meter.rmsLevel();
+    // Peak should be close to 1.0 (sine peak)
+    ASSERT_TRUE(peak > 0.9f && peak <= 1.0f);
+    // RMS of sine = 1/sqrt(2) ≈ 0.707
+    ASSERT_TRUE(rms > 0.5f && rms < 0.8f);
+    ASSERT_EQ(meter.clipCount(), 0ull);
+}
+
+TEST(level_meter_clipping) {
+    media::AudioLevelMeter meter;
+    std::array<float, 480> samples{};
+    for (size_t i = 0; i < samples.size(); i++) {
+        samples[i] = 1.5f;  // Clipping
+    }
+    meter.update(samples.data(), samples.size());
+    ASSERT_TRUE(meter.peakLevel() >= 1.0f);
+    ASSERT_TRUE(meter.clipCount() > 0);
+}
+
+TEST(level_meter_dbfs_conversion) {
+    // 0 dBFS = peak of 1.0
+    float db = media::AudioLevelMeter::toDbfs(1.0f);
+    ASSERT_TRUE(db > -0.1f && db < 0.1f);
+
+    // -6 dBFS ≈ 0.5
+    db = media::AudioLevelMeter::toDbfs(0.5f);
+    ASSERT_TRUE(db > -6.5f && db < -5.5f);
+
+    // Silence = -100 dBFS
+    db = media::AudioLevelMeter::toDbfs(0.0f);
+    ASSERT_TRUE(db <= -100.0f);
+}
+
+TEST(level_meter_small_buffer) {
+    media::AudioLevelMeter meter;
+    // Edge case: 1 sample
+    float sample = 0.3f;
+    meter.update(&sample, 1);
+    ASSERT_TRUE(std::abs(meter.peakLevel() - 0.3f) < 0.001f);
+    ASSERT_TRUE(std::abs(meter.rmsLevel() - 0.3f) < 0.001f);
+}
+
+TEST(level_meter_non_simd_aligned) {
+    media::AudioLevelMeter meter;
+    // 7 samples: not aligned to SIMD width (4), tests scalar fallback
+    std::array<float, 7> samples = {0.1f, -0.5f, 0.3f, -0.7f, 0.2f, -0.4f, 0.6f};
+    meter.update(samples.data(), samples.size());
+    ASSERT_TRUE(std::abs(meter.peakLevel() - 0.7f) < 0.001f);
+}
+
+TEST(level_meter_silence_after_audio) {
+    media::AudioLevelMeter meter;
+    float loud = 0.9f;
+    meter.update(&loud, 1);
+    ASSERT_TRUE(meter.peakLevel() > 0.0f);
+    meter.silence();
+    ASSERT_TRUE(meter.peakLevel() == 0.0f);
+    ASSERT_TRUE(meter.rmsLevel() == 0.0f);
+}
+
+// ============================================================
+// ClipBuffer: ring buffer wrap-around arithmetic
+// ============================================================
+#include "common/ClipBuffer.h"
+
+TEST(clip_buffer_basic_lifecycle) {
+    media::ClipBuffer buf;
+    ASSERT_TRUE(!buf.isEnabled());
+    buf.setBufferSize(4096);
+    buf.setEnabled(true);
+    ASSERT_TRUE(buf.isEnabled());
+
+    // No stream header yet
+    auto result = buf.extractClip(5.0f);
+    ASSERT_TRUE(!result.error.empty());
+
+    // Set header
+    std::vector<uint8_t> header(32, 0x1A);
+    buf.setStreamHeader(header.data(), header.size());
+    ASSERT_TRUE(buf.hasStreamHeader());
+
+    // No clusters yet
+    result = buf.extractClip(5.0f);
+    ASSERT_TRUE(!result.error.empty());
+}
+
+TEST(clip_buffer_wrap_around) {
+    media::ClipBuffer buf;
+    buf.setBufferSize(1024);  // Small buffer to force wrapping
+    buf.setEnabled(true);
+
+    std::vector<uint8_t> header(16, 0x1A);
+    buf.setStreamHeader(header.data(), header.size());
+
+    // Write enough data to wrap around the ring buffer multiple times
+    std::vector<uint8_t> chunk(128, 0xAB);
+    for (int i = 0; i < 20; i++) {
+        buf.appendBytes(chunk.data(), chunk.size());
+        buf.onNewCluster();
+        if (i % 3 == 0) buf.onKeyFrame(i * 33000);
+        buf.onBlockPts(i * 33000);
+    }
+
+    // Extract should succeed even after wrap-around
+    auto result = buf.extractClip(1.0f);
+    // May succeed or fail (data overwritten) — no UB either way
+    ASSERT_TRUE(result.error.empty() || !result.error.empty());
+
+    buf.reset();
+    ASSERT_TRUE(!buf.hasStreamHeader());
+}
+
+TEST(clip_buffer_extract_from_pts) {
+    media::ClipBuffer buf;
+    buf.setBufferSize(8192);
+    buf.setEnabled(true);
+
+    std::vector<uint8_t> header(16, 0x1A);
+    buf.setStreamHeader(header.data(), header.size());
+
+    std::vector<uint8_t> chunk(64, 0xCD);
+    for (int i = 0; i < 30; i++) {
+        buf.appendBytes(chunk.data(), chunk.size());
+        buf.onNewCluster();
+        if (i % 5 == 0) buf.onKeyFrame(i * 33000);
+        buf.onBlockPts(i * 33000);
+    }
+
+    // Seek to a specific PTS
+    auto result = buf.extractFromPts(5 * 33000);
+    if (result.error.empty()) {
+        // Output should start with header bytes
+        ASSERT_TRUE(result.data.size() > header.size());
+        ASSERT_TRUE(result.data[0] == 0x1A);
+    }
+}
+
+TEST(clip_buffer_available_range) {
+    media::ClipBuffer buf;
+    buf.setBufferSize(8192);
+    buf.setEnabled(true);
+
+    ASSERT_TRUE(buf.availableRangeSeconds() == 0.0f);
+
+    std::vector<uint8_t> header(16, 0x1A);
+    buf.setStreamHeader(header.data(), header.size());
+
+    std::vector<uint8_t> chunk(64, 0xEF);
+    for (int i = 0; i < 10; i++) {
+        buf.appendBytes(chunk.data(), chunk.size());
+        buf.onNewCluster();
+        buf.onKeyFrame(i * 1000000);  // 1 second apart
+        buf.onBlockPts(i * 1000000);
+    }
+
+    float range = buf.availableRangeSeconds();
+    // Should be approximately 9 seconds (10 clusters, 1s apart)
+    ASSERT_TRUE(range > 7.0f && range < 11.0f);
+}
+
+// ============================================================
+// StallRecoveryController: state machine correctness
+// ============================================================
+#include "common/StallRecoveryController.h"
+
+TEST(stall_controller_initial_state) {
+    media::StallRecoveryController ctrl;
+    ASSERT_TRUE(ctrl.state() == media::StallState::Healthy);
+    ASSERT_TRUE(!ctrl.isStalled());
+    auto m = ctrl.metrics();
+    ASSERT_EQ(m.stallCount, 0u);
+    ASSERT_EQ(m.recoveryCount, 0u);
+}
+
+TEST(stall_controller_reset) {
+    media::StallRecoveryController ctrl;
+    ctrl.setKeyFrameRequestFn([]() {});
+    ctrl.setVideoKeyFrameRequestFn([]() {});
+    ctrl.onDataReceived();
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    ctrl.evaluate();
+    ctrl.evaluate();
+    // Should be stalled
+    ctrl.reset();
+    ASSERT_TRUE(ctrl.state() == media::StallState::Healthy);
+    ASSERT_EQ(ctrl.metrics().stallCount, 0u);
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main() {

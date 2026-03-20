@@ -734,6 +734,224 @@ TEST(video_surface_registry_concurrent) {
     writer.join();
 }
 // ============================================================
+// ClipBuffer: concurrent append + extractClip
+// ============================================================
+#include "common/ClipBuffer.h"
+
+TEST(clip_buffer_concurrent_append_extract) {
+    media::ClipBuffer buf;
+    buf.setBufferSize(64 * 1024);
+    buf.setEnabled(true);
+
+    // Simulate stream header
+    std::vector<uint8_t> header(64, 0x1A);
+    buf.setStreamHeader(header.data(), header.size());
+
+    std::atomic<bool> stop{false};
+    constexpr int kChunkSize = 512;
+
+    // Writer thread: simulates feedData appending bytes + cluster boundaries
+    std::thread writer([&]() {
+        std::vector<uint8_t> chunk(kChunkSize, 0xAB);
+        int64_t pts = 0;
+        int frameCount = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            buf.appendBytes(chunk.data(), chunk.size());
+            if (frameCount % 10 == 0) {
+                buf.onNewCluster();
+                buf.onKeyFrame(pts);
+            }
+            buf.onBlockPts(pts);
+            pts += 20000;
+            frameCount++;
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    });
+
+    // Reader thread: periodically calls extractClip (takes mutex)
+    std::thread reader([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            auto result = buf.extractClip(5.0f);
+            // Result may succeed or fail — either is fine, just no crash/race
+            (void)result.error;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop.store(true, std::memory_order_release);
+    writer.join();
+    reader.join();
+    ASSERT_TRUE(buf.availableRangeSeconds() >= 0.0f);
+}
+
+TEST(clip_buffer_extract_from_pts_concurrent) {
+    media::ClipBuffer buf;
+    buf.setBufferSize(32 * 1024);
+    buf.setEnabled(true);
+
+    std::vector<uint8_t> header(32, 0x1A);
+    buf.setStreamHeader(header.data(), header.size());
+
+    // Pre-fill some clusters
+    std::vector<uint8_t> chunk(256, 0xCD);
+    for (int i = 0; i < 50; i++) {
+        buf.appendBytes(chunk.data(), chunk.size());
+        if (i % 5 == 0) {
+            buf.onNewCluster();
+            buf.onKeyFrame(i * 33000);
+        }
+        buf.onBlockPts(i * 33000);
+    }
+
+    std::atomic<bool> stop{false};
+
+    // One thread keeps appending
+    std::thread writer([&]() {
+        int64_t pts = 50 * 33000;
+        while (!stop.load(std::memory_order_acquire)) {
+            buf.appendBytes(chunk.data(), chunk.size());
+            buf.onBlockPts(pts);
+            pts += 33000;
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+
+    // Another thread calls extractFromPts
+    std::thread reader([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            auto result = buf.extractFromPts(100000);
+            (void)result.error;
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    stop.store(true, std::memory_order_release);
+    writer.join();
+    reader.join();
+}
+
+// ============================================================
+// StallRecoveryController: concurrent evaluate + onDataReceived
+// ============================================================
+#include "common/StallRecoveryController.h"
+
+TEST(stall_recovery_concurrent_evaluate_data) {
+    media::StallRecoveryController ctrl;
+    std::atomic<int> keyFrameRequests{0};
+    ctrl.setKeyFrameRequestFn([&]() {
+        keyFrameRequests.fetch_add(1, std::memory_order_relaxed);
+    });
+    ctrl.setVideoKeyFrameRequestFn([]() {});
+
+    std::atomic<bool> stop{false};
+
+    // Simulate data arriving on JS thread
+    std::thread jsThread([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            ctrl.onDataReceived();
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    });
+
+    // Simulate health evaluation on decode thread
+    std::thread decodeThread([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            ctrl.evaluate();
+            auto s = ctrl.state();
+            (void)s;
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop.store(true, std::memory_order_release);
+    jsThread.join();
+    decodeThread.join();
+
+    auto m = ctrl.metrics();
+    ASSERT_TRUE(m.currentState == media::StallState::Healthy ||
+                m.currentState == media::StallState::Detecting);
+}
+
+TEST(stall_recovery_stall_and_recover) {
+    media::StallRecoveryController ctrl;
+    std::atomic<int> kfRequests{0};
+    ctrl.setKeyFrameRequestFn([&]() {
+        kfRequests.fetch_add(1, std::memory_order_relaxed);
+    });
+    ctrl.setVideoKeyFrameRequestFn([]() {});
+
+    // Send initial data
+    ctrl.onDataReceived();
+
+    // Wait for stall threshold
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    ctrl.evaluate();
+    ctrl.evaluate();
+    ASSERT_TRUE(ctrl.state() == media::StallState::Stalled);
+    ASSERT_TRUE(kfRequests.load() > 0);
+
+    // Simulate data resumption
+    ctrl.onDataReceived();
+    ASSERT_TRUE(ctrl.state() == media::StallState::Recovering);
+
+    // Simulate buffer sufficient
+    ctrl.onBufferSufficient();
+    ASSERT_TRUE(ctrl.state() == media::StallState::Healthy);
+
+    auto m = ctrl.metrics();
+    ASSERT_EQ(m.stallCount, 1u);
+    ASSERT_EQ(m.recoveryCount, 1u);
+}
+
+// ============================================================
+// AudioLevelMeter: concurrent update + read
+// ============================================================
+#include "AudioMixer.h"
+
+TEST(audio_level_meter_concurrent_update_read) {
+    media::AudioLevelMeter meter;
+    std::atomic<bool> stop{false};
+
+    // Writer: simulates audio callback updating levels
+    std::thread writer([&]() {
+        std::array<float, 960> samples{};
+        float phase = 0.0f;
+        while (!stop.load(std::memory_order_acquire)) {
+            for (size_t i = 0; i < samples.size(); i++) {
+                samples[i] = 0.5f * std::sin(phase);
+                phase += 0.1f;
+            }
+            meter.update(samples.data(), samples.size());
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    });
+
+    // Reader: simulates metrics collection
+    std::thread reader([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            float peak = meter.peakLevel();
+            float rms = meter.rmsLevel();
+            uint64_t clips = meter.clipCount();
+            ASSERT_TRUE(peak >= 0.0f);
+            ASSERT_TRUE(rms >= 0.0f);
+            (void)clips;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    stop.store(true, std::memory_order_release);
+    writer.join();
+    reader.join();
+
+    ASSERT_TRUE(meter.peakLevel() > 0.0f);
+    ASSERT_TRUE(meter.rmsLevel() > 0.0f);
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main() {

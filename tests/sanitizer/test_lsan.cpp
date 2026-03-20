@@ -534,6 +534,79 @@ TEST(decode_thread_rapid_start_stop_no_leak) {
 }
 
 // ============================================================
+// ClipBuffer: enable/disable/reset cycles should not leak
+// ============================================================
+#include "common/ClipBuffer.h"
+
+TEST(clip_buffer_enable_disable_no_leak) {
+    for (int i = 0; i < 10; i++) {
+        media::ClipBuffer buf;
+        buf.setBufferSize(16384);
+        buf.setEnabled(true);
+
+        std::vector<uint8_t> header(32, 0x1A);
+        buf.setStreamHeader(header.data(), header.size());
+
+        std::vector<uint8_t> chunk(256, 0xAB);
+        for (int j = 0; j < 20; j++) {
+            buf.appendBytes(chunk.data(), chunk.size());
+            buf.onNewCluster();
+            buf.onKeyFrame(j * 33000);
+            buf.onBlockPts(j * 33000);
+        }
+
+        auto result = buf.extractClip(2.0f);
+        (void)result;
+
+        buf.setEnabled(false);
+        buf.setEnabled(true);
+        buf.reset();
+        // Destructor runs — no leak
+    }
+}
+
+TEST(clip_buffer_extract_clip_no_leak) {
+    media::ClipBuffer buf;
+    buf.setBufferSize(8192);
+    buf.setEnabled(true);
+
+    std::vector<uint8_t> header(16, 0x1A);
+    buf.setStreamHeader(header.data(), header.size());
+
+    std::vector<uint8_t> chunk(128, 0xCD);
+    for (int i = 0; i < 30; i++) {
+        buf.appendBytes(chunk.data(), chunk.size());
+        buf.onNewCluster();
+        if (i % 3 == 0) buf.onKeyFrame(i * 20000);
+        buf.onBlockPts(i * 20000);
+    }
+
+    // Extract multiple clips — each returns a vector that must be freed
+    for (int i = 0; i < 5; i++) {
+        auto result = buf.extractClip(1.0f);
+        auto result2 = buf.extractFromPts(100000);
+        (void)result;
+        (void)result2;
+    }
+}
+
+// ============================================================
+// StallRecoveryController: no leak on repeated reset
+// ============================================================
+#include "common/StallRecoveryController.h"
+
+TEST(stall_controller_no_leak) {
+    for (int i = 0; i < 10; i++) {
+        media::StallRecoveryController ctrl;
+        ctrl.setKeyFrameRequestFn([]() {});
+        ctrl.setVideoKeyFrameRequestFn([]() {});
+        ctrl.onDataReceived();
+        ctrl.evaluate();
+        ctrl.reset();
+    }
+}
+
+// ============================================================
 // Main
 // ============================================================
 
