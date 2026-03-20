@@ -22,10 +22,6 @@ namespace config::stall {
     // Time without new data before declaring a stall
     constexpr int64_t kStallThresholdUs = 500'000;        // 500ms
 
-    // After stall detected, wait this long before requesting a keyframe.
-    // Avoids spamming keyframe requests during brief network hiccups.
-    constexpr int64_t kKeyFrameRequestDelayUs = 200'000;  // 200ms into stall
-
     // Minimum interval between keyframe requests during sustained stall
     constexpr int64_t kKeyFrameRequestIntervalUs = 2'000'000;  // 2s
 

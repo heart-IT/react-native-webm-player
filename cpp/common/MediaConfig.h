@@ -235,6 +235,12 @@ namespace validation {
 
     static_assert(crossfade::kFadeSamples > 0 && crossfade::kFadeSamples <= audio::kFrameSize);
     static_assert(spike::kSpikeMultiplier >= 2);
+
+    static_assert(jitter::kMinBufferUs >= audio::kFrameDurationUs);
+    static_assert(jitter::kMinBufferUs <= jitter::kDefaultBufferUs);
+    static_assert(jitter::kDefaultBufferUs <= jitter::kMaxBufferUs);
+    static_assert(fastdrain::kExcessThresholdPlayThrough > fastdrain::kExcessThresholdAccelerate);
+    static_assert(fastdrain::kExcessThresholdAccelerate > fastdrain::kExcessThresholdDropToLive);
 }
 
 }  // namespace media::config

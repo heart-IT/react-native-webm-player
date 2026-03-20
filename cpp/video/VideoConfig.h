@@ -34,6 +34,9 @@ constexpr int64_t kDecodeIdleSleepUs = 2000;
 
 namespace validation {
     static_assert(kDecodeQueueDepth >= 2);
+    static_assert(jitter::kMinBufferUs <= jitter::kDefaultBufferUs);
+    static_assert(jitter::kDefaultBufferUs <= jitter::kMaxBufferUs);
+    static_assert(kLateFrameThresholdUs < jitter::kMinBufferUs);
 }
 
 }  // namespace media::video_config
