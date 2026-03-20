@@ -309,6 +309,22 @@ bool WebmDemuxer::parseTracks() {
     // Initialize cluster iteration
     cluster_ = segment_->GetFirst();
     blockEntry_ = nullptr;
+
+    // Capture stream header bytes (EBML + Segment + Tracks) for clip extraction.
+    // Everything from byte 0 to the first cluster position forms a valid WebM
+    // header that can be prepended to cluster data for standalone playback.
+    if (cluster_ && !cluster_->EOS()) {
+        long long headerEnd = cluster_->GetPosition();
+        if (headerEnd > 0 && streamHeader_.empty()) {
+            streamHeader_.resize(static_cast<size_t>(headerEnd));
+            int readResult = reader_->Read(0, static_cast<long>(headerEnd),
+                                           streamHeader_.data());
+            if (readResult != 0) {
+                streamHeader_.clear();
+            }
+        }
+    }
+
     return true;
 }
 
@@ -418,6 +434,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
 
         cluster_ = nextCluster;
         blockEntry_ = nullptr;
+        ++result.newClusterCount;
     }
 
     // Report if blocks are consistently unparseable despite data being available
@@ -448,6 +465,7 @@ void WebmDemuxer::reset() {
     cluster_ = nullptr;
     blockEntry_ = nullptr;
     trackInfo_ = TrackInfo{};
+    streamHeader_.clear();
     state_ = ParseState::WaitingForEBML;
     parseError_.clear();
     parseRetryCount_ = 0;

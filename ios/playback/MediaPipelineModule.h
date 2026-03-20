@@ -9,6 +9,7 @@
 #include "../../cpp/common/AudioRouteTypes.h"
 #include "../../cpp/common/ModuleRegistry.h"
 #include "../../cpp/demux/WebmDemuxer.h"
+#include "../../cpp/common/ClipBuffer.h"
 #include "../../cpp/video/VideoFrameQueue.h"
 #include "../../cpp/video/VideoSurfaceRegistry.h"
 
@@ -84,6 +85,7 @@ private:
     std::mutex lifecycleMtx_;
     media::MediaSession session_;
     media::demux::WebmDemuxer demuxer_;
+    media::ClipBuffer clipBuffer_;
     media::VideoFrameQueue* videoQueue_{nullptr};
     media::AVSyncCoordinator* syncCoordinator_{nullptr};
 

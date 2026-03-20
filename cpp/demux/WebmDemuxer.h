@@ -38,6 +38,7 @@ struct DemuxResult {
     std::vector<AudioPacket> audioPackets;
     std::vector<VideoPacket> videoPackets;
     std::string error;
+    int newClusterCount = 0;
 };
 
 struct TrackInfo {
@@ -86,6 +87,9 @@ public:
 
     const TrackInfo& trackInfo() const noexcept { return trackInfo_; }
 
+    const std::vector<uint8_t>& streamHeader() const noexcept { return streamHeader_; }
+    bool hasStreamHeader() const noexcept { return !streamHeader_.empty(); }
+
     ParseState parseState() const noexcept { return state_; }
     uint64_t overflowCount() const noexcept { return overflowCount_; }
 
@@ -115,6 +119,7 @@ private:
     const mkvparser::BlockEntry* blockEntry_ = nullptr;
 
     TrackInfo trackInfo_;
+    std::vector<uint8_t> streamHeader_;
     ParseState state_ = ParseState::WaitingForEBML;
     std::string parseError_;
     long long ebmlHeaderEndPos_ = 0;

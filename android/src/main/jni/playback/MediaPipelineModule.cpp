@@ -102,7 +102,9 @@ enum class MethodId : uint8_t {
     SetAudioFocusCallback,
     SetCatchupPolicy,
     SetStreamStatus,
-    SetPlaybackRate
+    SetPlaybackRate,
+    SetClipBufferDuration,
+    CaptureClip
 };
 
 namespace {
@@ -136,6 +138,8 @@ MethodId lookupMethod(const std::string& name) noexcept {
     if (name == "setCatchupPolicy") return MethodId::SetCatchupPolicy;
     if (name == "setStreamStatus") return MethodId::SetStreamStatus;
     if (name == "setPlaybackRate") return MethodId::SetPlaybackRate;
+    if (name == "setClipBufferDuration") return MethodId::SetClipBufferDuration;
+    if (name == "captureClip") return MethodId::CaptureClip;
     return MethodId::Unknown;
 }
 
@@ -394,6 +398,81 @@ jsi::Value MediaPipelineModule::get(jsi::Runtime& rt, const jsi::PropNameID& nam
                     return jsi::Value(true);
                 });
 
+        case MethodId::SetClipBufferDuration:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (count < 1 || !args[0].isNumber()) {
+                        throw jsi::JSError(rt, "setClipBufferDuration requires (seconds: number)");
+                    }
+                    float seconds = static_cast<float>(args[0].asNumber());
+                    if (seconds < 0 || seconds > media::config::clip::kMaxDurationSeconds) {
+                        throw jsi::JSError(rt, "clip duration must be 0-120 seconds");
+                    }
+                    size_t bufferSize = static_cast<size_t>(seconds * 150000.0f);
+                    if (bufferSize < media::config::clip::kDefaultBufferSize) {
+                        bufferSize = media::config::clip::kDefaultBufferSize;
+                    }
+                    clipBuffer_.setBufferSize(bufferSize);
+                    clipBuffer_.setEnabled(seconds > 0);
+                    return jsi::Value(true);
+                });
+
+        case MethodId::CaptureClip:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    if (count < 1 || !args[0].isNumber()) {
+                        throw jsi::JSError(rt, "captureClip requires (seconds: number)");
+                    }
+                    float seconds = static_cast<float>(args[0].asNumber());
+                    auto weakSelf = weak_from_this();
+                    auto callInvoker = callInvoker_;
+
+                    auto constructor = rt.global().getPropertyAsFunction(rt, "Promise");
+                    return constructor.callAsConstructor(rt,
+                        jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "ex"), 2,
+                            [weakSelf, seconds, callInvoker](jsi::Runtime& rt, const jsi::Value&,
+                                                              const jsi::Value* pArgs, size_t) -> jsi::Value {
+                                auto resolve = std::make_shared<jsi::Function>(pArgs[0].getObject(rt).getFunction(rt));
+                                auto reject = std::make_shared<jsi::Function>(pArgs[1].getObject(rt).getFunction(rt));
+                                auto self = weakSelf.lock();
+                                if (!self) {
+                                    reject->call(rt, jsi::String::createFromUtf8(rt, "module destroyed"));
+                                    return jsi::Value::undefined();
+                                }
+
+                                auto clipResult = self->clipBuffer_.extractClip(seconds);
+                                if (!clipResult.error.empty()) {
+                                    reject->call(rt, jsi::String::createFromUtf8(rt, clipResult.error));
+                                    return jsi::Value::undefined();
+                                }
+
+                                auto clipData = std::make_shared<std::vector<uint8_t>>(std::move(clipResult.data));
+                                std::thread([clipData, resolve, reject, callInvoker, weakSelf]() {
+                                    std::string filePath = media::ClipBuffer::generateFilePath();
+                                    std::string error;
+                                    FILE* f = fopen(filePath.c_str(), "wb");
+                                    if (!f) {
+                                        error = "failed to create clip file";
+                                    } else {
+                                        size_t written = fwrite(clipData->data(), 1, clipData->size(), f);
+                                        fclose(f);
+                                        if (written != clipData->size()) error = "incomplete write";
+                                    }
+                                    callInvoker->invokeAsync([resolve, reject, filePath, error, weakSelf]() {
+                                        auto self = weakSelf.lock();
+                                        if (!self || !self->runtime_) return;
+                                        auto& rt = *self->runtime_;
+                                        if (error.empty()) {
+                                            resolve->call(rt, jsi::String::createFromUtf8(rt, filePath));
+                                        } else {
+                                            reject->call(rt, jsi::String::createFromUtf8(rt, error));
+                                        }
+                                    });
+                                }).detach();
+                                return jsi::Value::undefined();
+                            }));
+                });
+
         case MethodId::Unknown:
         default:
             return jsi::Value::undefined();
@@ -431,6 +510,8 @@ std::vector<jsi::PropNameID> MediaPipelineModule::getPropertyNames(jsi::Runtime&
     names.push_back(jsi::PropNameID::forAscii(rt, "setCatchupPolicy"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setStreamStatus"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setPlaybackRate"));
+    names.push_back(jsi::PropNameID::forAscii(rt, "setClipBufferDuration"));
+    names.push_back(jsi::PropNameID::forAscii(rt, "captureClip"));
     return names;
 }
 
@@ -446,7 +527,29 @@ jsi::Value MediaPipelineModule::feedData(jsi::Runtime& rt,
     BufferView buffer = extractBuffer(rt, bufferVal);
     if (!buffer) return jsi::Value(false);
 
+    clipBuffer_.appendBytes(buffer.data, buffer.size);
+
     auto result = demuxer_.feedData(buffer.data, buffer.size);
+
+    // Feed stream header to clip buffer once available
+    if (demuxer_.hasStreamHeader() && !clipBuffer_.hasStreamHeader()) {
+        const auto& hdr = demuxer_.streamHeader();
+        clipBuffer_.setStreamHeader(hdr.data(), hdr.size());
+    }
+
+    // Track cluster boundaries and keyframes for clip extraction
+    if (result.newClusterCount > 0) {
+        for (int i = 0; i < result.newClusterCount; ++i) {
+            clipBuffer_.onNewCluster();
+        }
+    }
+    for (const auto& pkt : result.videoPackets) {
+        if (pkt.isKeyFrame) clipBuffer_.onKeyFrame(pkt.ptsUs);
+        clipBuffer_.onBlockPts(pkt.ptsUs);
+    }
+    for (const auto& pkt : result.audioPackets) {
+        clipBuffer_.onBlockPts(pkt.ptsUs);
+    }
 
     for (const auto& pkt : result.audioPackets) {
         session_.pushAudioFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.durationUs);
@@ -871,6 +974,7 @@ jsi::Value MediaPipelineModule::getTrackInfo(jsi::Runtime& rt) {
 jsi::Value MediaPipelineModule::resetStream(jsi::Runtime&) {
     std::lock_guard<std::mutex> lk(lifecycleMtx_);
     demuxer_.reset();
+    clipBuffer_.reset();
     session_.resetStreamState();
     if (videoQueue_) {
         videoQueue_->reset();

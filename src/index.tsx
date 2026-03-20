@@ -260,6 +260,8 @@ interface MediaPipelineJSI {
   setCatchupPolicy(policy: CatchupPolicy): boolean
   setStreamStatus(status: StreamStatus): boolean
   setPlaybackRate(rate: number): boolean
+  setClipBufferDuration(seconds: number): boolean
+  captureClip(lastNSeconds: number): Promise<string>
 }
 
 declare global {
@@ -338,7 +340,11 @@ export const MediaPipeline = {
     getMediaPipeline().setAudioFocusCallback(callback),
   setCatchupPolicy: (policy: CatchupPolicy): boolean => getMediaPipeline().setCatchupPolicy(policy),
   setStreamStatus: (status: StreamStatus): boolean => getMediaPipeline().setStreamStatus(status),
-  setPlaybackRate: (rate: number): boolean => getMediaPipeline().setPlaybackRate(rate)
+  setPlaybackRate: (rate: number): boolean => getMediaPipeline().setPlaybackRate(rate),
+  setClipBufferDuration: (seconds: number): boolean =>
+    getMediaPipeline().setClipBufferDuration(seconds),
+  captureClip: (lastNSeconds: number): Promise<string> =>
+    getMediaPipeline().captureClip(lastNSeconds)
 }
 
 // --- VideoView Native Component ---
