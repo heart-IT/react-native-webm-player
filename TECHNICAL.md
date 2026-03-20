@@ -52,10 +52,13 @@ Audio Pipeline                     Video Pipeline
 ```
 JS: feedData(webmBytes)
   → JSI: extractBuffer() (zero-copy or single-copy)
+  → ClipBuffer::appendBytes() (tee raw bytes for clip capture / DVR)
+  → StallRecoveryController::onDataReceived() (reset stall detection)
   → WebmDemuxer::feedData()
     → StreamReader::append() (append to internal buffer)
     → Incremental parse (fallthrough state machine)
-    → Return DemuxResult { AudioPacket[], VideoPacket[], error }
+    → Return DemuxResult { AudioPacket[], VideoPacket[], error, newClusterCount }
+  → ClipBuffer: setStreamHeader(), onNewCluster(), onKeyFrame(), onBlockPts()
   → Route AudioPackets → MediaSession::pushAudioFrame() → AudioDecodeChannel
   → Route VideoPackets → VideoFrameQueue::pushEncodedFrame()
   → Return bool to JS (false if parse error)
@@ -76,6 +79,7 @@ feedData() → demux → AudioDecodeChannel::pushEncodedFrame()
     → Crossfade on PLC→real transitions
     → Fast-drain with crossfade for burst backlogs
   → AudioMixer: gain application (NEON/SSE SIMD)
+  → AudioLevelMeter: peak/RMS computation (NEON/SSE SIMD, atomic store)
   → Platform audio output (AAudio / RemoteIO)
 ```
 
@@ -253,6 +257,27 @@ When `AudioDecodeChannel` detects a PTS jump > 500ms forward or > 200ms backward
 3. Crossfade prevents click at splice point
 4. `ptsDiscontinuities` metric incremented
 
+### Automatic Stall Recovery
+
+`StallRecoveryController` in `cpp/common/StallRecoveryController.h` automatically handles feed stalls without JS intervention:
+
+```
+Healthy → Detecting (gap > 250ms) → Stalled (gap > 500ms) → Recovering (data resumes) → Healthy (buffer sufficient)
+                                        ↓
+                                  Failed (gap > 30s)
+```
+
+| State | Trigger | Action |
+|-------|---------|--------|
+| Detecting | Gap > 250ms | Monitor, no action yet |
+| Stalled | Gap > 500ms | Request keyframe via callback, set video queue to keyframe-gating |
+| Recovering | Data resumes | Rebuffer, wait for decoded buffer > 60ms |
+| Failed | Stall > 30s | Report failure, stop requesting keyframes |
+
+During sustained stalls, keyframe re-requests fire every 2 seconds. The first request fires 200ms into the stall to avoid spamming during brief hiccups.
+
+Stall metrics exposed via `getMetrics().stall`: state, stallCount, recoveryCount, keyFrameRequests, totalStallMs, lastStallMs, longestStallMs.
+
 ### Feed Starvation
 
 If JS stops calling `feedData()`:
@@ -267,6 +292,76 @@ If JS stops calling `feedData()`:
 | Audio | Buffer duration ceiling | 400ms | Drop frame, increment `framesDropped` |
 | Audio | Encoded pool exhaustion | 16 slots | Drop frame |
 | Video | Queue depth cap | 8 frames | Drop oldest frame |
+
+---
+
+## Clip Capture
+
+`ClipBuffer` in `cpp/common/ClipBuffer.h` maintains a rolling ring buffer of raw WebM bytes, teed from `feedData()`. Zero re-encoding — extracts standalone WebM files by prepending cached EBML+Segment+Tracks header to selected cluster data.
+
+### Architecture
+
+```
+feedData() → ClipBuffer::appendBytes() (circular write)
+           → onNewCluster() / onKeyFrame() (cluster index)
+           → setStreamHeader() (cached once at Streaming state)
+
+captureClip(seconds) → walk keyframe index backward → copy header + clusters → file I/O on background thread → Promise<string>
+```
+
+### Ring Buffer Design
+
+- **Circular byte buffer:** Configurable size (default 4MB, ~30s at typical bitrate)
+- **Cluster index:** Ring of up to 512 `ClusterRecord` entries tracking ring offset, size, PTS, keyframe flag
+- **Keyframe-aligned extraction:** Clips always start at a keyframe cluster
+- **Wrap-around safety:** Each cluster record stores a monotonic byte counter; extraction detects overwritten data
+- **Thread safety:** Mutex-protected (JS thread writes, background thread reads for extraction; neither is RT)
+
+### API
+
+```typescript
+MediaPipeline.setClipBufferDuration(30)     // Enable, 30s rolling buffer
+const path = await MediaPipeline.captureClip(10)  // Extract last 10s as .webm file
+```
+
+Output is a valid standalone WebM file playable by any VP9-capable player. Can be published as a new Hypercore for P2P distribution.
+
+---
+
+## DVR Timeshift
+
+`seekTo()` reuses the ClipBuffer infrastructure to seek backward into buffered data without network requests.
+
+### Algorithm
+
+1. Compute target PTS from offset: `targetPts = currentTimeUs + offsetSeconds * 1e6`
+2. Set `timeshifting_ = true` — incoming `feedData()` calls accumulate in `livePendingBuffer_` instead of demuxing
+3. Extract bytes from ClipBuffer via `extractFromPts(targetPts)` — header + clusters from nearest keyframe
+4. Reset demuxer + audio/video pipelines (without clearing ClipBuffer)
+5. Re-feed extracted bytes through demuxer in 64KB chunks, dispatching packets normally
+6. Drain `livePendingBuffer_` through demuxer to catch up to live
+7. Clear `timeshifting_` — resume normal flow
+
+### API
+
+```typescript
+MediaPipeline.seekTo(-10)        // Rewind 10 seconds
+MediaPipeline.seekTo(0)          // Return to live
+MediaPipeline.getBufferRangeSeconds()  // How far back seeking is possible
+```
+
+---
+
+## Audio Level Metering
+
+`AudioLevelMeter` in `cpp/playback/AudioMixer.h` computes peak and RMS levels on every audio callback with zero additional allocations.
+
+- **SIMD:** NEON (ARM) and SSE (x86) paths for vectorized peak/sum-of-squares
+- **Lock-free:** Results stored in atomics, readable from any thread
+- **Clip detection:** Counts frames exceeding 1.0 (digital clipping)
+- **dBFS conversion:** `toDbfs(linear)` — static helper, returns -100 for silence
+
+Exposed via `getMetrics().levels`: peakLevel, rmsLevel, peakDbfs, rmsDbfs, clipCount.
 
 ---
 
@@ -349,13 +444,21 @@ enum StreamHealth {
 
 interface HealthEvent {
   status: StreamHealth
-  detail: string           // Human-readable (e.g., "audio underrun: feed gap > 500ms")
+  detail: string
+  streamStatus: StreamStatus   // Context from integrator (Live/Buffering/Ended/NoPeers)
   metrics: {
     underruns: number
+    decodeErrors: number
     framesDropped: number
     avSyncOffsetUs: number
     bufferTargetUs: number
     gapsOver100ms: number
+    gapsOver500ms: number
+    ptsDiscontinuities: number
+    decoderResets: number
+    videoFramesReceived: number
+    videoFramesDecoded: number
+    videoFramesDropped: number
   }
 }
 
@@ -412,23 +515,23 @@ Events fire on **transitions only** — not repeatedly while in a state.
 
 | Test | Command | Tests |
 |------|---------|-------|
-| AddressSanitizer + LeakSanitizer | `yarn test:asan` | 27 |
-| ThreadSanitizer | `yarn test:tsan` | 20 |
-| UndefinedBehaviorSanitizer | `yarn test:ubsan` | 58 |
+| AddressSanitizer + LeakSanitizer | `yarn test:asan` | 30 |
+| ThreadSanitizer | `yarn test:tsan` | 25 |
+| UndefinedBehaviorSanitizer | `yarn test:ubsan` | 71 |
 | RouteHandler (pure C++) | Runs with ASan build | 17 |
 | TypeScript build | `yarn prepare` | — |
 | Type check | `yarn typecheck` | — |
 | Lint | `yarn lint` | — |
 
-Total: **122 native tests** across 4 test suites.
+Total: **143 native tests** across 4 test suites.
 
 ### What the Tests Cover
 
-**LeakSanitizer (test_lsan.cpp):** FramePool acquire/release/RAII, FrameQueue SPSC push/pop/clear, JitterEstimator lifecycle, DriftCompensator/Speex resampler, CatchupController, AudioMixer, DecodeThread start/stop, OpusDecoderAdapter init/decode/PLC/move, pool stress cycles.
+**LeakSanitizer (test_lsan.cpp):** FramePool acquire/release/RAII, FrameQueue SPSC push/pop/clear, JitterEstimator lifecycle, DriftCompensator/Speex resampler, CatchupController, AudioMixer, DecodeThread start/stop, OpusDecoderAdapter init/decode/PLC/move, pool stress cycles, ClipBuffer enable/disable/extract lifecycle, StallRecoveryController reset cycles.
 
-**ThreadSanitizer (test_tsan.cpp):** Concurrent FramePool acquire/release (4 threads), SPSC producer/consumer (1000 frames), JitterEstimator concurrent update/read with spike detection, DriftCompensator concurrent update+read, CatchupController bidirectional, AudioDecodeChannel concurrent push+read+decode, AudioMixer concurrent access, DecodeThread concurrent push, StreamMetrics concurrent counters, VideoFrameQueue concurrent push/pop and reset-during-push, VideoJitterEstimator and VideoSurfaceRegistry concurrent access.
+**ThreadSanitizer (test_tsan.cpp):** Concurrent FramePool acquire/release (4 threads), SPSC producer/consumer (1000 frames), JitterEstimator concurrent update/read with spike detection, DriftCompensator concurrent update+read, CatchupController bidirectional, AudioDecodeChannel concurrent push+read+decode, AudioMixer concurrent access, DecodeThread concurrent push, StreamMetrics concurrent counters, VideoFrameQueue concurrent push/pop and reset-during-push, VideoJitterEstimator and VideoSurfaceRegistry concurrent access, ClipBuffer concurrent append+extractClip+extractFromPts, StallRecoveryController concurrent evaluate+onDataReceived+stall-and-recover, AudioLevelMeter concurrent update+read.
 
-**UndefinedBehaviorSanitizer (test_ubsan.cpp):** Pool boundary conditions (exhaustion, double-release, access-after-release), JitterEstimator arithmetic (zero interval, large deviation, negative timestamps, overflow guards), DriftCompensator division-by-zero/extreme-drift/negative-drift, Speex resampler extreme ratios (0.5-2.0), CatchupController no-slowdown/speedup-to-unity, AudioMixer null/zero/gain-ramp, AudioDecodeChannel inactive-read/push/zero-size/buffer-target-extremes, OpusDecoderAdapter null/uninitialized/DTX/garbage/zero-size, AudioResampler passthrough/max-output/float, VideoFrameQueue keyframe/oversize/null/overflow, VideoJitterEstimator/RenderClock edge cases.
+**UndefinedBehaviorSanitizer (test_ubsan.cpp):** Pool boundary conditions (exhaustion, double-release, access-after-release), JitterEstimator arithmetic (zero interval, large deviation, negative timestamps, overflow guards), DriftCompensator division-by-zero/extreme-drift/negative-drift, Speex resampler extreme ratios (0.5-2.0), CatchupController no-slowdown/speedup-to-unity, AudioMixer null/zero/gain-ramp, AudioDecodeChannel inactive-read/push/zero-size/buffer-target-extremes, OpusDecoderAdapter null/uninitialized/DTX/garbage/zero-size, AudioResampler passthrough/max-output/float, VideoFrameQueue keyframe/oversize/null/overflow, VideoJitterEstimator/RenderClock edge cases, AudioLevelMeter silence/sine/clipping/dBFS/non-aligned/small-buffer, ClipBuffer lifecycle/wrap-around/extractFromPts/availableRange, StallRecoveryController initial-state/reset.
 
 **RouteHandler (test_route_handler.cpp):** Initial route detection, dedup same-route, route change with callback+restart, builtin transitions (no restart), A2DP transitions (no restart), SCO/Wired/USB transitions (restart), unknown route handling, drift reset behavior, reset/reinitialize, comprehensive `needsRestart()` matrix, multiple sequential route changes.
 
@@ -548,12 +651,22 @@ Add tests to the appropriate file based on what sanitizer should catch the class
 | `gapsOver100ms` | number | Video feed gaps > 100ms |
 | `gapsOver500ms` | number | Video feed gaps > 500ms |
 
+### pipeline
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `audioStreamState` | number | StreamState enum (0=Inactive, 1=Buffering, 2=Playing, 3=Underrun, 4=Paused) |
+| `currentGain` | number | Applied audio gain (0.0-2.0) |
+| `bufferedDurationUs` | number | Total buffered audio (encoded + decoded) |
+| `decodedDurationUs` | number | Decoded audio ready for playback |
+
 ### session
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `uptimeMs` | number | Time since start() |
 | `samplesOutput` | number | Total audio samples written to hardware |
+| `playbackRate` | number | Current playback rate (0.5-2.0) |
 
 ### latency
 
@@ -598,6 +711,41 @@ Add tests to the appropriate file based on what sanitizer should catch the class
 |-------|------|-------------|
 | `driftPpm` | number | Clock drift in parts-per-million |
 | `active` | boolean | Drift compensation resampler active |
+| `currentRatio` | number | Smoothed drift ratio (1.0 = no drift) |
+| `catchupRatio` | number | Catchup speedup ratio (1.0 = no catchup) |
+
+### levels
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `peakLevel` | number | Linear peak level (0.0-1.0+, >1.0 = clipping) |
+| `rmsLevel` | number | Linear RMS level |
+| `peakDbfs` | number | Peak in dBFS (-100 = silence, 0 = full scale) |
+| `rmsDbfs` | number | RMS in dBFS |
+| `clipCount` | number | Audio frames that exceeded 1.0 |
+
+### stall
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `state` | string | Current stall state: healthy, detecting, stalled, recovering, failed |
+| `stallCount` | number | Total feed stalls detected |
+| `recoveryCount` | number | Successful recoveries from stall |
+| `keyFrameRequests` | number | Keyframes requested during stalls |
+| `totalStallMs` | number | Cumulative stall duration |
+| `lastStallMs` | number | Duration of most recent stall |
+| `longestStallMs` | number | Longest single stall |
+
+### demux
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `totalBytesFed` | number | Total bytes passed to demuxer |
+| `feedDataCalls` | number | Number of feedData() calls |
+| `audioPacketsEmitted` | number | Opus packets extracted |
+| `videoPacketsEmitted` | number | VP9 packets extracted |
+| `overflowCount` | number | Demuxer buffer overflow events |
+| `parseState` | number | Demuxer parse state (0-4) |
 
 ---
 
@@ -641,6 +789,9 @@ webm-player/
 │   ├── common/                      # Shared utilities
 │   │   ├── MediaConfig.h            # All timing constants
 │   │   ├── AVSyncCoordinator.h      # A/V clock sync
+│   │   ├── PipelineOrchestrator.h   # Shared JSI dispatch (iOS + Android)
+│   │   ├── ClipBuffer.h             # Rolling WebM ring buffer for clip capture + DVR
+│   │   ├── StallRecoveryController.h # Automatic feed stall detection + recovery
 │   │   ├── RouteHandler.h           # Reactive audio routing
 │   │   ├── HealthWatchdog.h         # Health state machine
 │   │   ├── AudioResampler.h         # Speex resampler wrapper
@@ -651,7 +802,7 @@ webm-player/
 │   │   ├── FramePool.h             # Lock-free pool + SPSC queue
 │   │   ├── JitterEstimator.h        # Adaptive jitter + drift
 │   │   ├── DriftCompensator.h       # Clock drift + catchup
-│   │   ├── AudioMixer.h            # Gain + SIMD mixing
+│   │   ├── AudioMixer.h            # Gain + SIMD mixing + AudioLevelMeter
 │   │   └── OpusDecoderAdapter.h     # Opus wrapper
 │   ├── video/                       # Video pipeline
 │   │   ├── VideoFrameQueue.h        # VP9 frame queue

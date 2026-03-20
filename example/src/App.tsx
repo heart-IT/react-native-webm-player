@@ -14,6 +14,8 @@ import {
   VideoView,
   AudioRoute,
   StreamHealth,
+  CatchupPolicy,
+  PlaybackState,
   installWebmPlayer,
   type AudioRouteChangeEvent,
   type AudioDeviceInfo,
@@ -56,6 +58,44 @@ const healthColor = (status: StreamHealth): string => {
   }
 }
 
+const playbackStateLabel = (state: PlaybackState): string => {
+  switch (state) {
+    case PlaybackState.Idle:
+      return 'Idle'
+    case PlaybackState.Buffering:
+      return 'Buffering'
+    case PlaybackState.Playing:
+      return 'Playing'
+    case PlaybackState.Paused:
+      return 'Paused'
+    case PlaybackState.Stalled:
+      return 'Stalled'
+    case PlaybackState.Failed:
+      return 'Failed'
+    default:
+      return 'Unknown'
+  }
+}
+
+const catchupPolicyLabel = (policy: CatchupPolicy): string => {
+  switch (policy) {
+    case CatchupPolicy.PlayThrough:
+      return 'PlayThrough'
+    case CatchupPolicy.Accelerate:
+      return 'Accelerate'
+    case CatchupPolicy.DropToLive:
+      return 'DropToLive'
+    default:
+      return 'Unknown'
+  }
+}
+
+const levelMeter = (dbfs: number, width: number = 20): string => {
+  const clamped = Math.max(-60, Math.min(0, dbfs))
+  const filled = Math.round(((clamped + 60) / 60) * width)
+  return '[' + '#'.repeat(filled) + '-'.repeat(width - filled) + ']'
+}
+
 const routeName = (route: AudioRoute): string => {
   switch (route) {
     case AudioRoute.Earpiece:
@@ -92,6 +132,17 @@ function App(): React.ReactElement {
   const [healthDetail, setHealthDetail] = useState('')
   const [trackInfo, setTrackInfo] = useState<TrackInfo | null>(null)
   const [metrics, setMetrics] = useState<PlayerMetrics | null>(null)
+  const [paused, setPaused] = useState(false)
+  const [playbackRate, setPlaybackRate] = useState(1.0)
+  const [catchupPolicy, setCatchupPolicy] = useState<CatchupPolicy>(
+    CatchupPolicy.Accelerate
+  )
+  const [playbackState, setPlaybackState] = useState<PlaybackState>(
+    PlaybackState.Idle
+  )
+  const [bufferRange, setBufferRange] = useState(0)
+  const [clipPath, setClipPath] = useState<string | null>(null)
+  const [clipCapturing, setClipCapturing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const metricsTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -155,6 +206,74 @@ function App(): React.ReactElement {
     }
   }, [])
 
+  const doPause = useCallback(() => {
+    try {
+      MediaPipeline.pause()
+      setPaused(true)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const doResume = useCallback(() => {
+    try {
+      MediaPipeline.resume()
+      setPaused(false)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const changePlaybackRate = useCallback((rate: number) => {
+    try {
+      MediaPipeline.setPlaybackRate(rate)
+      setPlaybackRate(rate)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const changeCatchupPolicy = useCallback((policy: CatchupPolicy) => {
+    try {
+      MediaPipeline.setCatchupPolicy(policy)
+      setCatchupPolicy(policy)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const doCapture = useCallback(() => {
+    setClipCapturing(true)
+    setClipPath(null)
+    MediaPipeline.captureClip(10)
+      .then((path) => {
+        setClipPath(path)
+        setClipCapturing(false)
+      })
+      .catch((e) => {
+        setError(String(e))
+        setClipCapturing(false)
+      })
+  }, [])
+
+  const doRewind = useCallback(() => {
+    try {
+      MediaPipeline.seekTo(-10)
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const doGoLive = useCallback(() => {
+    try {
+      MediaPipeline.seekTo(0)
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
   const toggleMute = useCallback(() => {
     try {
       const next = !muted
@@ -190,6 +309,8 @@ function App(): React.ReactElement {
           setMetrics(m)
           const info = MediaPipeline.getTrackInfo()
           if (info) setTrackInfo(info)
+          setPlaybackState(MediaPipeline.getPlaybackState())
+          setBufferRange(MediaPipeline.getBufferRangeSeconds())
         } catch {
           // ignore
         }
@@ -264,7 +385,8 @@ function App(): React.ReactElement {
 
           <Text style={styles.status}>
             Installed: {installed ? 'Yes' : 'No'} | Running:{' '}
-            {running ? 'Yes' : 'No'}
+            {running ? 'Yes' : 'No'} | State:{' '}
+            {playbackStateLabel(playbackState)}
           </Text>
         </View>
 
@@ -339,6 +461,108 @@ function App(): React.ReactElement {
               </View>
             </View>
 
+            {/* Pause/Resume */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Playback Control</Text>
+              <View style={styles.buttonRow}>
+                <TouchableOpacity
+                  style={[styles.button, styles.flexButton, paused && styles.muteButtonActive]}
+                  onPress={paused ? doResume : doPause}
+                >
+                  <Text style={styles.buttonText}>
+                    {paused ? 'Resume' : 'Pause'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Playback Rate */}
+              <Text style={styles.subLabel}>
+                Rate: {playbackRate.toFixed(1)}x
+              </Text>
+              <View style={styles.buttonRow}>
+                {[0.5, 1.0, 1.5, 2.0].map((rate) => (
+                  <TouchableOpacity
+                    key={rate}
+                    style={[
+                      styles.rateButton,
+                      playbackRate === rate && styles.routeButtonActive
+                    ]}
+                    onPress={() => changePlaybackRate(rate)}
+                  >
+                    <Text style={styles.routeText}>{rate}x</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* DVR / Seek */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>DVR / Seek</Text>
+              <Text style={styles.metricText}>
+                Buffer range: {bufferRange.toFixed(1)}s
+              </Text>
+              <View style={styles.buttonRow}>
+                <TouchableOpacity
+                  style={[styles.button, styles.flexButton]}
+                  onPress={doRewind}
+                >
+                  <Text style={styles.buttonText}>Rewind 10s</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.button, styles.flexButton]}
+                  onPress={doGoLive}
+                >
+                  <Text style={styles.buttonText}>Go Live</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Clip Capture */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Clip Capture</Text>
+              <TouchableOpacity
+                style={[styles.button, clipCapturing && styles.disabledButton]}
+                onPress={doCapture}
+                disabled={clipCapturing}
+              >
+                <Text style={styles.buttonText}>
+                  {clipCapturing ? 'Capturing...' : 'Capture 10s'}
+                </Text>
+              </TouchableOpacity>
+              {clipPath && (
+                <Text style={styles.clipPath} numberOfLines={3}>
+                  {clipPath}
+                </Text>
+              )}
+            </View>
+
+            {/* Catchup Policy */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>
+                Catchup Policy: {catchupPolicyLabel(catchupPolicy)}
+              </Text>
+              <View style={styles.routeRow}>
+                {[
+                  CatchupPolicy.PlayThrough,
+                  CatchupPolicy.Accelerate,
+                  CatchupPolicy.DropToLive
+                ].map((policy) => (
+                  <TouchableOpacity
+                    key={policy}
+                    style={[
+                      styles.routeButton,
+                      catchupPolicy === policy && styles.routeButtonActive
+                    ]}
+                    onPress={() => changeCatchupPolicy(policy)}
+                  >
+                    <Text style={styles.routeText}>
+                      {catchupPolicyLabel(policy)}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
             {/* Track Info */}
             {trackInfo && (
               <View style={styles.section}>
@@ -353,10 +577,59 @@ function App(): React.ReactElement {
               </View>
             )}
 
-            {/* Metrics */}
+            {/* Audio Levels */}
             {metrics && (
               <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Metrics</Text>
+                <Text style={styles.sectionTitle}>Audio Levels</Text>
+                <Text style={styles.meterText}>
+                  Peak: {metrics.levels.peakDbfs.toFixed(1)} dBFS{' '}
+                  {levelMeter(metrics.levels.peakDbfs)}
+                </Text>
+                <Text style={styles.meterText}>
+                  RMS:  {metrics.levels.rmsDbfs.toFixed(1)} dBFS{' '}
+                  {levelMeter(metrics.levels.rmsDbfs)}
+                </Text>
+                <Text style={styles.metricText}>
+                  Clips: {metrics.levels.clipCount}
+                </Text>
+              </View>
+            )}
+
+            {/* Stall Recovery */}
+            {metrics && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Stall Recovery</Text>
+                <View style={styles.metricsGrid}>
+                  <MetricItem label="State" value={metrics.stall.state} />
+                  <MetricItem label="Stalls" value={metrics.stall.stallCount} />
+                  <MetricItem
+                    label="Recoveries"
+                    value={metrics.stall.recoveryCount}
+                  />
+                  <MetricItem
+                    label="KF Requests"
+                    value={metrics.stall.keyFrameRequests}
+                  />
+                  <MetricItem
+                    label="Total"
+                    value={`${metrics.stall.totalStallMs}ms`}
+                  />
+                  <MetricItem
+                    label="Last"
+                    value={`${metrics.stall.lastStallMs}ms`}
+                  />
+                  <MetricItem
+                    label="Longest"
+                    value={`${metrics.stall.longestStallMs}ms`}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Metrics — Quality */}
+            {metrics && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Quality Metrics</Text>
                 <View style={styles.metricsGrid}>
                   <MetricItem
                     label="Underruns"
@@ -367,9 +640,50 @@ function App(): React.ReactElement {
                     value={metrics.quality.framesDropped}
                   />
                   <MetricItem
-                    label="Drops (V)"
-                    value={metrics.video.framesDropped}
+                    label="Decode Err"
+                    value={metrics.quality.decodeErrors}
                   />
+                  <MetricItem
+                    label="Dec Resets"
+                    value={metrics.quality.decoderResets}
+                  />
+                  <MetricItem
+                    label="PTS Disc"
+                    value={metrics.quality.ptsDiscontinuities}
+                  />
+                  <MetricItem
+                    label="Gaps >50ms"
+                    value={metrics.quality.gapsOver50ms}
+                  />
+                  <MetricItem
+                    label="Gaps >100ms"
+                    value={metrics.quality.gapsOver100ms}
+                  />
+                  <MetricItem
+                    label="Gaps >500ms"
+                    value={metrics.quality.gapsOver500ms}
+                  />
+                  <MetricItem
+                    label="Max Gap"
+                    value={`${metrics.quality.maxInterFrameGapMs}ms`}
+                  />
+                  <MetricItem
+                    label="Received"
+                    value={metrics.quality.framesReceived}
+                  />
+                  <MetricItem
+                    label="Drained"
+                    value={metrics.quality.framesDrained}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Metrics — Video */}
+            {metrics && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Video Metrics</Text>
+                <View style={styles.metricsGrid}>
                   <MetricItem
                     label="FPS"
                     value={metrics.video.currentFps.toFixed(1)}
@@ -379,11 +693,68 @@ function App(): React.ReactElement {
                     value={`${(metrics.video.avSyncOffsetUs / 1000).toFixed(1)}ms`}
                   />
                   <MetricItem
+                    label="Decoded"
+                    value={metrics.video.framesDecoded}
+                  />
+                  <MetricItem
+                    label="Drops (V)"
+                    value={metrics.video.framesDropped}
+                  />
+                  <MetricItem
+                    label="Late"
+                    value={metrics.video.lateFrames}
+                  />
+                  <MetricItem
+                    label="Skipped"
+                    value={metrics.video.skippedFrames}
+                  />
+                  <MetricItem
+                    label="Queue"
+                    value={metrics.video.queueDepth}
+                  />
+                  <MetricItem
+                    label="V Jitter"
+                    value={`${(metrics.video.jitterUs / 1000).toFixed(1)}ms`}
+                  />
+                  <MetricItem
+                    label="V Drift"
+                    value={`${metrics.video.driftPpm.toFixed(0)}ppm`}
+                  />
+                  <MetricItem
+                    label="V Dec Err"
+                    value={metrics.video.decodeErrors}
+                  />
+                  <MetricItem
+                    label="V Dec Rst"
+                    value={metrics.video.decoderResets}
+                  />
+                  <MetricItem
+                    label="Surf Lost"
+                    value={metrics.video.surfaceLostCount}
+                  />
+                  <MetricItem
+                    label="Needs KF"
+                    value={metrics.video.needsKeyFrame ? 'Yes' : 'No'}
+                  />
+                  <MetricItem
+                    label="Size"
+                    value={`${metrics.video.width}x${metrics.video.height}`}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Metrics — Jitter & Drift */}
+            {metrics && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Jitter / Drift</Text>
+                <View style={styles.metricsGrid}>
+                  <MetricItem
                     label="Jitter"
                     value={`${(metrics.jitter.jitterUs / 1000).toFixed(1)}ms`}
                   />
                   <MetricItem
-                    label="Buffer"
+                    label="Buf Target"
                     value={`${(metrics.jitter.bufferTargetUs / 1000).toFixed(0)}ms`}
                   />
                   <MetricItem
@@ -391,12 +762,143 @@ function App(): React.ReactElement {
                     value={`${metrics.drift.driftPpm.toFixed(0)}ppm`}
                   />
                   <MetricItem
-                    label="Decode Err"
-                    value={metrics.quality.decodeErrors}
+                    label="Drift Active"
+                    value={metrics.drift.active ? 'Yes' : 'No'}
                   />
                   <MetricItem
-                    label="Gaps >100ms"
-                    value={metrics.quality.gapsOver100ms}
+                    label="Ratio"
+                    value={metrics.drift.currentRatio.toFixed(6)}
+                  />
+                  <MetricItem
+                    label="Catchup"
+                    value={metrics.drift.catchupRatio.toFixed(6)}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Metrics — Pipeline & Session */}
+            {metrics && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Pipeline / Session</Text>
+                <View style={styles.metricsGrid}>
+                  <MetricItem
+                    label="Stream St"
+                    value={metrics.pipeline.audioStreamState}
+                  />
+                  <MetricItem
+                    label="Gain"
+                    value={metrics.pipeline.currentGain.toFixed(2)}
+                  />
+                  <MetricItem
+                    label="Buffered"
+                    value={`${(metrics.pipeline.bufferedDurationUs / 1000).toFixed(0)}ms`}
+                  />
+                  <MetricItem
+                    label="Decoded"
+                    value={`${(metrics.pipeline.decodedDurationUs / 1000).toFixed(0)}ms`}
+                  />
+                  <MetricItem
+                    label="Uptime"
+                    value={`${(metrics.session.uptimeMs / 1000).toFixed(0)}s`}
+                  />
+                  <MetricItem
+                    label="Samples"
+                    value={metrics.session.samplesOutput}
+                  />
+                  <MetricItem
+                    label="Rate"
+                    value={metrics.session.playbackRate.toFixed(2)}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Metrics — Demux */}
+            {metrics && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Demux</Text>
+                <View style={styles.metricsGrid}>
+                  <MetricItem
+                    label="Bytes Fed"
+                    value={metrics.demux.totalBytesFed}
+                  />
+                  <MetricItem
+                    label="Feed Calls"
+                    value={metrics.demux.feedDataCalls}
+                  />
+                  <MetricItem
+                    label="Audio Pkts"
+                    value={metrics.demux.audioPacketsEmitted}
+                  />
+                  <MetricItem
+                    label="Video Pkts"
+                    value={metrics.demux.videoPacketsEmitted}
+                  />
+                  <MetricItem
+                    label="Overflow"
+                    value={metrics.demux.overflowCount}
+                  />
+                  <MetricItem
+                    label="Parse St"
+                    value={metrics.demux.parseState}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Metrics — Audio Output & Health */}
+            {metrics && (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Audio Output / Health</Text>
+                <View style={styles.metricsGrid}>
+                  <MetricItem
+                    label="Restarts"
+                    value={metrics.audioOutput.restartCount}
+                  />
+                  <MetricItem
+                    label="Last Err"
+                    value={metrics.audioOutput.lastError}
+                  />
+                  <MetricItem
+                    label="Sample Rate"
+                    value={metrics.audioOutput.actualSampleRate}
+                  />
+                  <MetricItem
+                    label="Latency"
+                    value={`${(metrics.audioOutput.latencyUs / 1000).toFixed(1)}ms`}
+                  />
+                  <MetricItem
+                    label="Mode"
+                    value={metrics.latency.mode}
+                  />
+                  <MetricItem
+                    label="Lowest Lat"
+                    value={metrics.latency.isLowestLatency ? 'Yes' : 'No'}
+                  />
+                  <MetricItem
+                    label="BT Route"
+                    value={metrics.bluetooth.route}
+                  />
+                  <MetricItem
+                    label="BT A2DP"
+                    value={metrics.bluetooth.isA2dp ? 'Yes' : 'No'}
+                  />
+                  <MetricItem
+                    label="WD Tripped"
+                    value={metrics.health.watchdogTripCount}
+                  />
+                  <MetricItem
+                    label="Heartbeat"
+                    value={`${metrics.health.timeSinceHeartbeatMs}ms`}
+                  />
+                  <MetricItem
+                    label="Pool Enc"
+                    value={metrics.pools.encodedUnderPressure ? 'PRESS' : 'OK'}
+                  />
+                  <MetricItem
+                    label="Pool Dec"
+                    value={metrics.pools.decodedUnderPressure ? 'PRESS' : 'OK'}
                   />
                 </View>
               </View>
@@ -598,6 +1100,35 @@ const styles = StyleSheet.create({
     color: '#e0e0e0',
     fontSize: 14,
     fontWeight: '600'
+  },
+  subLabel: {
+    color: '#888',
+    fontSize: 12,
+    marginTop: 8,
+    marginBottom: 4
+  },
+  rateButton: {
+    flex: 1,
+    backgroundColor: '#0a1628',
+    borderRadius: 8,
+    padding: 10,
+    alignItems: 'center'
+  },
+  disabledButton: {
+    backgroundColor: '#333',
+    opacity: 0.6
+  },
+  clipPath: {
+    color: '#2ecc71',
+    fontSize: 11,
+    marginTop: 8,
+    fontFamily: 'monospace'
+  },
+  meterText: {
+    color: '#e0e0e0',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    marginBottom: 4
   },
   info: {
     color: '#666',
