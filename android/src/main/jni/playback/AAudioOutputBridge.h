@@ -52,6 +52,10 @@ public:
         restartCallback_ = std::move(cb);
     }
 
+    // Set pointer to AudioSessionManager's interrupted flag for RT-safe
+    // muting during audio focus loss. Mirrors iOS setInterruptedFlag().
+    void setInterruptedFlag(std::atomic<bool>* flag) noexcept { interruptedFlag_ = flag; }
+
     // Pre-activate AAudio stream with silence to reduce first-frame latency.
     // Call before audio is expected, then call start() when ready for real audio.
     [[nodiscard]] bool warmUp() noexcept {
@@ -487,6 +491,10 @@ private:
         const size_t silenceBytes = static_cast<size_t>(numFrames) * static_cast<size_t>(self->config_.channelCount) * sizeof(float);
 
         uint8_t state = self->callbackState_.load(std::memory_order_acquire);
+        if (UNLIKELY(self->interruptedFlag_ && self->interruptedFlag_->load(std::memory_order_acquire))) {
+            std::memset(output, 0, silenceBytes);
+            return AAUDIO_CALLBACK_RESULT_CONTINUE;
+        }
         if (state == kStateWarmUp) {
             // Warm-up mode: output silence to keep hardware hot
             std::memset(output, 0, silenceBytes);
@@ -604,6 +612,8 @@ private:
     std::atomic<int> consecutiveRestartFailures_{0};
     std::atomic<LatencyMode> grantedLatencyMode_{LatencyMode::Unknown};
     std::atomic<int32_t> grantedSampleRate_{0};
+
+    std::atomic<bool>* interruptedFlag_{nullptr};
 
     AudioResamplerFloat playbackResampler_;
     // Buffer for mixer output before downsampling.

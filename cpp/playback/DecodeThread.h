@@ -67,6 +67,10 @@ public:
 
         if (!threadExited_.load(std::memory_order_acquire)) {
             wasDetached_.store(true, std::memory_order_release);
+            // Release watchdog ownership — the detached thread may still call evaluate().
+            // Leaking is intentional: use-after-free is worse than a small leak in this
+            // already-degraded state (thread refused to exit).
+            (void)healthWatchdog_.release();
         }
     }
 
@@ -138,18 +142,21 @@ private:
         while (!stopRequested_.load(std::memory_order_acquire)) {
             bool didWork = processAudio();
 
+            int64_t now = nowUs();
+            lastHeartbeatUs_.store(now, std::memory_order_relaxed);
+            watchdogTripped_.store(false, std::memory_order_relaxed);
+
             if (LIKELY(didWork)) {
                 consecutiveIdleCycles = 0;
-                lastHeartbeatUs_.store(nowUs(), std::memory_order_relaxed);
-                watchdogTripped_.store(false, std::memory_order_relaxed);
                 lastWakeVersion = wakeVersion_.load(std::memory_order_relaxed);
+                // Evaluate health on every work cycle too, not just idle
+                if (healthWatchdog_) {
+                    healthWatchdog_->evaluate();
+                }
                 continue;
             }
 
             consecutiveIdleCycles++;
-            int64_t now = nowUs();
-            lastHeartbeatUs_.store(now, std::memory_order_relaxed);
-            watchdogTripped_.store(false, std::memory_order_relaxed);
 
             if (UNLIKELY(now >= nextHealthLogUs)) {
                 logHealthStatus();

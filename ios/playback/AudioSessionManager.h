@@ -32,6 +32,9 @@ public:
         return !interrupted_.load(std::memory_order_acquire);
     }
 
+    // Provide direct pointer for RT callback to avoid singleton access on audio thread.
+    [[nodiscard]] std::atomic<bool>* interruptedFlagPtr() noexcept { return &interrupted_; }
+
     // Detect the current route from AVAudioSession if not yet known.
     // Safe to call before initialize() — only queries OS route state.
     void ensureRouteDetected() noexcept;

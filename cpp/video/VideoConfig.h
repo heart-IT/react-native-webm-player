@@ -29,6 +29,9 @@ namespace jitter {
     constexpr int kMinSamplesForEstimate = 6;       // Need 6 arrivals before trusting estimate
 }
 
+// Video decode thread idle sleep (base interval, microseconds)
+constexpr int64_t kDecodeIdleSleepUs = 2000;
+
 namespace validation {
     static_assert(kDecodeQueueDepth >= 2);
 }

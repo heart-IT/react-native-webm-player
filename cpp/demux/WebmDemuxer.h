@@ -55,7 +55,17 @@ enum class ParseState {
     WaitingForEBML,
     WaitingForSegment,
     ParsingTracks,
-    Streaming
+    Streaming,
+    Error
+};
+
+struct DemuxerMetrics {
+    uint64_t totalBytesFed = 0;
+    uint64_t feedDataCalls = 0;
+    uint64_t audioPacketsEmitted = 0;
+    uint64_t videoPacketsEmitted = 0;
+    uint64_t overflowCount = 0;
+    ParseState parseState = ParseState::WaitingForEBML;
 };
 
 // Append-only reader for streaming WebM data into libwebm's mkvparser.
@@ -77,6 +87,18 @@ public:
     const TrackInfo& trackInfo() const noexcept { return trackInfo_; }
 
     ParseState parseState() const noexcept { return state_; }
+    uint64_t overflowCount() const noexcept { return overflowCount_; }
+
+    DemuxerMetrics demuxerMetrics() const noexcept {
+        DemuxerMetrics m{};
+        m.totalBytesFed = totalBytesFed_;
+        m.feedDataCalls = feedDataCalls_;
+        m.audioPacketsEmitted = audioPacketsEmitted_;
+        m.videoPacketsEmitted = videoPacketsEmitted_;
+        m.overflowCount = overflowCount_;
+        m.parseState = state_;
+        return m;
+    }
 
     void reset();
 
@@ -95,9 +117,19 @@ private:
     TrackInfo trackInfo_;
     ParseState state_ = ParseState::WaitingForEBML;
     std::string parseError_;
+    long long ebmlHeaderEndPos_ = 0;
+    int parseRetryCount_ = 0;
 
     // Track the lowest buffer offset still needed so we can compact
     long long compactOffset_ = 0;
+    long long pendingCompactPos_ = 0;  // Deferred compaction target (applied at next feedData)
+    uint64_t overflowCount_ = 0;
+
+    // Metrics counters
+    uint64_t totalBytesFed_ = 0;
+    uint64_t feedDataCalls_ = 0;
+    uint64_t audioPacketsEmitted_ = 0;
+    uint64_t videoPacketsEmitted_ = 0;
 };
 
 }  // namespace media::demux

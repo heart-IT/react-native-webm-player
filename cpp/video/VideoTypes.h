@@ -34,6 +34,12 @@ struct VideoStreamMetrics {
     std::atomic<uint64_t> gapsOver100ms{0};
     std::atomic<uint64_t> gapsOver500ms{0};
 
+    // Clock drift tracking
+    std::atomic<int32_t> driftPpm{0};
+
+    // Keyframe recovery state
+    std::atomic<bool> needsKeyFrame{true};
+
     void reset() noexcept {
         framesReceived.store(0, std::memory_order_relaxed);
         framesDecoded.store(0, std::memory_order_relaxed);
@@ -52,6 +58,8 @@ struct VideoStreamMetrics {
         gapsOver50ms.store(0, std::memory_order_relaxed);
         gapsOver100ms.store(0, std::memory_order_relaxed);
         gapsOver500ms.store(0, std::memory_order_relaxed);
+        driftPpm.store(0, std::memory_order_relaxed);
+        needsKeyFrame.store(true, std::memory_order_relaxed);
     }
 };
 

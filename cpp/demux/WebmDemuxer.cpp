@@ -15,15 +15,15 @@ class StreamReader final : public mkvparser::IMkvReader {
 public:
     static constexpr size_t kMaxBufferSize = 2 * 1024 * 1024;  // 2MB cap
 
-    StreamReader() = default;
+    StreamReader() { buffer_.reserve(65536); }
 
-    // Returns false if buffer would exceed max size
-    bool append(const uint8_t* data, size_t len) {
-        if (buffer_.size() + len > kMaxBufferSize) {
-            return false;
-        }
-        buffer_.insert(buffer_.end(), data, data + len);
-        return true;
+    // Returns number of bytes accepted (may be < len if buffer nearly full)
+    size_t append(const uint8_t* data, size_t len) {
+        size_t available = (buffer_.size() < kMaxBufferSize) ? kMaxBufferSize - buffer_.size() : 0;
+        size_t accepted = std::min(len, available);
+        if (accepted == 0) return 0;
+        buffer_.insert(buffer_.end(), data, data + accepted);
+        return accepted;
     }
 
     // IMkvReader interface
@@ -34,7 +34,7 @@ public:
         }
         auto upos = static_cast<size_t>(localPos);
         auto ulen = static_cast<size_t>(len);
-        if (upos + ulen > buffer_.size()) {
+        if (ulen > buffer_.size() || upos > buffer_.size() - ulen) {
             return -1;  // Not enough data available yet
         }
         std::memcpy(buf, buffer_.data() + upos, ulen);
@@ -95,6 +95,12 @@ static constexpr int64_t kDefaultAudioDurationUs = 20'000;
 static constexpr size_t kMinBytesForEBML = 64;
 static constexpr size_t kMinBytesForSegment = 256;
 
+// Max retries for header parsing before entering permanent error state
+static constexpr int kMaxParseRetries = 3;
+
+// Consecutive unparseable blocks before reporting a stall
+static constexpr int kMaxConsecutiveBlockErrors = 3;
+
 WebmDemuxer::WebmDemuxer()
     : reader_(std::make_unique<StreamReader>()) {}
 
@@ -102,13 +108,43 @@ WebmDemuxer::~WebmDemuxer() = default;
 
 DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     DemuxResult result;
+    result.audioPackets.reserve(10);
+    result.videoPackets.reserve(4);
+
+    ++feedDataCalls_;
+
+    // Compact data from the previous feedData call. Deferred here so that
+    // packet pointers returned in the previous DemuxResult remain valid
+    // until the caller invokes feedData again (contract in WebmDemuxer.h:34-36).
+    if (pendingCompactPos_ > 0) {
+        reader_->compact(pendingCompactPos_);
+        pendingCompactPos_ = 0;
+    }
 
     if (!data || len == 0) {
         return result;
     }
 
-    if (!reader_->append(data, len)) {
+    totalBytesFed_ += len;
+    size_t totalAccepted = 0;
+    size_t accepted = reader_->append(data, len);
+    totalAccepted += accepted;
+
+    if (accepted == 0 && state_ == ParseState::Streaming) {
+        // Buffer full — parse existing data to advance compaction, then retry.
+        // Flush deferred compaction immediately so append can succeed.
+        parseBlocks(result);
+        if (pendingCompactPos_ > 0) {
+            reader_->compact(pendingCompactPos_);
+            pendingCompactPos_ = 0;
+        }
+        accepted = reader_->append(data + totalAccepted, len - totalAccepted);
+        totalAccepted += accepted;
+    }
+
+    if (totalAccepted == 0) {
         result.error = "demuxer buffer overflow";
+        ++overflowCount_;
         return result;
     }
 
@@ -116,23 +152,42 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     switch (state_) {
     case ParseState::WaitingForEBML:
         if (!parseEBMLHeader()) {
-            if (!parseError_.empty()) result.error = parseError_;
+            if (!parseError_.empty()) {
+                if (++parseRetryCount_ >= kMaxParseRetries) {
+                    state_ = ParseState::Error;
+                    result.error = "permanent parse failure: " + parseError_;
+                } else {
+                    result.error = parseError_;
+                }
+            }
             return result;
         }
+        parseRetryCount_ = 0;
         state_ = ParseState::WaitingForSegment;
         [[fallthrough]];
 
     case ParseState::WaitingForSegment:
         if (!parseSegment()) {
-            if (!parseError_.empty()) result.error = parseError_;
+            if (!parseError_.empty()) {
+                if (++parseRetryCount_ >= kMaxParseRetries) {
+                    state_ = ParseState::Error;
+                    result.error = "permanent parse failure: " + parseError_;
+                } else {
+                    result.error = parseError_;
+                }
+            }
             return result;
         }
+        parseRetryCount_ = 0;
         state_ = ParseState::ParsingTracks;
         [[fallthrough]];
 
     case ParseState::ParsingTracks:
         if (!parseTracks()) {
-            return result;  // Need more data
+            if (state_ == ParseState::Error) {
+                result.error = "permanent parse failure: " + parseError_;
+            }
+            return result;
         }
         state_ = ParseState::Streaming;
         [[fallthrough]];
@@ -140,6 +195,10 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     case ParseState::Streaming:
         parseBlocks(result);
         break;
+
+    case ParseState::Error:
+        result.error = "demuxer in error state, call reset() to recover";
+        return result;
     }
 
     return result;
@@ -158,22 +217,12 @@ bool WebmDemuxer::parseEBMLHeader() {
         return false;
     }
     parseError_.clear();
+    ebmlHeaderEndPos_ = pos;
     return true;
 }
 
 bool WebmDemuxer::parseSegment() {
-    long long pos = 0;
-
-    // Find the start of the Segment element
-    // EBMLHeader::Parse leaves us at end of header; Segment starts after
-    // Re-parse the header to get the position after it
-    {
-        mkvparser::EBMLHeader tmpHeader;
-        long long ret = tmpHeader.Parse(reader_.get(), pos);
-        if (ret < 0) {
-            return false;
-        }
-    }
+    long long pos = ebmlHeaderEndPos_;
 
     mkvparser::Segment* rawSegment = nullptr;
     long long ret = mkvparser::Segment::CreateInstance(reader_.get(), pos, rawSegment);
@@ -196,9 +245,15 @@ bool WebmDemuxer::parseTracks() {
     // Load headers (tracks, seek head, info, etc.)
     // Returns 0 on success, negative on error/need more data
     long ret = segment_->Load();
-    // E_BUFFER_NOT_FULL == mkvparser::E_BUFFER_NOT_FULL == -2
     if (ret < 0) {
-        return false;  // Need more data or error
+        if (ret == mkvparser::E_BUFFER_NOT_FULL) {
+            return false;  // Need more data
+        }
+        parseError_ = "segment load failed";
+        if (++parseRetryCount_ >= kMaxParseRetries) {
+            state_ = ParseState::Error;
+        }
+        return false;
     }
 
     const mkvparser::Tracks* tracks = segment_->GetTracks();
@@ -245,6 +300,12 @@ bool WebmDemuxer::parseTracks() {
         }
     }
 
+    if (trackInfo_.audioTrackNum < 0 && trackInfo_.videoTrackNum < 0) {
+        parseError_ = "no supported tracks (need A_OPUS or V_VP9)";
+        state_ = ParseState::Error;
+        return false;
+    }
+
     // Initialize cluster iteration
     cluster_ = segment_->GetFirst();
     blockEntry_ = nullptr;
@@ -257,6 +318,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
     }
 
     long long latestConsumedPos = compactOffset_;
+    int consecutiveBlockErrors = 0;
 
     while (cluster_ && !cluster_->EOS()) {
         // If we haven't started iterating this cluster's blocks, get the first entry
@@ -271,6 +333,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         while (blockEntry_ && !blockEntry_->EOS()) {
             const mkvparser::Block* block = blockEntry_->GetBlock();
             if (!block) {
+                ++consecutiveBlockErrors;
                 // Advance to next block entry
                 long status = cluster_->GetNext(blockEntry_, blockEntry_);
                 if (status < 0) {
@@ -278,6 +341,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 }
                 continue;
             }
+            consecutiveBlockErrors = 0;
 
             long long trackNum = block->GetTrackNumber();
             int frameCount = block->GetFrameCount();
@@ -292,8 +356,10 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 // Verify the data is readable from our buffer
                 const uint8_t* frameData = reader_->dataAt(frame.pos);
                 if (!frameData) {
-                    // Frame data not yet available or compacted
-                    return;
+                    // Frame data beyond readable range — likely compacted or
+                    // gap in stream. Skip this block to prevent permanent stall.
+                    ++consecutiveBlockErrors;
+                    break;
                 }
 
                 if (trackNum == trackInfo_.audioTrackNum) {
@@ -303,6 +369,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.ptsUs = ptsUs;
                     pkt.durationUs = kDefaultAudioDurationUs;
                     result.audioPackets.push_back(pkt);
+                    ++audioPacketsEmitted_;
                 } else if (trackNum == trackInfo_.videoTrackNum) {
                     VideoPacket pkt;
                     pkt.data = frameData;
@@ -310,6 +377,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.ptsUs = ptsUs;
                     pkt.isKeyFrame = block->IsKey();
                     result.videoPackets.push_back(pkt);
+                    ++videoPacketsEmitted_;
                 }
 
                 // Track the end of this frame for compaction
@@ -352,17 +420,23 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         blockEntry_ = nullptr;
     }
 
-    // Compact consumed data from the buffer
+    // Report if blocks are consistently unparseable despite data being available
+    if (consecutiveBlockErrors >= kMaxConsecutiveBlockErrors && result.audioPackets.empty() && result.videoPackets.empty()) {
+        result.error = "block parse stall: consecutive unparseable blocks";
+    }
+
+    // Schedule compaction for the start of the next feedData() call.
+    // Deferring compaction ensures packet data pointers in the returned
+    // DemuxResult remain valid until the caller processes them.
     if (latestConsumedPos > compactOffset_) {
         compactOffset_ = latestConsumedPos;
-        // Don't compact too aggressively — only compact data well before current parse pos.
-        // The segment and cluster structures may reference earlier positions for headers,
-        // so we compact conservatively up to the start of the current cluster.
         if (cluster_ && !cluster_->EOS()) {
             long long safePos = cluster_->GetPosition();
             if (safePos > 0) {
-                reader_->compact(safePos);
+                pendingCompactPos_ = safePos;
             }
+        } else {
+            pendingCompactPos_ = latestConsumedPos;
         }
     }
 }
@@ -376,7 +450,15 @@ void WebmDemuxer::reset() {
     trackInfo_ = TrackInfo{};
     state_ = ParseState::WaitingForEBML;
     parseError_.clear();
+    parseRetryCount_ = 0;
+    ebmlHeaderEndPos_ = 0;
     compactOffset_ = 0;
+    pendingCompactPos_ = 0;
+    overflowCount_ = 0;
+    totalBytesFed_ = 0;
+    feedDataCalls_ = 0;
+    audioPacketsEmitted_ = 0;
+    videoPacketsEmitted_ = 0;
 }
 
 }  // namespace media::demux

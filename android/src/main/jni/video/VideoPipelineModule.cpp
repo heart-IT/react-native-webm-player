@@ -139,6 +139,15 @@ jsi::Value VideoPipelineModule::getMetrics(jsi::Runtime& rt) {
     result.setProperty(rt, "bufferTargetUs", static_cast<double>(m.bufferTargetUs.load(std::memory_order_relaxed)));
     result.setProperty(rt, "lateFrames", static_cast<double>(m.lateFrames.load(std::memory_order_relaxed)));
     result.setProperty(rt, "skippedFrames", static_cast<double>(m.skippedFrames.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "decoderResets", static_cast<double>(m.decoderResets.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "surfaceLostCount", static_cast<double>(m.surfaceLostCount.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "maxInterFrameGapMs", static_cast<double>(m.maxInterFrameGapUs.load(std::memory_order_relaxed)) / 1000.0);
+    result.setProperty(rt, "gapsOver50ms", static_cast<double>(m.gapsOver50ms.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "gapsOver100ms", static_cast<double>(m.gapsOver100ms.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "gapsOver500ms", static_cast<double>(m.gapsOver500ms.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "driftPpm", static_cast<double>(m.driftPpm.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "queueDepth", static_cast<int>(frameQueue_.pendingFrames()));
+    result.setProperty(rt, "needsKeyFrame", frameQueue_.isAwaitingKeyFrame());
     return result;
 }
 

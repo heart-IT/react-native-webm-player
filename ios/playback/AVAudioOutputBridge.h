@@ -37,11 +37,9 @@ namespace ios_audio {
     constexpr double kSampleRateTolerance = 0.001;
     // Low latency threshold
     constexpr double kLowLatencyThresholdSec = 0.010;
-    // Restart delay for iOS (separate from Android AAudio constant)
-    constexpr int32_t kRestartDelayMs = 100;
+    constexpr int32_t kRestartDelayMs = config::audio_output::kRestartDelayMs;
     // Maximum wait for in-flight callbacks during shutdown (microseconds)
     constexpr int64_t kCallbackDrainTimeoutUs = 50000;  // 50ms
-    constexpr int64_t kCallbackDrainPollUs = 100;       // 100us poll interval
 }
 
 struct AVAudioConfig {
@@ -193,6 +191,11 @@ private:
     std::atomic<int32_t> grantedSampleRate_{0};
     std::atomic<bool> sampleRateValid_{false};
 
+    // Cached interrupted flag for RT-safe access (avoids singleton on audio callback)
+    std::atomic<bool>* interruptedFlag_{nullptr};
+
+public:
+    void setInterruptedFlag(std::atomic<bool>* flag) noexcept { interruptedFlag_ = flag; }
 };
 
 }  // namespace media

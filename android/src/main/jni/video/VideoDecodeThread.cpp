@@ -11,6 +11,13 @@ bool VideoDecodeThread::start(media::VideoFrameQueue* queue) {
     if (!queue) return false;
 
     frameQueue_ = queue;
+    frameQueue_->setWakeCallback([this]() { wake(); });
+    frameQueue_->setResetCallback([this]() {
+        pendingClockReset_.store(true, std::memory_order_release);
+        wake();
+    });
+    threadExited_.store(false, std::memory_order_relaxed);
+    wakeVersion_.store(0, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&VideoDecodeThread::run, this);
     return true;
@@ -18,8 +25,17 @@ bool VideoDecodeThread::start(media::VideoFrameQueue* queue) {
 
 void VideoDecodeThread::stop() {
     running_.store(false, std::memory_order_release);
-    if (thread_.joinable()) {
-        thread_.join();
+    wake();
+    if (frameQueue_) {
+        frameQueue_->setWakeCallback(nullptr);
+        frameQueue_->setResetCallback(nullptr);
+    }
+    media::timedJoin(thread_, threadExited_, media::config::thread::kThreadJoinTimeoutMs, "VideoDecodeThread");
+
+    if (!threadExited_.load(std::memory_order_acquire)) {
+        wasDetached_.store(true, std::memory_order_release);
+        MEDIA_LOG_E("VideoDecodeThread: thread detached, skipping resource destruction");
+        return;
     }
 
     std::lock_guard<std::mutex> lk(decoderMtx_);
@@ -27,7 +43,9 @@ void VideoDecodeThread::stop() {
     renderClock_.reset();
     fpsCounter_.reset();
     lastAnchorTimeUs_ = 0;
+    consecutiveErrors_ = 0;
     syncCoordinator_.reset();
+    pendingClockReset_.store(false, std::memory_order_relaxed);
     frameQueue_ = nullptr;
 }
 
@@ -64,13 +82,23 @@ void VideoDecodeThread::run() {
     media::thread_affinity::configureCurrentThreadForDecode();
 
     media::EncodedVideoFrame frame;
+    int consecutiveIdleCycles = 0;
+    uint32_t lastWakeVersion = 0;
 
     while (running_.load(std::memory_order_acquire)) {
         bool didWork = false;
 
+        if (pendingClockReset_.exchange(false, std::memory_order_acquire)) {
+            renderClock_.reset();
+            lastAnchorTimeUs_ = 0;
+            syncCoordinator_.reset();
+        }
+
         if (!media::VideoSurfaceRegistry::instance().hasSurface()) {
             std::lock_guard<std::mutex> lk(decoderMtx_);
             decoder_.reset();
+            renderClock_.reset();
+            lastAnchorTimeUs_ = 0;
         } else {
             int64_t now = media::nowUs();
 
@@ -97,6 +125,7 @@ void VideoDecodeThread::run() {
                                         media::video_config::jitter::kMinBufferUs,
                                         media::video_config::jitter::kMaxBufferUs);
             renderClock_.updateBufferTarget(adjustedTarget);
+            renderClock_.setPlaybackRate(frameQueue_->playbackRate());
 
             // Update jitter metrics
             frameQueue_->metrics().jitterUs.store(frameQueue_->jitterUs(), std::memory_order_relaxed);
@@ -109,6 +138,7 @@ void VideoDecodeThread::run() {
                 if (dec) {
                     if (dec->submitFrame(frame.data.data(), frame.data.size(),
                                           frame.ptsUs, frame.isKeyFrame)) {
+                        consecutiveErrors_ = 0;
                         frameQueue_->metrics().framesDecoded.fetch_add(1, std::memory_order_relaxed);
                         frameQueue_->metrics().currentFps.store(
                             fpsCounter_.tick(media::nowUs()), std::memory_order_relaxed);
@@ -121,6 +151,15 @@ void VideoDecodeThread::run() {
                         syncCoordinator_.onVideoRender(frame.ptsUs, media::nowUs());
                     } else {
                         frameQueue_->metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
+                        if (++consecutiveErrors_ >= kMaxConsecutiveErrors) {
+                            MEDIA_LOG_E("VideoDecodeThread: %d consecutive errors, resetting decoder", consecutiveErrors_);
+                            destroyDecoder();
+                            renderClock_.reset();
+                            lastAnchorTimeUs_ = 0;
+                            frameQueue_->requestKeyFrame();
+                            frameQueue_->metrics().decoderResets.fetch_add(1, std::memory_order_relaxed);
+                            consecutiveErrors_ = 0;
+                        }
                     }
                 }
                 didWork = true;
@@ -136,9 +175,24 @@ void VideoDecodeThread::run() {
         }
 
         if (!didWork) {
-            std::this_thread::sleep_for(std::chrono::microseconds(2000));
+            consecutiveIdleCycles++;
+            int64_t sleepUs;
+            if (consecutiveIdleCycles < 4) {
+                sleepUs = media::video_config::kDecodeIdleSleepUs;
+            } else {
+                // Cap at shift 3 (max 16ms) to maintain 2:1 margin over 30fps frame interval
+                int backoffShift = std::min(consecutiveIdleCycles - 4, 3);
+                sleepUs = media::video_config::kDecodeIdleSleepUs << backoffShift;
+            }
+            waitForWakeOrTimeout(lastWakeVersion, sleepUs);
+            lastWakeVersion = wakeVersion_.load(std::memory_order_relaxed);
+        } else {
+            consecutiveIdleCycles = 0;
+            lastWakeVersion = wakeVersion_.load(std::memory_order_relaxed);
         }
     }
+
+    threadExited_.store(true, std::memory_order_release);
 }
 
 }  // namespace videomodule

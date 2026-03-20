@@ -3,9 +3,11 @@
 #include <mutex>
 #include <deque>
 #include <atomic>
+#include <functional>
 #include "VideoTypes.h"
 #include "VideoConfig.h"
 #include "VideoSyncController.h"
+#include "common/MediaConfig.h"
 #include "common/MediaTime.h"
 
 namespace media {
@@ -23,16 +25,36 @@ enum class PopResult : uint8_t { Nothing, Popped, PoppedWithSkip };
 // common case by reusing the last popped frame's buffer.
 class VideoFrameQueue {
 public:
+    using WakeCallback = std::function<void()>;
+    using ResetCallback = std::function<void()>;
+
     VideoFrameQueue() {
         recycleBuf_.reserve(video_config::kMaxEncodedFrameSize);
     }
-    void reset() noexcept {
+
+    void setWakeCallback(WakeCallback cb) noexcept {
         std::lock_guard<std::mutex> lk(mtx_);
-        encodedQueue_.clear();
-        needsKeyFrame_ = true;
-        lastArrivalUs_ = 0;
-        metrics_.reset();
-        jitter_.reset();
+        wakeCallback_ = std::move(cb);
+    }
+
+    // Called by the decode thread so resetStream() can reset the render clock
+    void setResetCallback(ResetCallback cb) noexcept {
+        std::lock_guard<std::mutex> lk(mtx_);
+        resetCallback_ = std::move(cb);
+    }
+
+    void reset() noexcept {
+        ResetCallback cb;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            encodedQueue_.clear();
+            needsKeyFrame_ = true;
+            lastArrivalUs_ = 0;
+            metrics_.reset();
+            jitter_.reset();
+            cb = resetCallback_;
+        }
+        if (cb) cb();
     }
 
     bool pushEncodedFrame(const uint8_t* data, size_t size,
@@ -46,11 +68,25 @@ public:
             metrics_.framesDropped.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        if (isKeyFrame) needsKeyFrame_ = false;
+        if (isKeyFrame) {
+            needsKeyFrame_ = false;
+            metrics_.needsKeyFrame.store(false, std::memory_order_relaxed);
+        }
 
         if (encodedQueue_.size() >= video_config::kDecodeQueueDepth) {
-            encodedQueue_.pop_front();
-            metrics_.framesDropped.fetch_add(1, std::memory_order_relaxed);
+            if (catchupPolicy_.load(std::memory_order_relaxed) == CatchupPolicy::DropToLive) {
+                skipToLive();
+            } else {
+                bool droppedKeyFrame = encodedQueue_.front().isKeyFrame;
+                encodedQueue_.pop_front();
+                metrics_.framesDropped.fetch_add(1, std::memory_order_relaxed);
+                // Dropping a keyframe invalidates all subsequent P-frames
+                if (droppedKeyFrame) {
+                    encodedQueue_.clear();
+                    needsKeyFrame_ = true;
+                    metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
+                }
+            }
         }
 
         int64_t arrivalUs = nowUs();
@@ -76,6 +112,7 @@ public:
         lastArrivalUs_ = arrivalUs;
 
         jitter_.onFrame(ptsUs, arrivalUs, isKeyFrame);
+        metrics_.driftPpm.store(jitter_.longTermDriftPpm(), std::memory_order_relaxed);
 
         EncodedVideoFrame frame;
         if (!recycleBuf_.empty()) {
@@ -88,6 +125,9 @@ public:
         encodedQueue_.push_back(std::move(frame));
 
         metrics_.framesReceived.fetch_add(1, std::memory_order_relaxed);
+
+        // Wake decode thread for immediate processing (avoid backoff latency)
+        if (wakeCallback_) wakeCallback_();
         return true;
     }
 
@@ -157,6 +197,7 @@ public:
     void requestKeyFrame() noexcept {
         std::lock_guard<std::mutex> lk(mtx_);
         needsKeyFrame_ = true;
+        metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
         encodedQueue_.clear();
     }
 
@@ -164,17 +205,52 @@ public:
         jitter_.setBufferTargetOverride(us);
     }
 
+    void setCatchupPolicy(CatchupPolicy p) noexcept {
+        catchupPolicy_.store(p, std::memory_order_relaxed);
+    }
+
+    void setPlaybackRate(float rate) noexcept {
+        playbackRate_.store(
+            std::clamp(rate, config::playbackrate::kMinRate, config::playbackrate::kMaxRate),
+            std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] float playbackRate() const noexcept {
+        return playbackRate_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool isAwaitingKeyFrame() const noexcept {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return needsKeyFrame_;
+    }
+
     VideoStreamMetrics& metrics() noexcept { return metrics_; }
     const VideoStreamMetrics& metrics() const noexcept { return metrics_; }
 
 private:
+    // Clear queue for DropToLive policy. Remaining non-keyframes would bypass
+    // keyframe gating in pop paths, causing video corruption. Caller must hold mtx_.
+    void skipToLive() noexcept {
+        size_t dropped = encodedQueue_.size();
+        encodedQueue_.clear();
+        if (dropped > 0) {
+            metrics_.framesDropped.fetch_add(dropped, std::memory_order_relaxed);
+            needsKeyFrame_ = true;
+            metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
+        }
+    }
+
     mutable std::mutex mtx_;
     std::deque<EncodedVideoFrame> encodedQueue_;
     bool needsKeyFrame_ = true;
+    WakeCallback wakeCallback_;
+    ResetCallback resetCallback_;
     int64_t lastArrivalUs_ = 0;
     VideoStreamMetrics metrics_;
     VideoJitterEstimator jitter_;
     std::vector<uint8_t> recycleBuf_;
+    std::atomic<CatchupPolicy> catchupPolicy_{CatchupPolicy::PlayThrough};
+    std::atomic<float> playbackRate_{config::playbackrate::kDefaultRate};
 };
 
 }  // namespace media

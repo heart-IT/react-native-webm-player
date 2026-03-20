@@ -77,6 +77,11 @@ public:
         return smoothed;
     }
 
+    // Read-only snapshot of smoothed ratio for metrics (any thread).
+    [[nodiscard]] float smoothedRatio() const noexcept {
+        return smoothedRatio_.load(std::memory_order_relaxed);
+    }
+
     [[nodiscard]] bool isActive() const noexcept {
         int32_t ppm = std::abs(driftPpm_.load(std::memory_order_relaxed));
         return ppm >= drift_config::kMinDriftPpm;
@@ -101,7 +106,7 @@ private:
 };
 
 // Buffer-depth-driven catchup — computes speedup ratio from buffer excess.
-// Audio callback only (single-threaded), no atomics needed for internal state.
+// Audio callback is the primary writer; metrics reads from any thread.
 class CatchupController {
 public:
     // Update catchup ratio based on current buffer depth vs target.
@@ -119,43 +124,47 @@ public:
 
         // Asymmetric smoothing: decay toward unity faster than ramp up.
         // Reduces sustained pitch wobble when buffer normalizes after burst.
-        float alpha = (targetRatio < smoothedRatio_)
+        float current = smoothedRatio_.load(std::memory_order_relaxed);
+        float alpha = (targetRatio < current)
             ? config::catchup::kDecayAlpha       // decaying toward unity: faster
             : config::catchup::kSmoothingAlpha;  // ramping up: slower (less audible)
-        smoothedRatio_ += alpha * (targetRatio - smoothedRatio_);
+        current += alpha * (targetRatio - current);
         // Dead-zone: snap to unity when both target and smoothed are near 1.0.
         // Only snap when the target itself is unity — otherwise the dead-zone
         // traps the smoothed ratio at 1.0 and prevents convergence
         // (per-step change α * bias can be smaller than the dead-zone width).
         if (targetRatio == 1.0f &&
-            std::abs(smoothedRatio_ - 1.0f) < config::catchup::kDeadZoneThreshold) {
-            smoothedRatio_ = 1.0f;
-            ++deadZoneSnaps_;
+            std::abs(current - 1.0f) < config::catchup::kDeadZoneThreshold) {
+            current = 1.0f;
+            deadZoneSnaps_.fetch_add(1, std::memory_order_relaxed);
         }
-        return smoothedRatio_;
+        smoothedRatio_.store(current, std::memory_order_relaxed);
+        return current;
     }
 
-    [[nodiscard]] float currentRatio() const noexcept { return smoothedRatio_; }
+    [[nodiscard]] float currentRatio() const noexcept {
+        return smoothedRatio_.load(std::memory_order_relaxed);
+    }
 
-    // Diagnostic: number of times dead-zone snapped ratio to unity.
-    // Audio callback thread only — no atomic needed.
-    [[nodiscard]] uint64_t deadZoneSnaps() const noexcept { return deadZoneSnaps_; }
+    [[nodiscard]] uint64_t deadZoneSnaps() const noexcept {
+        return deadZoneSnaps_.load(std::memory_order_relaxed);
+    }
 
     void reset() noexcept {
-        smoothedRatio_ = 1.0f;
-        deadZoneSnaps_ = 0;
+        smoothedRatio_.store(1.0f, std::memory_order_relaxed);
+        deadZoneSnaps_.store(0, std::memory_order_relaxed);
     }
 
     // Reset ratio to unity without clearing diagnostic counters.
     // Use after fast-drain where the ratio is stale but the snap count
     // should remain cumulative for the session lifetime.
     void resetRatio() noexcept {
-        smoothedRatio_ = 1.0f;
+        smoothedRatio_.store(1.0f, std::memory_order_relaxed);
     }
 
 private:
-    float smoothedRatio_ = 1.0f;
-    uint64_t deadZoneSnaps_ = 0;
+    std::atomic<float> smoothedRatio_{1.0f};
+    std::atomic<uint64_t> deadZoneSnaps_{0};
 };
 
 // Speex-based resampler for drift/catchup compensation.
@@ -190,15 +199,25 @@ class SpeexDriftResampler {
     // stays constant and update_filter() never reallocates.
     static constexpr spx_uint32_t kRateDenom = 99991;  // prime, ~0.001% precision
 
-    // Maximum combined ratio: drift (kMaxRatioDeviation) + catchup (kMaxSpeedupRatio).
-    // Both multiply: max = (1 + 0.05) * 1.05 = 1.1025. Round up for safety.
+    // Verify kRateDenom is not divisible by small primes — a composite denominator
+    // would cause varying GCD values and trigger sinc table reallocation (malloc)
+    // on the audio callback thread. Full primality is verified by inspection;
+    // these checks catch accidental edits to common composite values.
+    static_assert(kRateDenom % 2 != 0, "kRateDenom must be odd (prime)");
+    static_assert(kRateDenom % 3 != 0, "kRateDenom must not be divisible by 3");
+    static_assert(kRateDenom % 5 != 0, "kRateDenom must not be divisible by 5");
+    static_assert(kRateDenom % 7 != 0, "kRateDenom must not be divisible by 7");
+
+    // Maximum combined ratio: user rate * drift * catchup.
+    // max = 2.0 * 1.05 * 1.05 = 2.205.
     static constexpr float kMaxCombinedRatio =
+        config::playbackrate::kMaxRate *
         (1.0f + drift_config::kMaxRatioDeviation) * config::catchup::kMaxSpeedupRatio;
 
-    // Minimum combined ratio: drift slowdown only (no catchup slowdown).
-    // min = 1 - 0.05 = 0.95.
+    // Minimum combined ratio: user rate * drift slowdown.
+    // min = 0.5 * 0.95 = 0.475.
     static constexpr float kMinCombinedRatio =
-        1.0f - drift_config::kMaxRatioDeviation;
+        config::playbackrate::kMinRate * (1.0f - drift_config::kMaxRatioDeviation);
 
     // Pre-init ratio: initialize with the maximum combined ratio so Speex
     // allocates filter tables large enough for any ratio we'll use. Subsequent

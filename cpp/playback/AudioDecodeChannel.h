@@ -271,7 +271,11 @@ public:
         if (!decodeWorkPending_.load(std::memory_order_acquire)) return false;
         if (!isActive()) return false;
 
-        std::lock_guard<std::mutex> lk(decoderMtx_);
+        // try_lock avoids priority inversion: decode thread (SCHED_FIFO) must
+        // never block on the JS thread holding decoderMtx_ during lifecycle ops.
+        // If contended, skip this cycle — decode thread retries in ~500us.
+        std::unique_lock<std::mutex> lk(decoderMtx_, std::try_to_lock);
+        if (!lk.owns_lock()) return false;
 
         if (needsDecoderReset_.exchange(false, std::memory_order_acq_rel)) {
             if (decoder_) decoder_->reset();
@@ -332,7 +336,9 @@ public:
     }
 
     [[nodiscard]] bool generatePLC() noexcept {
-        std::lock_guard<std::mutex> lk(decoderMtx_);
+        // try_lock avoids priority inversion (see processPendingDecode comment).
+        std::unique_lock<std::mutex> lk(decoderMtx_, std::try_to_lock);
+        if (!lk.owns_lock()) return false;
 
         if (!decoder_ || !isActive()) return false;
 
@@ -434,7 +440,13 @@ public:
         {
             int64_t totalBuffered = bufferedDurationUs();
             int64_t target = bufferTargetUs_.load(std::memory_order_relaxed);
-            int64_t excess = totalBuffered - target - config::fastdrain::kExcessThresholdUs;
+            int64_t policyThreshold;
+            switch (catchupPolicy_.load(std::memory_order_relaxed)) {
+                case CatchupPolicy::Accelerate:  policyThreshold = config::fastdrain::kExcessThresholdAccelerate; break;
+                case CatchupPolicy::DropToLive:   policyThreshold = config::fastdrain::kExcessThresholdDropToLive; break;
+                default:                          policyThreshold = config::fastdrain::kExcessThresholdPlayThrough; break;
+            }
+            int64_t excess = totalBuffered - target - policyThreshold;
             if (UNLIKELY(excess > 0)) {
                 size_t framesToDrain = static_cast<size_t>(excess / config::audio::kFrameDurationUs);
                 // Reserve at least 1 decoded frame for output to prevent underrun
@@ -466,11 +478,12 @@ public:
             }
         }
 
-        // Compute combined ratio: drift * catchup
+        // Compute combined ratio: drift * catchup * user playback rate
         float driftRatio = driftCompensator_.currentRatio();
         float catchupRatio = catchup_.update(
             bufferedDurationUs(), bufferTargetUs_.load(std::memory_order_relaxed));
-        float combinedRatio = driftRatio * catchupRatio;
+        float userRate = playbackRate_.load(std::memory_order_relaxed);
+        float combinedRatio = driftRatio * catchupRatio * userRate;
 
         // Fast path: no resampling needed (ratio ~= 1.0).
         // Hysteresis prevents oscillation between fast/resampled paths when
@@ -730,6 +743,20 @@ public:
             std::memory_order_relaxed);
     }
 
+    void setCatchupPolicy(CatchupPolicy p) noexcept {
+        catchupPolicy_.store(p, std::memory_order_relaxed);
+    }
+
+    void setPlaybackRate(float rate) noexcept {
+        playbackRate_.store(
+            std::clamp(rate, config::playbackrate::kMinRate, config::playbackrate::kMaxRate),
+            std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] float playbackRate() const noexcept {
+        return playbackRate_.load(std::memory_order_relaxed);
+    }
+
     [[nodiscard]] int64_t bufferTarget() const noexcept {
         return bufferTargetUs_.load(std::memory_order_relaxed);
     }
@@ -754,6 +781,22 @@ public:
     // Safe to call from any thread (sets atomic flag consumed by readSamples).
     void requestDriftReset() noexcept {
         driftResetRequested_.store(true, std::memory_order_release);
+    }
+
+    // Request encoded queue clear from the decode thread (SPSC-safe).
+    // Used by resetStreamState() to flush stale frames from a previous stream.
+    void requestEncodedClear() noexcept {
+        encodedClearRequested_.store(true, std::memory_order_release);
+    }
+
+    // Snapshot of current drift ratio for metrics (any thread, read-only).
+    [[nodiscard]] float driftCurrentRatio() const noexcept {
+        return driftCompensator_.smoothedRatio();
+    }
+
+    // Snapshot of current catchup ratio for metrics (any thread, read-only).
+    [[nodiscard]] float catchupCurrentRatio() const noexcept {
+        return catchup_.currentRatio();
     }
 
     [[nodiscard]] uint64_t catchupDeadZoneSnaps() const noexcept {
@@ -991,6 +1034,8 @@ private:
 
     alignas(config::kCacheLineSize) std::atomic<float> targetGain_{config::mix::kDefaultGain};
     std::atomic<int64_t> bufferTargetUs_{config::jitter::kDefaultBufferUs};
+    std::atomic<CatchupPolicy> catchupPolicy_{CatchupPolicy::PlayThrough};
+    std::atomic<float> playbackRate_{config::playbackrate::kDefaultRate};
 
     StreamMetrics metrics_;
 

@@ -435,7 +435,15 @@ void AudioSessionManager::onAudioFocusChanged(int focusChange) noexcept {
             return;
     }
 
-    MEDIA_LOG_I("AudioFocus: %d → state=%d", focusChange, static_cast<int>(state));
+    // Update interrupted flag for RT-safe muting in AAudio data callback.
+    // Lost and LostTransient silence immediately; LostTransientCanDuck does not
+    // (ducking is handled by gain reduction in JS). Mirrors iOS interruptedFlag_.
+    interrupted_.store(state == AudioFocusState::Lost ||
+                       state == AudioFocusState::LostTransient,
+                       std::memory_order_release);
+
+    MEDIA_LOG_I("AudioFocus: %d → state=%d interrupted=%d", focusChange,
+                static_cast<int>(state), interrupted_.load(std::memory_order_relaxed));
 
     AudioFocusCallback cb;
     {

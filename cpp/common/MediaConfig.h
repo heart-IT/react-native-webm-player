@@ -9,6 +9,12 @@
     #include <new>
 #endif
 
+namespace media {
+
+enum class CatchupPolicy : uint8_t { PlayThrough = 0, Accelerate = 1, DropToLive = 2 };
+
+}  // namespace media
+
 namespace media::config {
 
 #ifdef __cpp_lib_hardware_interference_size
@@ -147,7 +153,12 @@ namespace fastdrain {
     // and fast-drain only fires for large backlogs (5+ extra frames).
     // At 5% speedup, the resampler drains 100ms excess in ~2 seconds —
     // fast enough for normal jitter, no audible time skip.
-    constexpr int64_t kExcessThresholdUs = 100000;  // 5 frames
+    constexpr int64_t kExcessThresholdPlayThrough = 100000;  // 5 frames
+    constexpr int64_t kExcessThresholdAccelerate = 60000;    // 3 frames
+    constexpr int64_t kExcessThresholdDropToLive = 20000;    // 1 frame
+
+    // Default alias for backward compatibility with existing code
+    constexpr int64_t kExcessThresholdUs = kExcessThresholdPlayThrough;
 }
 
 namespace crossfade {
@@ -177,9 +188,19 @@ namespace logging {
                   "Drop log interval must be power of 2");
 }
 
+namespace playbackrate {
+    constexpr float kMinRate = 0.5f;
+    constexpr float kMaxRate = 2.0f;
+    constexpr float kDefaultRate = 1.0f;
+}
+
+namespace audio_output {
+    constexpr int32_t kRestartDelayMs = 100;
+}
+
 namespace aaudio {
     constexpr int32_t kBufferBurstMultiplier = 2;
-    constexpr int32_t kRestartDelayMs = 100;
+    constexpr int32_t kRestartDelayMs = audio_output::kRestartDelayMs;
 }
 
 namespace pool {

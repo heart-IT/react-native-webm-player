@@ -1,10 +1,5 @@
 import React from 'react'
-import {
-  NativeModules,
-  Platform,
-  requireNativeComponent,
-  type ViewStyle
-} from 'react-native'
+import { NativeModules, Platform, requireNativeComponent, type ViewStyle } from 'react-native'
 
 // --- Types ---
 
@@ -18,6 +13,7 @@ export interface PlayerMetrics {
     timeSinceHeartbeatMs: number
   }
   quality: {
+    framesReceived: number
     underruns: number
     framesDropped: number
     framesDrained: number
@@ -50,10 +46,20 @@ export interface PlayerMetrics {
     gapsOver50ms: number
     gapsOver100ms: number
     gapsOver500ms: number
+    driftPpm: number
+    queueDepth: number
+    needsKeyFrame: boolean
+  }
+  pipeline: {
+    audioStreamState: number
+    currentGain: number
+    bufferedDurationUs: number
+    decodedDurationUs: number
   }
   session: {
     uptimeMs: number
     samplesOutput: number
+    playbackRate: number
   }
   latency: {
     mode: string
@@ -80,6 +86,16 @@ export interface PlayerMetrics {
   drift: {
     driftPpm: number
     active: boolean
+    currentRatio: number
+    catchupRatio: number
+  }
+  demux: {
+    totalBytesFed: number
+    feedDataCalls: number
+    audioPacketsEmitted: number
+    videoPacketsEmitted: number
+    overflowCount: number
+    parseState: number
   }
 }
 
@@ -149,9 +165,32 @@ export enum StreamHealth {
   Failed = 4
 }
 
+/**
+ * Catch-up policy for when player falls behind live.
+ * Values must match native CatchupPolicy enum.
+ */
+export enum CatchupPolicy {
+  PlayThrough = 0,
+  Accelerate = 1,
+  DropToLive = 2
+}
+
+/**
+ * Stream status context set by the integrator.
+ * Enriches health events with reason for data stalls.
+ * Values must match native StreamStatus enum.
+ */
+export enum StreamStatus {
+  Live = 0,
+  Buffering = 1,
+  Ended = 2,
+  NoPeers = 3
+}
+
 export interface HealthEvent {
   status: StreamHealth
   detail: string
+  streamStatus: StreamStatus
   metrics: {
     underruns: number
     decodeErrors: number
@@ -159,6 +198,12 @@ export interface HealthEvent {
     avSyncOffsetUs: number
     bufferTargetUs: number
     gapsOver100ms: number
+    gapsOver500ms: number
+    ptsDiscontinuities: number
+    decoderResets: number
+    videoFramesReceived: number
+    videoFramesDecoded: number
+    videoFramesDropped: number
   }
 }
 
@@ -204,9 +249,7 @@ interface MediaPipelineJSI {
   resetStream(): boolean
   requestKeyFrame(): boolean
   warmUp(): boolean
-  setKeyFrameNeededCallback(
-    callback: KeyFrameNeededCallback | null
-  ): boolean
+  setKeyFrameNeededCallback(callback: KeyFrameNeededCallback | null): boolean
   pause(): boolean
   resume(): boolean
   isPaused(): boolean
@@ -214,6 +257,9 @@ interface MediaPipelineJSI {
   getPlaybackState(): PlaybackState
   setBufferTarget(audioMs: number, videoMs: number): boolean
   setAudioFocusCallback(callback: AudioFocusCallback | null): boolean
+  setCatchupPolicy(policy: CatchupPolicy): boolean
+  setStreamStatus(status: StreamStatus): boolean
+  setPlaybackRate(rate: number): boolean
 }
 
 declare global {
@@ -221,9 +267,7 @@ declare global {
   var __MediaPipeline: MediaPipelineJSI | undefined
 }
 
-const WebmPlayerNativeModule = NativeModules.WebmPlayer as
-  | WebmPlayerModuleType
-  | undefined
+const WebmPlayerNativeModule = NativeModules.WebmPlayer as WebmPlayerModuleType | undefined
 
 let jsiInstalled = false
 
@@ -235,9 +279,7 @@ function ensureJSIInstalled(): void {
   }
 
   if (!WebmPlayerNativeModule) {
-    throw new Error(
-      'WebmPlayer native module not found. Make sure the library is properly linked.'
-    )
+    throw new Error('WebmPlayer native module not found. Make sure the library is properly linked.')
   }
 
   const success = WebmPlayerNativeModule.install()
@@ -266,19 +308,15 @@ export const MediaPipeline = {
   start: (): boolean => getMediaPipeline().start(),
   stop: (): boolean => getMediaPipeline().stop(),
   isRunning: (): boolean => getMediaPipeline().isRunning(),
-  feedData: (buffer: ArrayBuffer | Uint8Array): boolean =>
-    getMediaPipeline().feedData(buffer),
+  feedData: (buffer: ArrayBuffer | Uint8Array): boolean => getMediaPipeline().feedData(buffer),
   setMuted: (muted: boolean): boolean => getMediaPipeline().setMuted(muted),
   setGain: (gain: number): boolean => getMediaPipeline().setGain(gain),
   getMetrics: (): PlayerMetrics => getMediaPipeline().getMetrics(),
   setAudioRoute: (route: AudioRoute, deviceId?: string): boolean =>
     getMediaPipeline().setAudioRoute(route, deviceId),
-  getAvailableAudioRoutes: (): AudioRoute[] =>
-    getMediaPipeline().getAvailableAudioRoutes(),
-  getAvailableAudioDevices: (): AudioDeviceInfo[] =>
-    getMediaPipeline().getAvailableAudioDevices(),
-  getCurrentAudioRoute: (): AudioRoute =>
-    getMediaPipeline().getCurrentAudioRoute(),
+  getAvailableAudioRoutes: (): AudioRoute[] => getMediaPipeline().getAvailableAudioRoutes(),
+  getAvailableAudioDevices: (): AudioDeviceInfo[] => getMediaPipeline().getAvailableAudioDevices(),
+  getCurrentAudioRoute: (): AudioRoute => getMediaPipeline().getCurrentAudioRoute(),
   setAudioRouteCallback: (callback: AudioRouteCallback | null): boolean =>
     getMediaPipeline().setAudioRouteCallback(callback),
   setHealthCallback: (callback: HealthCallback | null): boolean =>
@@ -287,9 +325,8 @@ export const MediaPipeline = {
   resetStream: (): boolean => getMediaPipeline().resetStream(),
   requestKeyFrame: (): boolean => getMediaPipeline().requestKeyFrame(),
   warmUp: (): boolean => getMediaPipeline().warmUp(),
-  setKeyFrameNeededCallback: (
-    callback: KeyFrameNeededCallback | null
-  ): boolean => getMediaPipeline().setKeyFrameNeededCallback(callback),
+  setKeyFrameNeededCallback: (callback: KeyFrameNeededCallback | null): boolean =>
+    getMediaPipeline().setKeyFrameNeededCallback(callback),
   pause: (): boolean => getMediaPipeline().pause(),
   resume: (): boolean => getMediaPipeline().resume(),
   isPaused: (): boolean => getMediaPipeline().isPaused(),
@@ -298,13 +335,15 @@ export const MediaPipeline = {
   setBufferTarget: (audioMs: number, videoMs: number): boolean =>
     getMediaPipeline().setBufferTarget(audioMs, videoMs),
   setAudioFocusCallback: (callback: AudioFocusCallback | null): boolean =>
-    getMediaPipeline().setAudioFocusCallback(callback)
+    getMediaPipeline().setAudioFocusCallback(callback),
+  setCatchupPolicy: (policy: CatchupPolicy): boolean => getMediaPipeline().setCatchupPolicy(policy),
+  setStreamStatus: (status: StreamStatus): boolean => getMediaPipeline().setStreamStatus(status),
+  setPlaybackRate: (rate: number): boolean => getMediaPipeline().setPlaybackRate(rate)
 }
 
 // --- VideoView Native Component ---
 
-const NativeVideoView =
-  requireNativeComponent<VideoViewProps>('WebmVideoView')
+const NativeVideoView = requireNativeComponent<VideoViewProps>('WebmVideoView')
 
 /**
  * Native video view for rendering decoded VP9 frames from the broadcast stream.

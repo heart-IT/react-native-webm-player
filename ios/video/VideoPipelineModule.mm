@@ -3,6 +3,7 @@
 #include "../../cpp/common/MediaLog.h"
 #include "../../cpp/common/JsiUtils.h"
 #include "../../cpp/common/MediaTime.h"
+#include "../../cpp/common/ThreadAffinity.h"
 #include "../../cpp/video/VideoSurfaceRegistry.h"
 #import <AVFoundation/AVFoundation.h>
 
@@ -153,38 +154,74 @@ jsi::Value VideoPipelineModule::getMetrics(jsi::Runtime& rt) {
     result.setProperty(rt, "bufferTargetUs", static_cast<double>(m.bufferTargetUs.load(std::memory_order_relaxed)));
     result.setProperty(rt, "lateFrames", static_cast<double>(m.lateFrames.load(std::memory_order_relaxed)));
     result.setProperty(rt, "skippedFrames", static_cast<double>(m.skippedFrames.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "decoderResets", static_cast<double>(m.decoderResets.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "surfaceLostCount", static_cast<double>(m.surfaceLostCount.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "maxInterFrameGapMs", static_cast<double>(m.maxInterFrameGapUs.load(std::memory_order_relaxed)) / 1000.0);
+    result.setProperty(rt, "gapsOver50ms", static_cast<double>(m.gapsOver50ms.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "gapsOver100ms", static_cast<double>(m.gapsOver100ms.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "gapsOver500ms", static_cast<double>(m.gapsOver500ms.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "driftPpm", static_cast<double>(m.driftPpm.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "queueDepth", static_cast<int>(frameQueue_.pendingFrames()));
+    result.setProperty(rt, "needsKeyFrame", frameQueue_.isAwaitingKeyFrame());
     return result;
 }
 
 void VideoPipelineModule::startDecodeThread() {
     if (decodeRunning_.load(std::memory_order_acquire)) return;
+    decodeThreadExited_.store(false, std::memory_order_relaxed);
+    wakeVersion_.store(0, std::memory_order_relaxed);
+    frameQueue_.setWakeCallback([this]() { wakeDecodeThread(); });
+    frameQueue_.setResetCallback([this]() {
+        pendingClockReset_.store(true, std::memory_order_release);
+        wakeDecodeThread();
+    });
     decodeRunning_.store(true, std::memory_order_release);
     decodeThread_ = std::thread(&VideoPipelineModule::decodeLoop, this);
 }
 
 void VideoPipelineModule::stopDecodeThread() {
     decodeRunning_.store(false, std::memory_order_release);
-    if (decodeThread_.joinable()) {
-        decodeThread_.join();
+    wakeDecodeThread();
+    frameQueue_.setWakeCallback(nullptr);
+    frameQueue_.setResetCallback(nullptr);
+    media::timedJoin(decodeThread_, decodeThreadExited_, media::config::thread::kThreadJoinTimeoutMs, "VideoDecodeThread");
+
+    if (!decodeThreadExited_.load(std::memory_order_acquire)) {
+        MEDIA_LOG_E("VideoPipelineModule: decode thread detached, skipping resource destruction");
+        return;
     }
+
     std::lock_guard<std::mutex> lk(decoderMtx_);
     decoder_.reset();
     fpsCounter_.reset();
     renderClock_.reset();
     lastAnchorTimeUs_ = 0;
+    consecutiveErrors_ = 0;
+    pendingClockReset_.store(false, std::memory_order_relaxed);
 }
 
 void VideoPipelineModule::decodeLoop() {
-    pthread_setname_np("VideoDecodeThread");
+    media::thread_affinity::setThreadName("VP9Decode");
+    media::thread_affinity::configureCurrentThreadForDecode();
 
     media::EncodedVideoFrame frame;
+    int consecutiveIdleCycles = 0;
+    uint32_t lastWakeVersion = 0;
 
     while (decodeRunning_.load(std::memory_order_acquire)) {
         bool didWork = false;
 
+        if (pendingClockReset_.exchange(false, std::memory_order_acquire)) {
+            renderClock_.reset();
+            lastAnchorTimeUs_ = 0;
+            syncCoordinator_.reset();
+        }
+
         if (!media::VideoSurfaceRegistry::instance().hasSurface()) {
             std::lock_guard<std::mutex> lk(decoderMtx_);
             decoder_.reset();
+            renderClock_.reset();
+            lastAnchorTimeUs_ = 0;
         } else {
             int64_t now = media::nowUs();
 
@@ -211,6 +248,7 @@ void VideoPipelineModule::decodeLoop() {
                                         media::video_config::jitter::kMinBufferUs,
                                         media::video_config::jitter::kMaxBufferUs);
             renderClock_.updateBufferTarget(adjustedTarget);
+            renderClock_.setPlaybackRate(frameQueue_.playbackRate());
 
             // Update jitter metrics
             frameQueue_.metrics().jitterUs.store(frameQueue_.jitterUs(), std::memory_order_relaxed);
@@ -237,6 +275,7 @@ void VideoPipelineModule::decodeLoop() {
                     if (decoder_) {
                         if (decoder_->submitFrame(frame.data.data(), frame.data.size(),
                                                   frame.ptsUs, frame.isKeyFrame)) {
+                            consecutiveErrors_ = 0;
                             frameQueue_.metrics().framesDecoded.fetch_add(1, std::memory_order_relaxed);
                             frameQueue_.metrics().currentFps.store(
                                 fpsCounter_.tick(media::nowUs()), std::memory_order_relaxed);
@@ -249,6 +288,15 @@ void VideoPipelineModule::decodeLoop() {
                             syncCoordinator_.onVideoRender(frame.ptsUs, media::nowUs());
                         } else {
                             frameQueue_.metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
+                            if (++consecutiveErrors_ >= kMaxConsecutiveErrors) {
+                                MEDIA_LOG_E("VideoPipelineModule: %d consecutive errors, resetting decoder", consecutiveErrors_);
+                                decoder_.reset();
+                                renderClock_.reset();
+                                lastAnchorTimeUs_ = 0;
+                                frameQueue_.requestKeyFrame();
+                                frameQueue_.metrics().decoderResets.fetch_add(1, std::memory_order_relaxed);
+                                consecutiveErrors_ = 0;
+                            }
                         }
                     }
                 }
@@ -257,9 +305,24 @@ void VideoPipelineModule::decodeLoop() {
         }
 
         if (!didWork) {
-            std::this_thread::sleep_for(std::chrono::microseconds(2000));
+            consecutiveIdleCycles++;
+            int64_t sleepUs;
+            if (consecutiveIdleCycles < 4) {
+                sleepUs = media::video_config::kDecodeIdleSleepUs;
+            } else {
+                // Cap at shift 3 (max 16ms) to maintain 2:1 margin over 30fps frame interval
+                int backoffShift = std::min(consecutiveIdleCycles - 4, 3);
+                sleepUs = media::video_config::kDecodeIdleSleepUs << backoffShift;
+            }
+            waitForWakeOrTimeout(lastWakeVersion, sleepUs);
+            lastWakeVersion = wakeVersion_.load(std::memory_order_relaxed);
+        } else {
+            consecutiveIdleCycles = 0;
+            lastWakeVersion = wakeVersion_.load(std::memory_order_relaxed);
         }
     }
+
+    decodeThreadExited_.store(true, std::memory_order_release);
 }
 
 }  // namespace videomodule

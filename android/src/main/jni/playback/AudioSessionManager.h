@@ -91,6 +91,14 @@ public:
 
     void onAudioFocusChanged(int focusChange) noexcept;
 
+    // RT-safe: atomic load only, no locks. Used by AAudioOutputBridge data callback.
+    [[nodiscard]] bool canPlayAudio() const noexcept {
+        return !interrupted_.load(std::memory_order_acquire);
+    }
+
+    // Provide direct pointer for RT callback to avoid singleton access on audio thread.
+    [[nodiscard]] std::atomic<bool>* interruptedFlagPtr() noexcept { return &interrupted_; }
+
     void shutdown([[maybe_unused]] JNIEnv* env) noexcept;
 
 private:
@@ -102,6 +110,7 @@ private:
 
     std::mutex mutex_;
     bool initialized_{false};
+    std::atomic<bool> interrupted_{false};
     int32_t refCount_{0};
 
     std::atomic<AudioRoute> currentRoute_{AudioRoute::Unknown};

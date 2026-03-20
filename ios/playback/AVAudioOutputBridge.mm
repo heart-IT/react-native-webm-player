@@ -167,7 +167,7 @@ size_t AVAudioOutputBridge::renderAudio(float* output, size_t frameCount) noexce
     }
 
     uint8_t state = callbackState_.load(std::memory_order_acquire);
-    if (UNLIKELY(!AudioSessionManager::instance().canPlayAudio())) {
+    if (UNLIKELY(interruptedFlag_ && interruptedFlag_->load(std::memory_order_acquire))) {
         std::memset(output, 0, frameCount * config_.channelCount * sizeof(float));
         return frameCount;
     }

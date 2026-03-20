@@ -17,6 +17,23 @@ enum class StreamHealth : uint8_t {
     Failed = 4
 };
 
+enum class StreamStatus : uint8_t {
+    Live = 0,
+    Buffering = 1,
+    Ended = 2,
+    NoPeers = 3
+};
+
+inline const char* streamStatusToString(StreamStatus s) noexcept {
+    switch (s) {
+        case StreamStatus::Live:      return "live";
+        case StreamStatus::Buffering: return "buffering";
+        case StreamStatus::Ended:     return "ended";
+        case StreamStatus::NoPeers:   return "no_peers";
+    }
+    return "unknown";
+}
+
 inline const char* streamHealthToString(StreamHealth h) noexcept {
     switch (h) {
         case StreamHealth::Healthy:   return "healthy";
@@ -33,6 +50,7 @@ struct HealthSnapshot {
     uint64_t decodeErrors = 0;
     uint64_t framesDropped = 0;
     uint64_t ptsDiscontinuities = 0;
+    uint64_t decoderResets = 0;
     int64_t uptimeUs = 0;
     bool decodeThreadDetached = false;
     bool audioOutputRunning = true;
@@ -41,6 +59,22 @@ struct HealthSnapshot {
     int64_t avSyncOffsetUs = 0;
     int64_t bufferTargetUs = 0;
     uint64_t gapsOver100ms = 0;
+
+    // Audio decode stall detection
+    uint64_t audioFramesReceived = 0;
+    uint64_t audioSamplesOutput = 0;
+
+    // Buffer depth for early stall warning
+    int64_t bufferedDurationUs = 0;
+    int64_t decodedDurationUs = 0;
+
+    // Video health
+    uint64_t videoFramesReceived = 0;
+    uint64_t videoFramesDecoded = 0;
+    uint64_t videoFramesDropped = 0;
+
+    // Stream context from integrator
+    StreamStatus streamStatus = StreamStatus::Live;
 };
 
 struct HealthEvent {
@@ -59,6 +93,8 @@ namespace config::health {
     constexpr uint64_t kDegradedDecodeErrorThreshold = 3;      // errors in window
     constexpr uint64_t kStalledGapThreshold = 1;               // any 500ms+ gap
     constexpr uint64_t kFailedResetThreshold = 3;              // resets in window
+    constexpr int64_t kAvSyncDegradedThresholdUs = 45000;     // ITU-R BT.1359: > 45ms sustained
+    constexpr uint64_t kVideoDropRateDenom = 10;              // Degraded if drops > 1/10 of received
 }
 
 // Thread safety: evaluate() must only be called from the decode thread.
@@ -94,16 +130,27 @@ public:
         uint64_t errorDelta = snap.decodeErrors - windowBaseSnapshot_.decodeErrors;
         uint64_t gapDelta = snap.gapsOver500ms - windowBaseSnapshot_.gapsOver500ms;
         uint64_t dropDelta = snap.framesDropped - windowBaseSnapshot_.framesDropped;
+        uint64_t resetDelta = snap.decoderResets - windowBaseSnapshot_.decoderResets;
+        uint64_t audioRecvDelta = snap.audioFramesReceived - windowBaseSnapshot_.audioFramesReceived;
+        uint64_t audioOutputDelta = snap.audioSamplesOutput - windowBaseSnapshot_.audioSamplesOutput;
+        uint64_t videoRecvDelta = snap.videoFramesReceived - windowBaseSnapshot_.videoFramesReceived;
+        uint64_t videoDecDelta = snap.videoFramesDecoded - windowBaseSnapshot_.videoFramesDecoded;
+        uint64_t videoDropDelta = snap.videoFramesDropped - windowBaseSnapshot_.videoFramesDropped;
 
         // Classify health
-        StreamHealth newHealth = classify(snap, underrunDelta, errorDelta, gapDelta, dropDelta);
+        StreamHealth newHealth = classify(snap, underrunDelta, errorDelta, gapDelta, dropDelta,
+                                           resetDelta, audioRecvDelta, audioOutputDelta,
+                                           videoRecvDelta, videoDecDelta, videoDropDelta);
 
         // Only fire on transition
         if (newHealth == currentHealth_) return;
 
         StreamHealth oldHealth = currentHealth_;
+        int64_t absOffset = snap.avSyncOffsetUs >= 0 ? snap.avSyncOffsetUs : -snap.avSyncOffsetUs;
         const char* detail = transitionDetail(oldHealth, newHealth,
-                                               underrunDelta, errorDelta, gapDelta);
+                                               underrunDelta, errorDelta, gapDelta,
+                                               resetDelta, absOffset, videoDropDelta,
+                                               snap.streamStatus);
 
         currentHealth_ = newHealth;
         lastPublishedHealth_.store(newHealth, std::memory_order_relaxed);
@@ -132,10 +179,18 @@ private:
                                   uint64_t underrunDelta,
                                   uint64_t errorDelta,
                                   uint64_t gapDelta,
-                                  uint64_t dropDelta) noexcept {
+                                  uint64_t dropDelta,
+                                  uint64_t resetDelta,
+                                  uint64_t audioRecvDelta,
+                                  uint64_t audioOutputDelta,
+                                  uint64_t videoRecvDelta,
+                                  uint64_t videoDecDelta,
+                                  uint64_t videoDropDelta) noexcept {
         // Failed: unrecoverable conditions
         if (snap.decodeThreadDetached) return StreamHealth::Failed;
         if (!snap.audioOutputRunning) return StreamHealth::Failed;
+        if (resetDelta >= config::health::kFailedResetThreshold)
+            return StreamHealth::Failed;
 
         // Stalled: no data flowing
         if (gapDelta >= config::health::kStalledGapThreshold)
@@ -145,6 +200,22 @@ private:
         if (underrunDelta >= config::health::kDegradedUnderrunThreshold)
             return StreamHealth::Degraded;
         if (errorDelta >= config::health::kDegradedDecodeErrorThreshold)
+            return StreamHealth::Degraded;
+        // Audio receiving frames but not producing output — decoder is failing
+        if (audioRecvDelta > 0 && audioOutputDelta == 0)
+            return StreamHealth::Degraded;
+        // Video receiving frames but not decoding any — decoder is failing
+        if (videoRecvDelta > 0 && videoDecDelta == 0)
+            return StreamHealth::Degraded;
+        // Sustained A/V desync beyond ITU-R BT.1359 perceptible threshold
+        int64_t absOffset = snap.avSyncOffsetUs >= 0 ? snap.avSyncOffsetUs : -snap.avSyncOffsetUs;
+        if (absOffset > config::health::kAvSyncDegradedThresholdUs)
+            return StreamHealth::Degraded;
+        // Audio dropping > 10% of received frames
+        if (audioRecvDelta > 0 && dropDelta * config::health::kVideoDropRateDenom > audioRecvDelta)
+            return StreamHealth::Degraded;
+        // Video dropping > 10% of received frames
+        if (videoRecvDelta > 0 && videoDropDelta * config::health::kVideoDropRateDenom > videoRecvDelta)
             return StreamHealth::Degraded;
 
         // Buffering: occasional issues, recovering
@@ -156,15 +227,34 @@ private:
     static const char* transitionDetail(StreamHealth from, StreamHealth to,
                                          uint64_t underrunDelta,
                                          uint64_t errorDelta,
-                                         uint64_t gapDelta) noexcept {
-        if (to == StreamHealth::Failed) return "audio output failed or decode thread detached";
-        if (to == StreamHealth::Stalled) return "feed stalled: gap > 500ms";
+                                         uint64_t gapDelta,
+                                         uint64_t resetDelta,
+                                         int64_t absAvSyncOffset,
+                                         uint64_t videoDropDelta,
+                                         StreamStatus streamStatus = StreamStatus::Live) noexcept {
+        if (to == StreamHealth::Failed) {
+            if (resetDelta >= config::health::kFailedResetThreshold)
+                return "failed: excessive decoder resets";
+            return "audio output failed or decode thread detached";
+        }
+        if (to == StreamHealth::Stalled) {
+            switch (streamStatus) {
+                case StreamStatus::NoPeers:   return "stalled: no peers connected";
+                case StreamStatus::Ended:     return "stalled: stream ended";
+                case StreamStatus::Buffering: return "stalled: replication lag";
+                default:                      return "feed stalled: gap > 500ms";
+            }
+        }
         if (to == StreamHealth::Degraded) {
             if (underrunDelta >= config::health::kDegradedUnderrunThreshold)
                 return "degraded: sustained underruns";
             if (errorDelta >= config::health::kDegradedDecodeErrorThreshold)
                 return "degraded: sustained decode errors";
-            return "degraded: quality loss";
+            if (absAvSyncOffset > config::health::kAvSyncDegradedThresholdUs)
+                return "degraded: A/V sync drift > 45ms";
+            if (videoDropDelta > 0)
+                return "degraded: high video frame drop rate";
+            return "degraded: video decode stalled";
         }
         if (to == StreamHealth::Buffering) return "rebuffering: audio underrun";
         if (to == StreamHealth::Healthy) return "playback recovered";

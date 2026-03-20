@@ -99,7 +99,10 @@ enum class MethodId : uint8_t {
     GetCurrentTimeUs,
     GetPlaybackState,
     SetBufferTarget,
-    SetAudioFocusCallback
+    SetAudioFocusCallback,
+    SetCatchupPolicy,
+    SetStreamStatus,
+    SetPlaybackRate
 };
 
 namespace {
@@ -130,6 +133,9 @@ MethodId lookupMethod(const std::string& name) noexcept {
     if (name == "getPlaybackState") return MethodId::GetPlaybackState;
     if (name == "setBufferTarget") return MethodId::SetBufferTarget;
     if (name == "setAudioFocusCallback") return MethodId::SetAudioFocusCallback;
+    if (name == "setCatchupPolicy") return MethodId::SetCatchupPolicy;
+    if (name == "setStreamStatus") return MethodId::SetStreamStatus;
+    if (name == "setPlaybackRate") return MethodId::SetPlaybackRate;
     return MethodId::Unknown;
 }
 
@@ -344,6 +350,50 @@ jsi::Value MediaPipelineModule::get(jsi::Runtime& rt, const jsi::PropNameID& nam
                     return setAudioFocusCallback(rt, args[0]);
                 });
 
+        case MethodId::SetCatchupPolicy:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (count < 1 || !args[0].isNumber()) {
+                        throw jsi::JSError(rt, "setCatchupPolicy requires (policy: number)");
+                    }
+                    int val = jsiutil::safeIntArg(rt, args[0], "policy");
+                    if (val < 0 || val > 2) {
+                        throw jsi::JSError(rt, "setCatchupPolicy: policy out of range (0-2)");
+                    }
+                    auto policy = static_cast<media::CatchupPolicy>(val);
+                    session_.setCatchupPolicy(policy);
+                    if (videoQueue_) videoQueue_->setCatchupPolicy(policy);
+                    return jsi::Value(true);
+                });
+
+        case MethodId::SetStreamStatus:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (count < 1 || !args[0].isNumber()) {
+                        throw jsi::JSError(rt, "setStreamStatus requires (status: number)");
+                    }
+                    int val = jsiutil::safeIntArg(rt, args[0], "status");
+                    if (val < 0 || val > 3) {
+                        throw jsi::JSError(rt, "setStreamStatus: status out of range (0-3)");
+                    }
+                    session_.setStreamStatus(static_cast<media::StreamStatus>(val));
+                    return jsi::Value(true);
+                });
+
+        case MethodId::SetPlaybackRate:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (count < 1 || !args[0].isNumber()) {
+                        throw jsi::JSError(rt, "setPlaybackRate requires (rate: number)");
+                    }
+                    float rate = jsiutil::safeFloatArg(rt, args[0], "rate");
+                    rate = std::clamp(rate, media::config::playbackrate::kMinRate,
+                                      media::config::playbackrate::kMaxRate);
+                    session_.setPlaybackRate(rate);
+                    if (videoQueue_) videoQueue_->setPlaybackRate(rate);
+                    return jsi::Value(true);
+                });
+
         case MethodId::Unknown:
         default:
             return jsi::Value::undefined();
@@ -352,7 +402,7 @@ jsi::Value MediaPipelineModule::get(jsi::Runtime& rt, const jsi::PropNameID& nam
 
 std::vector<jsi::PropNameID> MediaPipelineModule::getPropertyNames(jsi::Runtime& rt) {
     std::vector<jsi::PropNameID> names;
-    names.reserve(27);
+    names.reserve(30);
     names.push_back(jsi::PropNameID::forAscii(rt, "feedData"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setMuted"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setGain"));
@@ -378,6 +428,9 @@ std::vector<jsi::PropNameID> MediaPipelineModule::getPropertyNames(jsi::Runtime&
     names.push_back(jsi::PropNameID::forAscii(rt, "getPlaybackState"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setBufferTarget"));
     names.push_back(jsi::PropNameID::forAscii(rt, "setAudioFocusCallback"));
+    names.push_back(jsi::PropNameID::forAscii(rt, "setCatchupPolicy"));
+    names.push_back(jsi::PropNameID::forAscii(rt, "setStreamStatus"));
+    names.push_back(jsi::PropNameID::forAscii(rt, "setPlaybackRate"));
     return names;
 }
 
@@ -388,11 +441,12 @@ bool MediaPipelineModule::ensureRunning() {
 
 jsi::Value MediaPipelineModule::feedData(jsi::Runtime& rt,
                                           const jsi::Value& bufferVal) {
+    if (!session_.isRunning()) return jsi::Value(false);
+
     BufferView buffer = extractBuffer(rt, bufferVal);
     if (!buffer) return jsi::Value(false);
 
     auto result = demuxer_.feedData(buffer.data, buffer.size);
-    if (!result.error.empty()) return jsi::Value(false);
 
     for (const auto& pkt : result.audioPackets) {
         session_.pushAudioFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.durationUs);
@@ -401,6 +455,17 @@ jsi::Value MediaPipelineModule::feedData(jsi::Runtime& rt,
         for (const auto& pkt : result.videoPackets) {
             videoQueue_->pushEncodedFrame(pkt.data, pkt.size, pkt.ptsUs, pkt.isKeyFrame);
         }
+    }
+
+    if (!result.error.empty()) {
+        MEDIA_LOG_W("feedData: demux error: %s", result.error.c_str());
+        // After overflow or permanent error, trigger keyframe recovery so the
+        // video pipeline doesn't stall waiting for frames that were lost.
+        if (videoQueue_) {
+            videoQueue_->requestKeyFrame();
+        }
+        media::VideoSurfaceRegistry::instance().requestKeyFrame();
+        return jsi::Value(false);
     }
     return jsi::Value(true);
 }
@@ -431,6 +496,7 @@ jsi::Value MediaPipelineModule::getMetrics(jsi::Runtime& rt) {
     result.setProperty(rt, "health", std::move(health));
 
     jsi::Object quality(rt);
+    quality.setProperty(rt, "framesReceived", static_cast<double>(metrics.audioFramesReceived));
     quality.setProperty(rt, "underruns", static_cast<double>(metrics.underruns));
     quality.setProperty(rt, "framesDropped", static_cast<double>(metrics.framesDropped));
     quality.setProperty(rt, "framesDrained", static_cast<double>(metrics.framesDrained));
@@ -448,6 +514,7 @@ jsi::Value MediaPipelineModule::getMetrics(jsi::Runtime& rt) {
     jsi::Object session(rt);
     session.setProperty(rt, "uptimeMs", static_cast<double>(metrics.uptimeUs / 1000));
     session.setProperty(rt, "samplesOutput", static_cast<double>(metrics.totalSamplesOutput));
+    session.setProperty(rt, "playbackRate", static_cast<double>(session_.playbackRate()));
     result.setProperty(rt, "session", std::move(session));
 
     // Latency mode reporting
@@ -486,7 +553,28 @@ jsi::Value MediaPipelineModule::getMetrics(jsi::Runtime& rt) {
     jsi::Object drift(rt);
     drift.setProperty(rt, "driftPpm", metrics.driftPpm);
     drift.setProperty(rt, "active", metrics.driftCompensationActive);
+    drift.setProperty(rt, "currentRatio", static_cast<double>(metrics.driftCurrentRatio));
+    drift.setProperty(rt, "catchupRatio", static_cast<double>(metrics.catchupCurrentRatio));
     result.setProperty(rt, "drift", std::move(drift));
+
+    // Audio pipeline state (triage observability)
+    jsi::Object pipeline(rt);
+    pipeline.setProperty(rt, "audioStreamState", static_cast<int>(metrics.audioStreamState));
+    pipeline.setProperty(rt, "currentGain", static_cast<double>(metrics.currentGain));
+    pipeline.setProperty(rt, "bufferedDurationUs", static_cast<double>(metrics.bufferedDurationUs));
+    pipeline.setProperty(rt, "decodedDurationUs", static_cast<double>(metrics.decodedDurationUs));
+    result.setProperty(rt, "pipeline", std::move(pipeline));
+
+    // Demuxer metrics
+    jsi::Object demux(rt);
+    auto dm = demuxer_.demuxerMetrics();
+    demux.setProperty(rt, "totalBytesFed", static_cast<double>(dm.totalBytesFed));
+    demux.setProperty(rt, "feedDataCalls", static_cast<double>(dm.feedDataCalls));
+    demux.setProperty(rt, "audioPacketsEmitted", static_cast<double>(dm.audioPacketsEmitted));
+    demux.setProperty(rt, "videoPacketsEmitted", static_cast<double>(dm.videoPacketsEmitted));
+    demux.setProperty(rt, "overflowCount", static_cast<double>(dm.overflowCount));
+    demux.setProperty(rt, "parseState", static_cast<int>(dm.parseState));
+    result.setProperty(rt, "demux", std::move(demux));
 
     // Video metrics (from VideoFrameQueue + AVSyncCoordinator)
     jsi::Object video(rt);
@@ -509,6 +597,9 @@ jsi::Value MediaPipelineModule::getMetrics(jsi::Runtime& rt) {
         video.setProperty(rt, "gapsOver50ms", static_cast<double>(vm.gapsOver50ms.load(std::memory_order_relaxed)));
         video.setProperty(rt, "gapsOver100ms", static_cast<double>(vm.gapsOver100ms.load(std::memory_order_relaxed)));
         video.setProperty(rt, "gapsOver500ms", static_cast<double>(vm.gapsOver500ms.load(std::memory_order_relaxed)));
+        video.setProperty(rt, "driftPpm", static_cast<double>(vm.driftPpm.load(std::memory_order_relaxed)));
+        video.setProperty(rt, "queueDepth", static_cast<int>(videoQueue_->pendingFrames()));
+        video.setProperty(rt, "needsKeyFrame", videoQueue_->isAwaitingKeyFrame());
     } else {
         video.setProperty(rt, "framesReceived", 0.0);
         video.setProperty(rt, "framesDecoded", 0.0);
@@ -527,6 +618,9 @@ jsi::Value MediaPipelineModule::getMetrics(jsi::Runtime& rt) {
         video.setProperty(rt, "gapsOver50ms", 0.0);
         video.setProperty(rt, "gapsOver100ms", 0.0);
         video.setProperty(rt, "gapsOver500ms", 0.0);
+        video.setProperty(rt, "driftPpm", 0.0);
+        video.setProperty(rt, "queueDepth", 0);
+        video.setProperty(rt, "needsKeyFrame", false);
     }
     video.setProperty(rt, "avSyncOffsetUs", syncCoordinator_
         ? static_cast<double>(syncCoordinator_->currentOffsetUs())
@@ -634,9 +728,15 @@ void MediaPipelineModule::setupHealthWatchdog() {
             snap.decodeErrors = m.decodeErrors.load(std::memory_order_relaxed);
             snap.framesDropped = m.framesDropped.load(std::memory_order_relaxed);
             snap.ptsDiscontinuities = m.ptsDiscontinuities.load(std::memory_order_relaxed);
+            snap.decoderResets = m.decoderResets.load(std::memory_order_relaxed);
             snap.gapsOver500ms = m.gapsOver500ms.load(std::memory_order_relaxed);
             snap.gapsOver100ms = m.gapsOver100ms.load(std::memory_order_relaxed);
+            snap.audioFramesReceived = m.framesReceived.load(std::memory_order_relaxed);
+            snap.audioSamplesOutput = m.samplesOutput.load(std::memory_order_relaxed);
         }
+        snap.paused = self->session_.isPaused();
+        snap.bufferedDurationUs = self->session_.bufferedDurationUs();
+        snap.decodedDurationUs = self->session_.decodedDurationUs();
         snap.uptimeUs = self->session_.uptimeUs();
         snap.decodeThreadDetached = self->session_.wasDecodeThreadDetached();
         snap.audioOutputRunning = self->session_.isAudioOutputRunning();
@@ -644,6 +744,13 @@ void MediaPipelineModule::setupHealthWatchdog() {
             snap.avSyncOffsetUs = self->syncCoordinator_->currentOffsetUs();
         }
         snap.bufferTargetUs = self->session_.bufferTargetUs();
+        snap.streamStatus = self->session_.streamStatus();
+        if (self->videoQueue_) {
+            const auto& vm = self->videoQueue_->metrics();
+            snap.videoFramesReceived = vm.framesReceived.load(std::memory_order_relaxed);
+            snap.videoFramesDecoded = vm.framesDecoded.load(std::memory_order_relaxed);
+            snap.videoFramesDropped = vm.framesDropped.load(std::memory_order_relaxed);
+        }
         return snap;
     };
 
@@ -654,8 +761,9 @@ void MediaPipelineModule::setupHealthWatchdog() {
         int statusInt = static_cast<int>(event.status);
         std::string detail(event.detail);
         auto snapshot = event.metrics;
+        int streamStatusInt = static_cast<int>(snapshot.streamStatus);
 
-        self->callInvoker_->invokeAsync([weakSelf, statusInt, detail, snapshot]() {
+        self->callInvoker_->invokeAsync([weakSelf, statusInt, detail, snapshot, streamStatusInt]() {
             auto self = weakSelf.lock();
             if (!self || !self->runtime_ || !self->healthCallback_) return;
             try {
@@ -663,6 +771,7 @@ void MediaPipelineModule::setupHealthWatchdog() {
                 jsi::Object ev(rt);
                 ev.setProperty(rt, "status", statusInt);
                 ev.setProperty(rt, "detail", jsi::String::createFromUtf8(rt, detail));
+                ev.setProperty(rt, "streamStatus", streamStatusInt);
 
                 jsi::Object metricsObj(rt);
                 metricsObj.setProperty(rt, "underruns", static_cast<double>(snapshot.underruns));
@@ -671,6 +780,12 @@ void MediaPipelineModule::setupHealthWatchdog() {
                 metricsObj.setProperty(rt, "avSyncOffsetUs", static_cast<double>(snapshot.avSyncOffsetUs));
                 metricsObj.setProperty(rt, "bufferTargetUs", static_cast<double>(snapshot.bufferTargetUs));
                 metricsObj.setProperty(rt, "gapsOver100ms", static_cast<double>(snapshot.gapsOver100ms));
+                metricsObj.setProperty(rt, "gapsOver500ms", static_cast<double>(snapshot.gapsOver500ms));
+                metricsObj.setProperty(rt, "ptsDiscontinuities", static_cast<double>(snapshot.ptsDiscontinuities));
+                metricsObj.setProperty(rt, "decoderResets", static_cast<double>(snapshot.decoderResets));
+                metricsObj.setProperty(rt, "videoFramesReceived", static_cast<double>(snapshot.videoFramesReceived));
+                metricsObj.setProperty(rt, "videoFramesDecoded", static_cast<double>(snapshot.videoFramesDecoded));
+                metricsObj.setProperty(rt, "videoFramesDropped", static_cast<double>(snapshot.videoFramesDropped));
                 ev.setProperty(rt, "metrics", std::move(metricsObj));
 
                 self->healthCallback_->call(rt, ev);
@@ -756,8 +871,9 @@ jsi::Value MediaPipelineModule::getTrackInfo(jsi::Runtime& rt) {
 jsi::Value MediaPipelineModule::resetStream(jsi::Runtime&) {
     std::lock_guard<std::mutex> lk(lifecycleMtx_);
     demuxer_.reset();
+    session_.resetStreamState();
     if (videoQueue_) {
-        videoQueue_->requestKeyFrame();
+        videoQueue_->reset();
     }
     return jsi::Value(true);
 }

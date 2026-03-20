@@ -69,6 +69,8 @@ struct SessionMetrics {
     // Clock drift compensation metrics
     int32_t driftPpm = 0;
     bool driftCompensationActive = false;
+    float driftCurrentRatio = 1.0f;
+    float catchupCurrentRatio = 1.0f;
 
     // Bluetooth crackling diagnostics
     uint64_t fastPathSwitches = 0;
@@ -83,6 +85,12 @@ struct SessionMetrics {
     // Jitter buffer metrics
     int64_t jitterUs = 0;
     int64_t bufferTargetUs = 0;
+
+    // Triage metrics: pipeline state observability
+    uint8_t audioStreamState = 0;     // StreamState enum value
+    float currentGain = 1.0f;
+    int64_t bufferedDurationUs = 0;   // total audio buffered (encoded + decoded)
+    int64_t decodedDurationUs = 0;    // decoded audio ready for playback
 };
 
 class MediaSession {
@@ -137,6 +145,7 @@ public:
                     config_.audioConfig
                 );
                 audioOutput_->setRestartCallback([this] { decodeThread_.wake(); });
+                audioOutput_->setInterruptedFlag(AudioSessionManager::instance().interruptedFlagPtr());
             }
 
             if (!audioOutput_->start()) {
@@ -234,6 +243,7 @@ public:
                 [this](float* output, size_t frames) { return onAudioCallback(output, frames); },
                 config_.audioConfig
             );
+            audioOutput_->setInterruptedFlag(AudioSessionManager::instance().interruptedFlagPtr());
         }
 
         // Warm up the hardware (starts AAudio stream with silence)
@@ -280,6 +290,14 @@ public:
     void setBufferTargetOverride(int64_t audioUs, int64_t videoUs) noexcept {
         jitter_.setBufferTargetOverride(audioUs);
         (void)videoUs;  // forwarded by caller to VideoFrameQueue
+    }
+
+    // Reset jitter/drift state and flush stale audio for a new stream.
+    // Called by resetStream() so stale estimates and frames don't carry over.
+    void resetStreamState() noexcept {
+        jitter_.reset();
+        audio_.requestDriftReset();
+        audio_.requestEncodedClear();
     }
 
     [[nodiscard]] int64_t uptimeUs() const noexcept {
@@ -382,6 +400,8 @@ public:
             // Clock drift compensation metrics
             m.driftPpm = audio_.driftPpm();
             m.driftCompensationActive = audio_.isDriftCompensationActive();
+            m.driftCurrentRatio = audio_.driftCurrentRatio();
+            m.catchupCurrentRatio = audio_.catchupCurrentRatio();
 
             // Jitter buffer metrics
             m.jitterUs = jitter_.jitterUs();
@@ -390,6 +410,12 @@ public:
             // Check pool pressure
             m.decodedPoolUnderPressure = audio_.isDecodedPoolUnderPressure();
             m.encodedPoolUnderPressure = audio_.isEncodedPoolUnderPressure();
+
+            // Triage metrics
+            m.audioStreamState = static_cast<uint8_t>(audio_.state());
+            m.currentGain = audio_.targetGain();
+            m.bufferedDurationUs = audio_.bufferedDurationUs();
+            m.decodedDurationUs = audio_.decodedDurationUs();
         }
 
         // Audio output health metrics
@@ -411,6 +437,26 @@ public:
         audio_.resetMetrics();
         audioPool_.resetExhaustedCount();
         MEDIA_LOG_I("MediaSession: metrics reset");
+    }
+
+    void setCatchupPolicy(CatchupPolicy p) noexcept {
+        audio_.setCatchupPolicy(p);
+    }
+
+    void setPlaybackRate(float rate) noexcept {
+        audio_.setPlaybackRate(rate);
+    }
+
+    [[nodiscard]] float playbackRate() const noexcept {
+        return audio_.playbackRate();
+    }
+
+    void setStreamStatus(StreamStatus status) noexcept {
+        streamStatus_.store(status, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] StreamStatus streamStatus() const noexcept {
+        return streamStatus_.load(std::memory_order_relaxed);
     }
 
     void setSyncCoordinator(AVSyncCoordinator* coordinator) noexcept {
@@ -446,6 +492,8 @@ public:
     [[nodiscard]] bool wasDecodeThreadDetached() const noexcept { return decodeThread_.wasDetached(); }
     [[nodiscard]] bool isAudioOutputRunning() const noexcept { return audioOutput_ && audioOutput_->isRunning(); }
     [[nodiscard]] int64_t bufferTargetUs() const noexcept { return audio_.bufferTarget(); }
+    [[nodiscard]] int64_t bufferedDurationUs() const noexcept { return audio_.bufferedDurationUs(); }
+    [[nodiscard]] int64_t decodedDurationUs() const noexcept { return audio_.decodedDurationUs(); }
 
 private:
     // Periodic liveness check: if session is Running but audio output is null
@@ -477,6 +525,7 @@ private:
                 [this](float* out, size_t frames) { return onAudioCallback(out, frames); },
                 config_.audioConfig);
             audioOutput_->setRestartCallback([this] { decodeThread_.wake(); });
+            audioOutput_->setInterruptedFlag(AudioSessionManager::instance().interruptedFlagPtr());
         }
 
         if (!audioOutput_->start()) {
@@ -508,6 +557,7 @@ private:
 
     bool muted_ = false;
     bool warmUpCalled_ = false;
+    std::atomic<StreamStatus> streamStatus_{StreamStatus::Live};
 
     // Audio output liveness check — JS thread only, no synchronization needed.
     int64_t lastAudioHealthCheckUs_ = 0;

@@ -13,7 +13,7 @@ namespace media {
 // Adaptive jitter estimation for video frames.
 // Ported from audio JitterEstimator (JitterEstimator.h) with adaptations:
 // - Frame interval ~33ms (30fps) vs 20ms (audio)
-// - No drift PPM tracking (video has no continuous playout clock)
+// - Drift PPM tracking matches audio JitterEstimator for clock skew compensation
 // - Same EWMA math, spike detection, burst floor memory, adaptive alpha
 //
 // Thread safety: onFrame() and reset() called from JS thread only (serialized
@@ -25,6 +25,15 @@ class VideoJitterEstimator {
 
     // Fixed alpha for jitter EWMA — 0.125 balances responsiveness and stability
     static constexpr int32_t kJitterAlpha = 8192;            // 0.125
+
+    static constexpr int32_t kDriftAlphaFixed = 2048;        // 0.03125 * 65536
+    static constexpr int32_t kDriftOneMinusAlpha = 63488;    // 0.96875 * 65536
+    static constexpr int64_t kDriftThresholdUs = 500;
+
+    // Long-term drift tracking for clock drift compensation
+    static constexpr int32_t kLongTermDriftAlpha = 1024;         // 0.015625 * 65536
+    static constexpr int32_t kLongTermDriftOneMinusAlpha = 64512; // 0.984375 * 65536
+    static constexpr int64_t kMinDriftWindowUs = 30'000'000;     // 30 seconds
 
     static constexpr int64_t kMaxReasonableJitterUs = 120000; // Higher than audio — video jitter is burstier
 
@@ -39,6 +48,12 @@ public:
         spikeHistoryCount_.store(0, std::memory_order_relaxed);
         overrideTargetUs_.store(0, std::memory_order_relaxed);
         for (auto& rec : spikeHistory_) { rec = {}; }
+
+        driftEstimateUs_.store(0, std::memory_order_relaxed);
+        driftCompensationUs_.store(0, std::memory_order_relaxed);
+        cumulativeDriftUs_.store(0, std::memory_order_relaxed);
+        firstArrivalUs_.store(0, std::memory_order_relaxed);
+        longTermDriftPpm_.store(0, std::memory_order_relaxed);
     }
 
     void onFrame(int64_t ptsUs, int64_t arrivalUs, bool isKeyFrame) noexcept {
@@ -49,6 +64,11 @@ public:
 
         lastArrivalUs_.store(arrivalUs, std::memory_order_relaxed);
         lastPtsUs_.store(ptsUs, std::memory_order_relaxed);
+
+        int64_t first = firstArrivalUs_.load(std::memory_order_relaxed);
+        if (first == 0) {
+            firstArrivalUs_.store(arrivalUs, std::memory_order_relaxed);
+        }
 
         if (lastArrival == 0 || lastPts == 0) return;
 
@@ -75,7 +95,11 @@ public:
 
         sampleCount_.fetch_add(1, std::memory_order_relaxed);
 
-        int64_t absDeviation = signedDeviation < 0 ? -signedDeviation : signedDeviation;
+        updateDriftCompensation(signedDeviation);
+
+        int64_t driftComp = driftCompensationUs_.load(std::memory_order_relaxed);
+        int64_t correctedDeviation = signedDeviation - driftComp;
+        int64_t absDeviation = correctedDeviation < 0 ? -correctedDeviation : correctedDeviation;
         absDeviation = std::min(absDeviation, kMaxReasonableJitterUs);
 
         int64_t currentJitter = jitterUs_.load(std::memory_order_relaxed);
@@ -140,6 +164,21 @@ public:
                           video_config::jitter::kMaxBufferUs);
     }
 
+    [[nodiscard]] int64_t estimatedDriftUs() const noexcept {
+        return driftCompensationUs_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] int32_t longTermDriftPpm() const noexcept {
+        return longTermDriftPpm_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool hasValidLongTermDrift() const noexcept {
+        int64_t first = firstArrivalUs_.load(std::memory_order_relaxed);
+        if (first == 0) return false;
+        int64_t elapsed = nowUs() - first;
+        return elapsed >= kMinDriftWindowUs;
+    }
+
 private:
     [[nodiscard]] bool isBurstFloorExpired(int64_t arrivalUs) const noexcept {
         constexpr size_t kSize = static_cast<size_t>(config::spike::kBurstHistorySize);
@@ -183,11 +222,48 @@ private:
         }
     }
 
+    void updateDriftCompensation(int64_t signedDeviation) noexcept {
+        int64_t currentEstimate = driftEstimateUs_.load(std::memory_order_relaxed);
+        int64_t newEstimate = (kDriftAlphaFixed * signedDeviation +
+                              kDriftOneMinusAlpha * currentEstimate) >> 16;
+        driftEstimateUs_.store(newEstimate, std::memory_order_relaxed);
+
+        if (newEstimate > kDriftThresholdUs || newEstimate < -kDriftThresholdUs) {
+            driftCompensationUs_.store(newEstimate, std::memory_order_relaxed);
+        } else {
+            driftCompensationUs_.store(0, std::memory_order_relaxed);
+        }
+
+        updateLongTermDrift(signedDeviation);
+    }
+
+    void updateLongTermDrift(int64_t signedDeviation) noexcept {
+        int64_t cumulative = cumulativeDriftUs_.fetch_add(signedDeviation, std::memory_order_relaxed)
+                           + signedDeviation;
+
+        int64_t first = firstArrivalUs_.load(std::memory_order_relaxed);
+        if (first == 0) return;
+
+        int64_t elapsed = nowUs() - first;
+        if (elapsed < kMinDriftWindowUs) return;
+
+        int64_t instantPpm = (cumulative * 1'000'000) / elapsed;
+        instantPpm = std::clamp(instantPpm, int64_t{-5000}, int64_t{5000});
+
+        int64_t currentPpm = longTermDriftPpm_.load(std::memory_order_relaxed);
+        int64_t newPpm = (kLongTermDriftAlpha * instantPpm +
+                         kLongTermDriftOneMinusAlpha * currentPpm) >> 16;
+
+        longTermDriftPpm_.store(static_cast<int32_t>(newPpm), std::memory_order_relaxed);
+    }
+
     alignas(config::kCacheLineSize) std::atomic<int64_t> jitterUs_{video_config::jitter::kDefaultBufferUs};
     std::atomic<uint32_t> sampleCount_{0};
+    std::atomic<int64_t> driftCompensationUs_{0};
 
     alignas(config::kCacheLineSize) std::atomic<int64_t> lastArrivalUs_{0};
     std::atomic<int64_t> lastPtsUs_{0};
+    std::atomic<int64_t> driftEstimateUs_{0};
 
     std::atomic<int64_t> spikeHoldUntilUs_{0};
 
@@ -199,6 +275,11 @@ private:
     std::atomic<uint32_t> spikeHistoryCount_{0};
     std::atomic<int64_t> burstFloorUs_{0};
     std::atomic<int64_t> overrideTargetUs_{0};
+
+    // Long-term drift tracking
+    std::atomic<int64_t> cumulativeDriftUs_{0};
+    std::atomic<int64_t> firstArrivalUs_{0};
+    std::atomic<int32_t> longTermDriftPpm_{0};
 };
 
 // Presentation timing for video frames.
@@ -219,7 +300,12 @@ public:
 
     [[nodiscard]] int64_t scheduledRenderTime(int64_t ptsUs) const noexcept {
         if (!anchored_) return 0;
-        return anchorLocalUs_ + (ptsUs - anchorPtsUs_) + bufferTargetUs_;
+        float rate = playbackRate_.load(std::memory_order_relaxed);
+        int64_t ptsDelta = ptsUs - anchorPtsUs_;
+        int64_t scaledDelta = (rate != 1.0f)
+            ? static_cast<int64_t>(static_cast<float>(ptsDelta) / rate)
+            : ptsDelta;
+        return anchorLocalUs_ + scaledDelta + bufferTargetUs_;
     }
 
     [[nodiscard]] bool isReadyToRender(int64_t ptsUs, int64_t nowUs) const noexcept {
@@ -231,6 +317,12 @@ public:
         bufferTargetUs_ = newTargetUs;
     }
 
+    void setPlaybackRate(float rate) noexcept {
+        playbackRate_.store(std::clamp(rate,
+            config::playbackrate::kMinRate, config::playbackrate::kMaxRate),
+            std::memory_order_relaxed);
+    }
+
     [[nodiscard]] bool isAnchored() const noexcept { return anchored_; }
 
     void reset() noexcept {
@@ -238,6 +330,7 @@ public:
         anchorLocalUs_ = 0;
         bufferTargetUs_ = video_config::jitter::kDefaultBufferUs;
         anchored_ = false;
+        playbackRate_.store(1.0f, std::memory_order_relaxed);
     }
 
 private:
@@ -245,6 +338,7 @@ private:
     int64_t anchorLocalUs_{0};
     int64_t bufferTargetUs_{video_config::jitter::kDefaultBufferUs};
     bool anchored_{false};
+    std::atomic<float> playbackRate_{1.0f};
 };
 
 }  // namespace media
