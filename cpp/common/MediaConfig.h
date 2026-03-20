@@ -60,7 +60,6 @@ namespace jitter {
     constexpr int64_t kMaxBufferUs = 200000;
     constexpr int64_t kDefaultBufferUs = 60000;  // 3 frames default for stable playback
     constexpr float kJitterAlpha = 0.125f;
-    constexpr float kJitterMultiplier = 2.5f;
     constexpr int kMinSamplesForEstimate = 8;
 }
 
@@ -79,10 +78,6 @@ namespace thread {
     // Soft deadline: poll exitFlag up to this long before escalating
     constexpr int64_t kThreadJoinTimeoutMs = 500;
 
-    // Hard deadline: after soft timeout, wait this much longer before detaching.
-    // Total worst-case blocking time = kThreadJoinTimeoutMs + kThreadJoinHardTimeoutMs.
-    constexpr int64_t kThreadJoinHardTimeoutMs = 500;
-
     // Health logging
     constexpr int64_t kHealthLogIntervalUs = 10'000'000;  // 10 seconds
     constexpr int kHealthHeartbeatInterval = 5;
@@ -94,13 +89,6 @@ namespace thread {
 namespace epoch {
     constexpr int64_t kMaxForwardJumpUs = 500000;
     constexpr int64_t kMaxBackwardJumpUs = 200000;  // 200ms backward tolerance for packet reordering
-    constexpr int kDurationMultiplier = 10;
-}
-
-namespace backpressure {
-    constexpr int64_t kDecodeLagWarningUs = 30000;
-    constexpr int64_t kDecodeLagCriticalUs = 60000;
-    constexpr int64_t kNoFrameTimeoutUs = 150000;
 }
 
 namespace catchup {
@@ -156,9 +144,6 @@ namespace fastdrain {
     constexpr int64_t kExcessThresholdPlayThrough = 100000;  // 5 frames
     constexpr int64_t kExcessThresholdAccelerate = 60000;    // 3 frames
     constexpr int64_t kExcessThresholdDropToLive = 20000;    // 1 frame
-
-    // Default alias for backward compatibility with existing code
-    constexpr int64_t kExcessThresholdUs = kExcessThresholdPlayThrough;
 }
 
 namespace crossfade {
@@ -247,8 +232,6 @@ namespace validation {
     static_assert(mix::kMinGain >= 0.0f);
     static_assert(mix::kMaxGain > mix::kMinGain);
     static_assert(mix::kDefaultGain >= mix::kMinGain && mix::kDefaultGain <= mix::kMaxGain);
-
-    static_assert(backpressure::kDecodeLagWarningUs < backpressure::kDecodeLagCriticalUs);
 
     static_assert(crossfade::kFadeSamples > 0 && crossfade::kFadeSamples <= audio::kFrameSize);
     static_assert(spike::kSpikeMultiplier >= 2);
