@@ -15,13 +15,14 @@ bool installJSIInstaller(
     bool pipelineOk = mediamodule::MediaPipelineModule::install(rt, jsCallInvoker);
     bool videoPipelineOk = videomodule::VideoPipelineModule::install(rt, jsCallInvoker);
 
-    // Wire A/V sync: pass video's sync coordinator to audio decode slots
+    // Wire A/V sync: pass video's sync coordinator to audio decode channel
     if (pipelineOk && videoPipelineOk) {
         uintptr_t rtId = mediamodule::MediaPipelineRegistry::getRuntimeId(rt);
         auto audioModule = mediamodule::MediaPipelineRegistry::instance().getModule(rtId);
         auto videoModule = videomodule::VideoPipelineRegistry::instance().getModule(rtId);
         if (audioModule && videoModule) {
             audioModule->setSyncCoordinator(&videoModule->syncCoordinator());
+            audioModule->setVideoQueue(&videoModule->frameQueue());
         }
     }
 
@@ -34,6 +35,7 @@ void uninstallJSIInstaller(facebook::jsi::Runtime& rt) {
         uintptr_t rtId = mediamodule::MediaPipelineRegistry::getRuntimeId(rt);
         auto audioModule = mediamodule::MediaPipelineRegistry::instance().getModule(rtId);
         if (audioModule) {
+            audioModule->setVideoQueue(nullptr);
             audioModule->setSyncCoordinator(nullptr);
         }
     }

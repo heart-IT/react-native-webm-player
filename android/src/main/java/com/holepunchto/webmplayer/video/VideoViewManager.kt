@@ -19,13 +19,13 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
         }
 
         @JvmStatic
-        private external fun nativeRegisterSurface(participantId: Int, surface: android.view.Surface)
+        private external fun nativeRegisterSurface(surface: android.view.Surface)
 
         @JvmStatic
-        private external fun nativeUnregisterSurface(participantId: Int)
+        private external fun nativeUnregisterSurface()
 
         @JvmStatic
-        private external fun nativeGetVideoResolution(participantId: Int): IntArray
+        private external fun nativeGetVideoResolution(): IntArray
     }
 
     override fun getName(): String = REACT_CLASS
@@ -47,16 +47,8 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
     private fun getSurfaceView(container: FrameLayout): SurfaceView? =
         container.getTag(TAG_SURFACE_VIEW) as? SurfaceView
 
-    @ReactProp(name = "participantId")
-    fun setParticipantId(container: FrameLayout, participantId: Int) {
+    private fun registerSurface(container: FrameLayout) {
         val surfaceView = getSurfaceView(container) ?: return
-
-        val oldId = container.getTag(TAG_PARTICIPANT_ID) as? Int
-        if (oldId != null && oldId >= 0) {
-            nativeUnregisterSurface(oldId)
-        }
-
-        container.setTag(TAG_PARTICIPANT_ID, participantId)
 
         val oldCallback = container.getTag(TAG_SURFACE_CALLBACK) as? SurfaceHolder.Callback
         if (oldCallback != null) {
@@ -65,29 +57,22 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
 
         val callback = object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                val pid = container.getTag(TAG_PARTICIPANT_ID) as? Int ?: return
-                if (pid >= 0) {
-                    nativeRegisterSurface(pid, holder.surface)
-                }
+                nativeRegisterSurface(holder.surface)
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                val pid = container.getTag(TAG_PARTICIPANT_ID) as? Int ?: return
-                if (pid >= 0) {
-                    nativeUnregisterSurface(pid)
-                }
+                nativeUnregisterSurface()
             }
         }
 
         container.setTag(TAG_SURFACE_CALLBACK, callback)
+        container.setTag(TAG_REGISTERED, true)
         surfaceView.holder.addCallback(callback)
 
         if (surfaceView.holder.surface != null && surfaceView.holder.surface.isValid) {
-            if (participantId >= 0) {
-                nativeRegisterSurface(participantId, surfaceView.holder.surface)
-            }
+            nativeRegisterSurface(surfaceView.holder.surface)
         }
 
         updateFitPolling(container)
@@ -106,11 +91,21 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
         updateFitPolling(container)
     }
 
+    override fun onAfterUpdateTransaction(container: FrameLayout) {
+        super.onAfterUpdateTransaction(container)
+        // Register surface on first render
+        val registered = container.getTag(TAG_REGISTERED) as? Boolean ?: false
+        if (!registered) {
+            registerSurface(container)
+        }
+    }
+
     override fun onDropViewInstance(container: FrameLayout) {
         stopFitPolling(container)
-        val pid = container.getTag(TAG_PARTICIPANT_ID) as? Int
-        if (pid != null && pid >= 0) {
-            nativeUnregisterSurface(pid)
+        val registered = container.getTag(TAG_REGISTERED) as? Boolean ?: false
+        if (registered) {
+            nativeUnregisterSurface()
+            container.setTag(TAG_REGISTERED, false)
         }
         val surfaceView = getSurfaceView(container)
         val callback = container.getTag(TAG_SURFACE_CALLBACK) as? SurfaceHolder.Callback
@@ -126,11 +121,10 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
         val mode = container.getTag(TAG_SCALE_MODE) as? Int ?: 1
 
         if (mode == 0) {
-            val pid = container.getTag(TAG_PARTICIPANT_ID) as? Int ?: -1
             val containerW = container.width
             val containerH = container.height
-            if (pid >= 0 && containerW > 0 && containerH > 0) {
-                val res = nativeGetVideoResolution(pid)
+            if (containerW > 0 && containerH > 0) {
+                val res = nativeGetVideoResolution()
                 val videoW = res[0]
                 val videoH = res[1]
                 if (videoW > 0 && videoH > 0) {
@@ -174,9 +168,8 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
 
     private fun updateFitPolling(container: FrameLayout) {
         val mode = container.getTag(TAG_SCALE_MODE) as? Int ?: 1
-        val pid = container.getTag(TAG_PARTICIPANT_ID) as? Int ?: -1
 
-        if (mode == 0 && pid >= 0) {
+        if (mode == 0) {
             startFitPolling(container)
         } else {
             stopFitPolling(container)
@@ -192,8 +185,7 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
                 if (container.getTag(TAG_FIT_POLLING) == null) return
 
                 val mode = container.getTag(TAG_SCALE_MODE) as? Int ?: 1
-                val pid = container.getTag(TAG_PARTICIPANT_ID) as? Int ?: -1
-                if (mode != 0 || pid < 0) {
+                if (mode != 0) {
                     container.setTag(TAG_FIT_POLLING, null)
                     return
                 }
@@ -204,7 +196,7 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
                 } else {
                     container.setTag(TAG_POLL_COUNTER, 0)
 
-                    val res = nativeGetVideoResolution(pid)
+                    val res = nativeGetVideoResolution()
                     val videoW = res[0]
                     val videoH = res[1]
                     val containerW = container.width
@@ -236,7 +228,7 @@ class VideoViewManager : SimpleViewManager<FrameLayout>() {
     }
 }
 
-private const val TAG_PARTICIPANT_ID = 0x7F000001
+private const val TAG_REGISTERED = 0x7F000001
 private const val TAG_SURFACE_CALLBACK = 0x7F000002
 private const val TAG_SCALE_MODE = 0x7F000003
 private const val TAG_SURFACE_VIEW = 0x7F000004

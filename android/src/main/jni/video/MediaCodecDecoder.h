@@ -4,10 +4,13 @@
 #include <cstddef>
 #include <vector>
 #include <atomic>
+#include <functional>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
 #include <android/native_window.h>
 #include "video/VideoConfig.h"
+#include "video/VideoTypes.h"
+#include "common/MediaTime.h"
 
 namespace videomodule {
 
@@ -27,6 +30,9 @@ public:
     bool isInitialized() const noexcept { return initialized_.load(std::memory_order_acquire); }
 
     // Submit VP9 raw frame for decoding.
+    void setVideoMetrics(media::VideoStreamMetrics* m) noexcept { videoMetrics_ = m; }
+    void setKeyFrameRequestFn(std::function<void()> fn) noexcept { keyFrameRequestFn_ = std::move(fn); }
+
     bool submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bool isKeyFrame);
 
     // Release decoded output buffers (renders them to the surface).
@@ -40,6 +46,8 @@ public:
 private:
     bool configureCodec(int width, int height);
 
+    static constexpr int kMaxConsecutiveErrors = 5;
+
     AMediaCodec* codec_ = nullptr;
     ANativeWindow* surface_ = nullptr;
     std::atomic<bool> initialized_{false};
@@ -47,6 +55,12 @@ private:
 
     int decodedWidth_ = 0;
     int decodedHeight_ = 0;
+    int consecutiveErrors_ = 0;
+    int64_t lastResetTimeUs_ = 0;
+    int64_t resetBackoffUs_ = 100000;  // 100ms initial backoff
+    int resetsSinceSuccess_ = 0;
+    media::VideoStreamMetrics* videoMetrics_ = nullptr;
+    std::function<void()> keyFrameRequestFn_;
 };
 
 }  // namespace videomodule

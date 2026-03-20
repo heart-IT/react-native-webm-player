@@ -13,6 +13,7 @@ set(CPP_ROOT "${PROJECT_ROOT}/cpp")
 add_compile_definitions(
     TARGET_OS_IOS=1
     TARGET_OS_IPHONE=1
+    FLOATING_POINT=1
 )
 
 # Warnings
@@ -52,6 +53,16 @@ endif()
 message(STATUS "Opus include: ${OPUS_INCLUDE_DIR}")
 message(STATUS "Opus library: ${OPUS_LIBRARY}")
 
+# SpeexDSP resampler — vendored sources (no system dependency)
+set(SPEEXDSP_ROOT "${CPP_ROOT}/third_party/speexdsp")
+add_library(speexdsp_resampler STATIC "${SPEEXDSP_ROOT}/libspeexdsp/resample.c")
+target_include_directories(speexdsp_resampler PUBLIC
+    "${SPEEXDSP_ROOT}/include"
+    "${SPEEXDSP_ROOT}/libspeexdsp"
+)
+target_compile_definitions(speexdsp_resampler PRIVATE FLOATING_POINT=1 EXPORT=)
+set(SPEEXDSP_LIBRARY speexdsp_resampler)
+
 # Common include paths (playback-only, no capture)
 include_directories(
     ${CPP_ROOT}
@@ -60,6 +71,8 @@ include_directories(
     ${CPP_ROOT}/video
     ${CPP_ROOT}/demux
     ${OPUS_INCLUDE_DIR}/opus
+    ${SPEEXDSP_ROOT}/include
+    ${SPEEXDSP_ROOT}/libspeexdsp
     ${PROJECT_ROOT}/android/src/main/jni
     ${PROJECT_ROOT}/ios
 )
@@ -68,19 +81,19 @@ include_directories(
 add_executable(test_lsan
     test_lsan.cpp
 )
-target_link_libraries(test_lsan PRIVATE ${OPUS_LIBRARY})
+target_link_libraries(test_lsan PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 
 # ---- TSAN test (threading tests) ----
 add_executable(test_tsan
     test_tsan.cpp
 )
-target_link_libraries(test_tsan PRIVATE ${OPUS_LIBRARY})
+target_link_libraries(test_tsan PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 
 # ---- UBSAN test (undefined behavior) ----
 add_executable(test_ubsan
     test_ubsan.cpp
 )
-target_link_libraries(test_ubsan PRIVATE ${OPUS_LIBRARY})
+target_link_libraries(test_ubsan PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 
 # ---- Route handler test (pure C++ reactive routing, no Opus/DSP dependencies) ----
 add_executable(test_route_handler

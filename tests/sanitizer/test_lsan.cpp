@@ -3,7 +3,7 @@
 // Run: ./test_lsan
 //
 // Tests FramePool, FrameToken, FrameQueue,
-// Participant, SyncController, DriftCompensator, AudioMixer,
+// JitterEstimator, DriftCompensator, AudioMixer,
 // DecodeThread, OpusDecoderAdapter for memory leaks and use-after-free.
 
 #include <cstdio>
@@ -19,8 +19,7 @@
 #include "common/MediaConfig.h"
 #include "MediaTypes.h"
 #include "FramePool.h"
-#include "Participant.h"
-#include "SyncController.h"
+#include "JitterEstimator.h"
 #include "DriftCompensator.h"
 #include "OpusDecoderAdapter.h"
 
@@ -163,18 +162,19 @@ TEST(frame_queue_push_pop_no_leak) {
     DecodedAudioPool pool;
     DecodedAudioQueue queue;
 
-    // Push several tokens
-    for (int i = 0; i < 10; i++) {
+    // Push up to queue capacity (kDecodeQueueDepth = 8)
+    constexpr size_t kCount = config::audio::kDecodeQueueDepth;
+    for (size_t i = 0; i < kCount; i++) {
         auto tok = pool.acquire();
         ASSERT_TRUE(tok);
         tok->sampleCount = static_cast<uint32_t>(i);
         ASSERT_TRUE(queue.push(std::move(tok)));
     }
 
-    ASSERT_EQ(queue.count(), 10u);
+    ASSERT_EQ(queue.count(), kCount);
 
     // Pop all
-    for (int i = 0; i < 10; i++) {
+    for (size_t i = 0; i < kCount; i++) {
         auto tok = queue.pop();
         ASSERT_TRUE(tok);
         ASSERT_EQ(tok->sampleCount, static_cast<uint32_t>(i));
@@ -197,21 +197,6 @@ TEST(frame_queue_clear_returns_tokens_to_pool) {
     size_t before = pool.available();
     queue.clear();
     ASSERT_EQ(pool.available(), before + 8);
-}
-
-TEST(frame_queue_clearWithSync_returns_tokens) {
-    DecodedAudioPool pool;
-    DecodedAudioQueue queue;
-
-    for (int i = 0; i < 5; i++) {
-        auto tok = pool.acquire();
-        ASSERT_TRUE(tok);
-        ASSERT_TRUE(queue.push(std::move(tok)));
-    }
-
-    size_t before = pool.available();
-    queue.clearWithSync();
-    ASSERT_EQ(pool.available(), before + 5);
 }
 
 TEST(frame_queue_full_rejects) {
@@ -287,85 +272,12 @@ TEST(pending_queue_push_pop) {
 }
 
 // ============================================================
-// Participant / ParticipantRegistry tests
+// JitterEstimator tests
 // ============================================================
 
-TEST(participant_registry_lifecycle) {
-    ParticipantRegistry registry;
-    ASSERT_EQ(registry.count(), 0);
-
-    Participant* p = registry.findOrCreate(100);
-    ASSERT_TRUE(p != nullptr);
-    ASSERT_EQ(registry.count(), 1);
-
-    // Same external ID returns same participant
-    Participant* p2 = registry.findOrCreate(100);
-    ASSERT_TRUE(p2 == p);
-    ASSERT_EQ(registry.count(), 1);
-
-    // Different external ID
-    Participant* p3 = registry.findOrCreate(200);
-    ASSERT_TRUE(p3 != nullptr);
-    ASSERT_TRUE(p3 != p);
-    ASSERT_EQ(registry.count(), 2);
-
-    // Remove
-    registry.remove(p->id());
-    ASSERT_EQ(registry.count(), 1);
-
-    registry.reset();
-    ASSERT_EQ(registry.count(), 0);
-}
-
-TEST(participant_state_transitions) {
-    ParticipantRegistry registry;
-    Participant* p = registry.findOrCreate(42);
-    ASSERT_TRUE(p != nullptr);
-
-    p->setState(ParticipantState::Connected);
-    ASSERT_TRUE(p->isConnected());
-
-    p->setState(ParticipantState::Active);
-    ASSERT_TRUE(p->isConnected());
-    ASSERT_EQ(p->state(), ParticipantState::Active);
-
-    p->setMuted(true);
-    ASSERT_TRUE(p->isMuted());
-
-    p->setAudioSlot(3);
-    ASSERT_EQ(p->audioSlot(), 3);
-    ASSERT_TRUE(p->hasAudioSlot());
-
-    registry.reset();
-}
-
-TEST(participant_registry_full) {
-    ParticipantRegistry registry;
-
-    // Fill to capacity
-    for (int i = 0; i < ParticipantRegistry::kMaxParticipants; i++) {
-        Participant* p = registry.findOrCreate(i + 1000);
-        ASSERT_TRUE(p != nullptr);
-    }
-    ASSERT_EQ(registry.count(), ParticipantRegistry::kMaxParticipants);
-
-    // Registry is full - should fail gracefully
-    Participant* overflow = registry.findOrCreate(9999);
-    ASSERT_TRUE(overflow == nullptr);
-
-    registry.reset();
-    ASSERT_EQ(registry.count(), 0);
-}
-
-// ============================================================
-// SyncController / JitterEstimator tests
-// ============================================================
-
-TEST(sync_controller_jitter_lifecycle) {
-    SyncController sync;
-
-    JitterEstimator* j = sync.getJitter(0);
-    ASSERT_TRUE(j != nullptr);
+TEST(jitter_estimator_lifecycle) {
+    JitterEstimator jitter;
+    jitter.reset();
 
     // Feed some packets
     int64_t pts = 0;
@@ -373,24 +285,23 @@ TEST(sync_controller_jitter_lifecycle) {
     for (int i = 0; i < 100; i++) {
         pts += 20000;       // 20ms
         arrival += 20000 + (i % 3 == 0 ? 500 : -200); // jitter
-        j->onPacket(pts, arrival);
+        jitter.onPacket(pts, arrival);
     }
 
-    int64_t target = j->bufferTargetUs();
+    int64_t target = jitter.bufferTargetUs();
     ASSERT_TRUE(target >= config::jitter::kMinBufferUs);
     ASSERT_TRUE(target <= config::jitter::kMaxBufferUs);
-
-    sync.release(0);
 }
 
-TEST(sync_controller_reset_all) {
-    SyncController sync;
+TEST(jitter_estimator_reset_no_leak) {
+    JitterEstimator jitter;
 
-    for (int i = 0; i < 10; i++) {
-        sync.getJitter(i);
+    // Feed packets then reset — no leak
+    for (int i = 0; i < 50; i++) {
+        jitter.onPacket(i * 20000, i * 20000 + 100);
     }
 
-    sync.resetAll();
+    jitter.reset();
     // No leak, no crash
 }
 
@@ -407,7 +318,7 @@ TEST(drift_compensator_lifecycle) {
     ASSERT_TRUE(!comp.isActive());
 
     // Feed drift data
-    comp.updateDrift(5000, 30000000, 2000, 0.8f);
+    comp.updateDrift(5000, 30000000, 2000);
     // Read ratio several times to let smoothing converge
     for (int i = 0; i < 100; i++) {
         ratio = comp.currentRatio();
@@ -563,48 +474,31 @@ TEST(opus_decoder_multiple_cycles) {
 // ============================================================
 
 #include "AudioMixer.h"
-#include "AudioDecodeSlot.h"
+#include "AudioDecodeChannel.h"
 
 TEST(audio_mixer_lifecycle_no_leak) {
     DecodedAudioPool pool;
-    constexpr int kSlots = 4;
-
-    std::array<AudioDecodeSlot, kSlots> slots{
-        AudioDecodeSlot(pool), AudioDecodeSlot(pool),
-        AudioDecodeSlot(pool), AudioDecodeSlot(pool)
-    };
-    for (int i = 0; i < kSlots; i++) {
-        slots[i].setSlotId(i);
-    }
-
-    std::array<AudioDecodeSlot*, AudioMixer::kMaxSlots> slotPtrs{};
-    for (int i = 0; i < kSlots; i++) {
-        slotPtrs[i] = &slots[i];
-    }
+    AudioDecodeChannel channel(pool);
 
     AudioMixer mixer;
-    mixer.setSlots(slotPtrs);
+    mixer.setChannel(&channel);
 
     float output[960];
     (void)mixer.mix(output, 960);
 }
 
-TEST(audio_mixer_bind_unbind_no_leak) {
+TEST(audio_mixer_activate_deactivate_no_leak) {
     DecodedAudioPool pool;
-    AudioDecodeSlot slot(pool);
-    slot.setSlotId(0);
-
-    std::array<AudioDecodeSlot*, AudioMixer::kMaxSlots> slotPtrs{};
-    slotPtrs[0] = &slot;
+    AudioDecodeChannel channel(pool);
 
     AudioMixer mixer;
-    mixer.setSlots(slotPtrs);
+    mixer.setChannel(&channel);
 
     for (int i = 0; i < 20; i++) {
-        slot.bind(i);
+        channel.activate();
         float output[960];
         (void)mixer.mix(output, 960);
-        slot.unbind();
+        channel.deactivate();
     }
 }
 
@@ -616,22 +510,9 @@ TEST(audio_mixer_bind_unbind_no_leak) {
 
 TEST(decode_thread_lifecycle_no_leak) {
     DecodedAudioPool pool;
-    constexpr int kSlots = 4;
+    AudioDecodeChannel channel(pool);
 
-    std::array<AudioDecodeSlot, kSlots> slots{
-        AudioDecodeSlot(pool), AudioDecodeSlot(pool),
-        AudioDecodeSlot(pool), AudioDecodeSlot(pool)
-    };
-    for (int i = 0; i < kSlots; i++) {
-        slots[i].setSlotId(i);
-    }
-
-    std::array<AudioDecodeSlot*, DecodeThread::kMaxAudioSlots> slotPtrs{};
-    for (int i = 0; i < kSlots; i++) {
-        slotPtrs[i] = &slots[i];
-    }
-
-    DecodeThread dt(slotPtrs);
+    DecodeThread dt(channel);
     ASSERT_TRUE(dt.start());
     ASSERT_TRUE(dt.isRunning());
 
@@ -643,10 +524,10 @@ TEST(decode_thread_lifecycle_no_leak) {
 
 TEST(decode_thread_rapid_start_stop_no_leak) {
     DecodedAudioPool pool;
-    std::array<AudioDecodeSlot*, DecodeThread::kMaxAudioSlots> slotPtrs{};
+    AudioDecodeChannel channel(pool);
 
     for (int i = 0; i < 10; i++) {
-        DecodeThread dt(slotPtrs);
+        DecodeThread dt(channel);
         ASSERT_TRUE(dt.start());
         dt.stop();
     }

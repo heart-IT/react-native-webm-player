@@ -1,7 +1,6 @@
 #pragma once
 
 #include <mutex>
-#include <unordered_map>
 #include <functional>
 #include <utility>
 
@@ -12,10 +11,13 @@ namespace media {
 //   iOS: (__bridge void*) to AVSampleBufferDisplayLayer
 using VideoSurface = void*;
 
-using KeyFrameRequestFn = std::function<void(int participantId)>;
+using KeyFrameRequestFn = std::function<void()>;
+using SurfaceLostFn = std::function<void()>;
 using SurfaceReleaseFn = std::function<void(VideoSurface)>;
 using SurfaceAcquireFn = std::function<void(VideoSurface)>;
 
+// Single-stream surface registry for broadcast playback.
+// Thread safety: all methods are mutex-protected.
 class VideoSurfaceRegistry {
 public:
     static VideoSurfaceRegistry& instance() noexcept {
@@ -33,52 +35,54 @@ public:
         acquireFn_ = std::move(fn);
     }
 
-    // Returns surface with caller-owned reference (must be released via releaseFn).
-    // Returns nullptr if participant not found. Holds lock during acquire.
-    VideoSurface acquireSurface(int participantId) {
+    // Returns surface with caller-owned reference (must be released).
+    // Returns nullptr if no surface registered.
+    VideoSurface acquireSurface() {
         std::lock_guard<std::mutex> lk(mtx_);
-        auto it = surfaces_.find(participantId);
-        if (it == surfaces_.end() || !it->second) return nullptr;
-        if (acquireFn_) acquireFn_(it->second);
-        return it->second;
+        if (!surface_) return nullptr;
+        if (acquireFn_) acquireFn_(surface_);
+        return surface_;
+    }
+
+    bool hasSurface() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return surface_ != nullptr;
     }
 
     // Takes ownership of one ref on `surface`. Caller must not release after this call.
-    void registerSurface(int participantId, VideoSurface surface) {
+    void registerSurface(VideoSurface surface) {
         KeyFrameRequestFn cb;
         {
             std::lock_guard<std::mutex> lk(mtx_);
-            auto it = surfaces_.find(participantId);
-            if (it != surfaces_.end()) {
-                if (it->second == surface) {
-                    // Same pointer re-registered — release caller's extra ref
-                    if (releaseFn_) releaseFn_(surface);
-                    return;
-                }
-                if (releaseFn_) releaseFn_(it->second);
+            if (surface_ == surface) {
+                if (releaseFn_) releaseFn_(surface);
+                return;
             }
-            surfaces_[participantId] = surface;
+            if (surface_ && releaseFn_) releaseFn_(surface_);
+            surface_ = surface;
             cb = keyFrameRequestFn_;
         }
-        if (cb) {
-            cb(participantId);
-        }
+        if (cb) cb();
     }
 
-    void unregisterSurface(int participantId) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        auto it = surfaces_.find(participantId);
-        if (it != surfaces_.end()) {
-            if (releaseFn_) releaseFn_(it->second);
-            surfaces_.erase(it);
+    void unregisterSurface() {
+        SurfaceLostFn lostCb;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (surface_) {
+                if (releaseFn_) releaseFn_(surface_);
+                surface_ = nullptr;
+                lostCb = surfaceLostFn_;
+            }
+            decodedWidth_ = 0;
+            decodedHeight_ = 0;
         }
-        decodedResolutions_.erase(participantId);
+        if (lostCb) lostCb();
     }
 
-    bool hasSurface(int participantId) {
+    void setSurfaceLostFn(SurfaceLostFn fn) {
         std::lock_guard<std::mutex> lk(mtx_);
-        auto it = surfaces_.find(participantId);
-        return it != surfaces_.end() && it->second != nullptr;
+        surfaceLostFn_ = std::move(fn);
     }
 
     void setKeyFrameRequestFn(KeyFrameRequestFn fn) {
@@ -86,34 +90,34 @@ public:
         keyFrameRequestFn_ = std::move(fn);
     }
 
-    void requestKeyFrame(int participantId) {
+    void requestKeyFrame() {
         KeyFrameRequestFn cb;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             cb = keyFrameRequestFn_;
         }
-        if (cb) cb(participantId);
+        if (cb) cb();
     }
 
-    void setDecodedResolution(int participantId, int w, int h) {
+    void setDecodedResolution(int w, int h) {
         std::lock_guard<std::mutex> lk(mtx_);
-        decodedResolutions_[participantId] = {w, h};
+        decodedWidth_ = w;
+        decodedHeight_ = h;
     }
 
-    std::pair<int,int> getDecodedResolution(int participantId) {
+    std::pair<int,int> getDecodedResolution() {
         std::lock_guard<std::mutex> lk(mtx_);
-        auto it = decodedResolutions_.find(participantId);
-        return it != decodedResolutions_.end() ? it->second : std::pair<int,int>{0, 0};
+        return {decodedWidth_, decodedHeight_};
     }
 
     void clear() {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (releaseFn_) {
-            for (auto& [_, s] : surfaces_) releaseFn_(s);
-        }
-        surfaces_.clear();
-        decodedResolutions_.clear();
+        if (surface_ && releaseFn_) releaseFn_(surface_);
+        surface_ = nullptr;
+        decodedWidth_ = 0;
+        decodedHeight_ = 0;
         keyFrameRequestFn_ = nullptr;
+        surfaceLostFn_ = nullptr;
         releaseFn_ = nullptr;
         acquireFn_ = nullptr;
     }
@@ -121,9 +125,11 @@ public:
 private:
     VideoSurfaceRegistry() = default;
     std::mutex mtx_;
-    std::unordered_map<int, VideoSurface> surfaces_;
-    std::unordered_map<int, std::pair<int,int>> decodedResolutions_;
+    VideoSurface surface_ = nullptr;
+    int decodedWidth_ = 0;
+    int decodedHeight_ = 0;
     KeyFrameRequestFn keyFrameRequestFn_;
+    SurfaceLostFn surfaceLostFn_;
     SurfaceReleaseFn releaseFn_;
     SurfaceAcquireFn acquireFn_;
 };

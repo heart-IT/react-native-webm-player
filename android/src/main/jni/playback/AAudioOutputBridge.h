@@ -4,7 +4,6 @@
 #include "common/ThreadAffinity.h"
 #include "common/MediaLog.h"
 #include "common/AudioResampler.h"
-#include "AudioSessionManager.h"
 #include <aaudio/AAudio.h>
 #include <atomic>
 #include <mutex>
@@ -23,24 +22,9 @@ struct AAudioConfig {
     int32_t framesPerBuffer = config::audio::kFrameSamples;
     aaudio_performance_mode_t performanceMode = AAUDIO_PERFORMANCE_MODE_LOW_LATENCY;
     aaudio_sharing_mode_t sharingMode = AAUDIO_SHARING_MODE_EXCLUSIVE;
-    int32_t sessionId = AAUDIO_SESSION_ID_ALLOCATE;
-    aaudio_usage_t usage = AAUDIO_USAGE_VOICE_COMMUNICATION;
-    aaudio_content_type_t contentType = AAUDIO_CONTENT_TYPE_SPEECH;
+    aaudio_usage_t usage = AAUDIO_USAGE_MEDIA;
+    aaudio_content_type_t contentType = AAUDIO_CONTENT_TYPE_MOVIE;
 };
-
-enum class LatencyMode : uint8_t {
-    Unknown = 0,
-    LowLatency,   // Lowest latency (exclusive hardware access on Android)
-    Standard       // Higher latency (shared with other apps on Android)
-};
-
-inline const char* latencyModeToString(LatencyMode mode) noexcept {
-    switch (mode) {
-        case LatencyMode::LowLatency: return "LowLatency";
-        case LatencyMode::Standard:   return "Standard";
-        default:                      return "Unknown";
-    }
-}
 
 class AAudioOutputBridge {
 public:
@@ -197,6 +181,18 @@ public:
         return state == kStateWarmUp || state == kStateActive;
     }
 
+    void pauseToWarmUp() noexcept {
+        uint8_t expected = kStateActive;
+        callbackState_.compare_exchange_strong(expected, kStateWarmUp,
+            std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
+
+    void resumeFromWarmUp() noexcept {
+        uint8_t expected = kStateWarmUp;
+        callbackState_.compare_exchange_strong(expected, kStateActive,
+            std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
+
     [[nodiscard]] int64_t framesWritten() const noexcept {
         return framesWritten_.load(std::memory_order_relaxed);
     }
@@ -228,6 +224,11 @@ public:
 
     [[nodiscard]] uint32_t restartCount() const noexcept {
         return restartCount_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool isSampleRateValid() const noexcept {
+        int32_t granted = grantedSampleRate_.load(std::memory_order_relaxed);
+        return granted == 0 || granted == config_.sampleRate;
     }
 
     [[nodiscard]] LatencyMode grantedLatencyMode() const noexcept {
@@ -268,10 +269,6 @@ private:
         AAudioStreamBuilder_setErrorCallback(builder, errorCallback, this);
         AAudioStreamBuilder_setUsage(builder, config_.usage);
         AAudioStreamBuilder_setContentType(builder, config_.contentType);
-        
-        if (config_.sessionId != AAUDIO_SESSION_ID_ALLOCATE) {
-            AAudioStreamBuilder_setSessionId(builder, config_.sessionId);
-        }
 
         AAudioStream* newStream = nullptr;
         result = AAudioStreamBuilder_openStream(builder, &newStream);
@@ -359,24 +356,13 @@ private:
         grantedLatencyMode_.store(latencyMode, std::memory_order_relaxed);
         
         int32_t callbackFrames = AAudioStream_getFramesPerDataCallback(newStream);
-        
-        int32_t allocatedSessionId = AAudioStream_getSessionId(newStream);
-        if (allocatedSessionId != AAUDIO_SESSION_ID_NONE && allocatedSessionId > 0 &&
-            config_.sessionId == AAUDIO_SESSION_ID_ALLOCATE) {
-            AudioSessionManager::instance().onSessionIdGenerated(allocatedSessionId);
-        }
-        
-        MEDIA_LOG_I("AAudio output stream: rate=%d ch=%d burst=%d buffer=%d callback=%d sharing=%d session=%d resample=%s",
+
+        MEDIA_LOG_I("AAudio output stream: rate=%d ch=%d burst=%d buffer=%d callback=%d sharing=%d resample=%s",
                     actualSampleRate, actualChannels, burstSize, actualBuffer,
-                    callbackFrames, grantedSharing, allocatedSessionId,
+                    callbackFrames, grantedSharing,
                     playbackResampler_.isPassthrough() ? "none" : "active");
 
         stream_.store(newStream, std::memory_order_release);
-
-        // Report measured output latency to AudioSessionManager for adaptive jitter buffering.
-        // This provides runtime measurement instead of relying solely on hardcoded codec estimates.
-        int64_t measuredLatencyUs = (static_cast<int64_t>(actualBuffer) * 1000000LL) / actualSampleRate;
-        AudioSessionManager::instance().updateMeasuredOutputLatency(measuredLatencyUs);
 
         return true;
     }
@@ -447,9 +433,7 @@ private:
 
             destroyStream();
             
-            if (!AudioSessionManager::instance().isVoiceModeEnabled()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(config::aaudio::kRestartDelayMs));
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(config::aaudio::kRestartDelayMs));
 
             if (!createStream() || !startStream()) {
                 int failures = consecutiveRestartFailures_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -622,8 +606,11 @@ private:
     std::atomic<int32_t> grantedSampleRate_{0};
 
     AudioResamplerFloat playbackResampler_;
-    // Buffer for mixer output before downsampling (max 6x: 960 * 6 = 5760 frames)
-    alignas(16) std::array<float, config::audio::kFrameSamples * 6> resampleSrcBuffer_{};
+    // Buffer for mixer output before downsampling.
+    // Sized for worst-case: 4096 hw frames at up to 6x upsample ratio (8kHz→48kHz).
+    // Matches iOS AVAudioOutputBridge sizing for platform parity.
+    static constexpr size_t kResampleSrcCapacity = 4096 * 6;
+    alignas(16) std::array<float, kResampleSrcCapacity> resampleSrcBuffer_{};
 };
 
 }  // namespace media

@@ -8,10 +8,14 @@ bool MediaCodecDecoder::initialize(ANativeWindow* surface) {
     if (!surface) return false;
 
     surface_ = surface;
-    initialized_.store(true, std::memory_order_release);
 
     // Configure VP9 decoder immediately — no SPS/PPS handshake needed
-    return configureCodec(media::video_config::kDefaultWidth, media::video_config::kDefaultHeight);
+    if (!configureCodec(media::video_config::kDefaultWidth, media::video_config::kDefaultHeight)) {
+        return false;
+    }
+
+    initialized_.store(true, std::memory_order_release);
+    return true;
 }
 
 void MediaCodecDecoder::shutdown() {
@@ -100,7 +104,32 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
     uint32_t flags = isKeyFrame ? AMEDIACODEC_BUFFER_FLAG_KEY_FRAME : 0;
     media_status_t status = AMediaCodec_queueInputBuffer(codec_, static_cast<size_t>(inputIdx),
                                                            0, size, static_cast<uint64_t>(ptsUs), flags);
-    return status == AMEDIA_OK;
+    if (status != AMEDIA_OK) {
+        ++consecutiveErrors_;
+        MEDIA_LOG_E("MediaCodecDecoder: queueInputBuffer failed: %d (consecutive=%d)",
+                    static_cast<int>(status), consecutiveErrors_);
+        if (consecutiveErrors_ >= kMaxConsecutiveErrors) {
+            int64_t now = media::nowUs();
+            if (now - lastResetTimeUs_ < resetBackoffUs_) {
+                return false;  // Within backoff window, just drop
+            }
+            MEDIA_LOG_W("MediaCodecDecoder: resetting decoder after %d errors (backoff=%lldms)",
+                        consecutiveErrors_, static_cast<long long>(resetBackoffUs_ / 1000));
+            consecutiveErrors_ = 0;
+            lastResetTimeUs_ = now;
+            resetBackoffUs_ = std::min(resetBackoffUs_ * 2, int64_t{2000000});
+            ++resetsSinceSuccess_;
+            if (videoMetrics_) videoMetrics_->decoderResets.fetch_add(1, std::memory_order_relaxed);
+            configureCodec(decodedWidth_, decodedHeight_);
+            if (keyFrameRequestFn_) keyFrameRequestFn_();
+        }
+        return false;
+    }
+
+    consecutiveErrors_ = 0;
+    resetBackoffUs_ = 100000;
+    resetsSinceSuccess_ = 0;
+    return true;
 }
 
 int MediaCodecDecoder::releaseOutputBuffers() {

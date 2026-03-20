@@ -4,6 +4,7 @@
 
 @implementation VideoView {
     AVSampleBufferDisplayLayer* _displayLayer;
+    BOOL _registered;
 }
 
 + (Class)layerClass {
@@ -13,38 +14,31 @@
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        _participantId = -1;
         _mirror = NO;
         _scaleMode = 1;
+        _registered = NO;
         _displayLayer = (AVSampleBufferDisplayLayer *)self.layer;
         _displayLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
     }
     return self;
 }
 
-- (void)dealloc {
-    if (_participantId >= 0) {
-        media::VideoSurfaceRegistry::instance().unregisterSurface(static_cast<int>(_participantId));
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window && !_registered) {
+        void* surface = (__bridge void*)_displayLayer;
+        CFRetain(surface);
+        media::VideoSurfaceRegistry::instance().registerSurface(surface);
+        _registered = YES;
+    } else if (!self.window && _registered) {
+        media::VideoSurfaceRegistry::instance().unregisterSurface();
+        _registered = NO;
     }
 }
 
-- (void)setParticipantId:(NSInteger)participantId {
-    if (_participantId == participantId) return;
-
-    if (_participantId >= 0) {
-        media::VideoSurfaceRegistry::instance().unregisterSurface(static_cast<int>(_participantId));
-    }
-
-    _participantId = participantId;
-
-    if (_participantId >= 0) {
-        // Register the display layer as the surface for this participant.
-        // The registry's acquireFn will retain the layer; we pass a +0 ref
-        // and the registry takes ownership via acquire.
-        void* surface = (__bridge void*)_displayLayer;
-        CFRetain(surface);
-        media::VideoSurfaceRegistry::instance().registerSurface(
-            static_cast<int>(_participantId), surface);
+- (void)dealloc {
+    if (_registered) {
+        media::VideoSurfaceRegistry::instance().unregisterSurface();
     }
 }
 

@@ -94,6 +94,7 @@ private:
 
     TrackInfo trackInfo_;
     ParseState state_ = ParseState::WaitingForEBML;
+    std::string parseError_;
 
     // Track the lowest buffer offset still needed so we can compact
     long long compactOffset_ = 0;

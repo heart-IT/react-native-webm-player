@@ -98,6 +98,12 @@ set(VIDEO_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/video/videoview_jni.cpp
 )
 
+# SpeexDSP resampler — vendored for drift compensation
+set(SPEEXDSP_ROOT ${CPP_ROOT}/third_party/speexdsp)
+set(SPEEXDSP_SOURCES
+    ${SPEEXDSP_ROOT}/libspeexdsp/resample.c
+)
+
 # WebM demuxer — incremental streaming parser using libwebm mkvparser
 set(DEMUX_SOURCES
     ${CPP_ROOT}/demux/WebmDemuxer.cpp
@@ -108,6 +114,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PLAYBACK_SOURCES}
     ${VIDEO_SOURCES}
     ${DEMUX_SOURCES}
+    ${SPEEXDSP_SOURCES}
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
@@ -125,9 +132,12 @@ target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
     ${opus_SOURCE_DIR}/include
     # libwebm headers
     ${libwebm_SOURCE_DIR}
+    # SpeexDSP headers
+    ${SPEEXDSP_ROOT}/include
+    ${SPEEXDSP_ROOT}/libspeexdsp
 )
 
-target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE HAVE_OPUS=1)
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE HAVE_OPUS=1 FLOATING_POINT=1 EXPORT=)
 
 if(NATIVE_RELEASE OR CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE NDEBUG)

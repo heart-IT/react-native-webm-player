@@ -35,24 +35,28 @@ public:
     void onVideoRender(int64_t ptsUs, int64_t localTimeUs) noexcept {
         if (!hasAudioRef_.load(std::memory_order_acquire)) return;
 
+        // Separate atomic loads for PTS and Time may yield a stale pair (torn read).
+        // This is acceptable: the EWMA (alpha=0.125) absorbs single-sample errors,
+        // and the cost of a 128-bit atomic or seqlock is not justified here.
         int64_t aPts = audioRenderPtsUs_.load(std::memory_order_acquire);
         int64_t aTime = audioRenderTimeUs_.load(std::memory_order_acquire);
-        if (aPts == 0) return;
 
         int64_t actualTimeDelta = localTimeUs - aTime;
         int64_t expectedTimeDelta = ptsUs - aPts;
         int64_t offset = actualTimeDelta - expectedTimeDelta;
 
         // EWMA smooth (alpha ~= 0.125)
-        smoothedOffsetUs_ += (offset - smoothedOffsetUs_) / 8;
+        int64_t smoothed = smoothedOffsetUs_.load(std::memory_order_relaxed);
+        smoothed += (offset - smoothed) / 8;
+        smoothedOffsetUs_.store(smoothed, std::memory_order_relaxed);
 
-        currentOffsetUs_.store(smoothedOffsetUs_, std::memory_order_relaxed);
+        currentOffsetUs_.store(smoothed, std::memory_order_relaxed);
     }
 
     // Returns video buffer adjustment in microseconds.
     // Positive = add delay (video is early), negative = reduce delay (video is late).
     [[nodiscard]] int64_t videoBufferAdjustmentUs() const noexcept {
-        int64_t offset = smoothedOffsetUs_;
+        int64_t offset = smoothedOffsetUs_.load(std::memory_order_relaxed);
         int64_t absOffset = offset < 0 ? -offset : offset;
 
         if (absOffset < kDeadZoneUs) return 0;
@@ -73,7 +77,7 @@ public:
         audioRenderPtsUs_.store(0, std::memory_order_relaxed);
         audioRenderTimeUs_.store(0, std::memory_order_relaxed);
         hasAudioRef_.store(false, std::memory_order_relaxed);
-        smoothedOffsetUs_ = 0;
+        smoothedOffsetUs_.store(0, std::memory_order_relaxed);
         currentOffsetUs_.store(0, std::memory_order_relaxed);
     }
 
@@ -87,8 +91,8 @@ private:
     std::atomic<int64_t> audioRenderTimeUs_{0};
     std::atomic<bool> hasAudioRef_{false};
 
-    // Smoothed offset (decode thread only — not atomic, only read via currentOffsetUs_ atomic)
-    int64_t smoothedOffsetUs_{0};
+    // Smoothed offset (decode thread writes, video buffer adjustment reads from decode thread)
+    std::atomic<int64_t> smoothedOffsetUs_{0};
 
     // Atomic snapshot for metrics/API access from any thread
     std::atomic<int64_t> currentOffsetUs_{0};

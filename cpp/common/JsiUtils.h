@@ -10,53 +10,6 @@ namespace jsiutil {
 
 namespace jsi = facebook::jsi;
 
-inline int getIntOr(jsi::Runtime& rt, jsi::Object& obj, const char* name, int defaultVal) {
-    if (!obj.hasProperty(rt, name)) return defaultVal;
-
-    jsi::Value prop = obj.getProperty(rt, name);
-    if (!prop.isNumber()) return defaultVal;
-
-    double val = prop.asNumber();
-    if (!std::isfinite(val) ||
-        val < static_cast<double>(std::numeric_limits<int>::min()) ||
-        val > static_cast<double>(std::numeric_limits<int>::max())) {
-        return defaultVal;
-    }
-    return static_cast<int>(val);
-}
-
-inline double getDoubleOr(jsi::Runtime& rt, jsi::Object& obj, const char* name, double defaultVal) {
-    if (!obj.hasProperty(rt, name)) return defaultVal;
-
-    jsi::Value prop = obj.getProperty(rt, name);
-    if (!prop.isNumber()) return defaultVal;
-
-    double val = prop.asNumber();
-    return std::isfinite(val) ? val : defaultVal;
-}
-
-inline float getFloatOr(jsi::Runtime& rt, jsi::Object& obj, const char* name, float defaultVal) {
-    return static_cast<float>(getDoubleOr(rt, obj, name, static_cast<double>(defaultVal)));
-}
-
-inline bool getBoolOr(jsi::Runtime& rt, jsi::Object& obj, const char* name, bool defaultVal) {
-    if (!obj.hasProperty(rt, name)) return defaultVal;
-
-    jsi::Value prop = obj.getProperty(rt, name);
-    if (!prop.isBool()) return defaultVal;
-
-    return prop.getBool();
-}
-
-inline std::string getStringOr(jsi::Runtime& rt, jsi::Object& obj, const char* name, const std::string& defaultVal) {
-    if (!obj.hasProperty(rt, name)) return defaultVal;
-
-    jsi::Value prop = obj.getProperty(rt, name);
-    if (!prop.isString()) return defaultVal;
-
-    return prop.asString(rt).utf8(rt);
-}
-
 // Safe argument extraction for JSI method handlers.
 // Prevents undefined behavior from static_cast<int>(NaN/Infinity).
 inline int safeIntArg(jsi::Runtime& rt, const jsi::Value& val, const char* name) {
@@ -87,54 +40,53 @@ inline float safeFloatArg(jsi::Runtime& rt, const jsi::Value& val, const char* n
     return static_cast<float>(d);
 }
 
-namespace detail {
+// Shared buffer extraction for JSI ArrayBuffer / TypedArray arguments.
+// Used by both MediaPipelineModule and VideoPipelineModule on both platforms.
+struct BufferView {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    explicit operator bool() const noexcept { return data && size > 0; }
+};
 
-constexpr uint32_t fnv1a(const char* s, size_t len) noexcept {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < len; ++i) {
-        hash ^= static_cast<uint32_t>(s[i]);
-        hash *= 16777619u;
+inline BufferView extractBuffer(jsi::Runtime& rt, const jsi::Value& bufferVal) {
+    BufferView result;
+    if (!bufferVal.isObject()) return result;
+
+    jsi::Object obj = bufferVal.getObject(rt);
+
+    if (obj.isArrayBuffer(rt)) {
+        jsi::ArrayBuffer ab = obj.getArrayBuffer(rt);
+        uint8_t* ptr = ab.data(rt);
+        size_t sz = ab.size(rt);
+        if (ptr && sz > 0) { result.data = ptr; result.size = sz; }
+        return result;
     }
-    return hash;
-}
 
-}  // namespace detail
+    jsi::Value bufferProp = obj.getProperty(rt, "buffer");
+    if (!bufferProp.isObject()) return result;
+    jsi::Object bufferObj = bufferProp.getObject(rt);
+    if (!bufferObj.isArrayBuffer(rt)) return result;
 
-constexpr uint32_t operator""_h(const char* s, size_t len) noexcept {
-    return detail::fnv1a(s, len);
-}
+    jsi::ArrayBuffer ab = bufferObj.getArrayBuffer(rt);
+    uint8_t* basePtr = ab.data(rt);
+    size_t totalSize = ab.size(rt);
+    if (!basePtr || totalSize == 0) return result;
 
-inline uint32_t hash(const std::string& s) noexcept {
-    return detail::fnv1a(s.data(), s.size());
-}
-
-inline uint32_t hash(const char* s, size_t len) noexcept {
-    return detail::fnv1a(s, len);
-}
-
-// Hash collision safety: JSIMETHOD expands to a switch-case label with
-// a constexpr hash. Duplicate hashes produce duplicate case labels, which
-// is a compile error in C++. This provides implicit collision detection.
-#define JSIMETHOD(str, id) \
-    case ::jsiutil::detail::fnv1a(str, sizeof(str) - 1): \
-        if (name.size() == sizeof(str) - 1) return id; \
-        break
-
-// Explicit compile-time collision assertion for use outside switch contexts.
-// Usage: static_assert(jsiutil::detail::hashes_unique("a", "b", "c"));
-namespace detail {
-
-template<typename... Strs>
-constexpr bool hashes_unique(Strs... strs) noexcept {
-    uint32_t hashes[] = { fnv1a(strs, __builtin_strlen(strs))... };
-    for (size_t i = 0; i < sizeof...(strs); ++i) {
-        for (size_t j = i + 1; j < sizeof...(strs); ++j) {
-            if (hashes[i] == hashes[j]) return false;
-        }
+    size_t offset = 0, length = totalSize;
+    jsi::Value offsetVal = obj.getProperty(rt, "byteOffset");
+    if (offsetVal.isNumber()) {
+        double d = offsetVal.asNumber();
+        if (std::isfinite(d) && d >= 0) offset = static_cast<size_t>(d);
     }
-    return true;
+    jsi::Value lengthVal = obj.getProperty(rt, "byteLength");
+    if (lengthVal.isNumber()) {
+        double d = lengthVal.asNumber();
+        if (std::isfinite(d) && d > 0) length = static_cast<size_t>(d);
+    }
+    if (offset > totalSize || length > totalSize - offset) return result;
+    result.data = basePtr + offset;
+    result.size = length;
+    return result;
 }
-
-}  // namespace detail
 
 }  // namespace jsiutil

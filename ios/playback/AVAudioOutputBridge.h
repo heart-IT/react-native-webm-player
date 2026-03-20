@@ -6,7 +6,7 @@
 // - Explicit resampling (48kHz mixer → hardware rate) via AudioResamplerFloat
 //
 // Threading model:
-// - warmUp()/start()/stop() called from JS thread
+// - start()/stop() called from JS thread
 // - Audio Unit render callback on high-priority audio thread
 // - Restart thread for error recovery with exponential backoff
 #pragma once
@@ -50,27 +50,13 @@ struct AVAudioConfig {
     int32_t framesPerBuffer = config::audio::kFrameSamples;
 };
 
-enum class LatencyMode : uint8_t {
-    Unknown = 0,
-    LowLatency,   // Voice communication mode
-    Standard      // Standard playback mode
-};
-
-inline const char* latencyModeToString(LatencyMode mode) noexcept {
-    switch (mode) {
-        case LatencyMode::LowLatency: return "LowLatency";
-        case LatencyMode::Standard:   return "Standard";
-        default:                          return "Unknown";
-    }
-}
-
 class AVAudioOutputBridge {
 public:
     using AudioCallback = std::function<size_t(float* output, size_t frameCount)>;
     using RestartCallback = std::function<void()>;
 
     static constexpr uint8_t kStateStopped = 0;
-    static constexpr uint8_t kStateWarmUp = 1;      // Audio Unit running with silence (hardware hot)
+    static constexpr uint8_t kStateWarmUp = 1;      // AudioUnit running with silence (hardware hot)
     static constexpr uint8_t kStateActive = 2;
     static constexpr uint8_t kStateShuttingDown = 3;
     static constexpr int kMaxRestartRetries = 5;
@@ -84,11 +70,7 @@ public:
 
     void setRestartCallback(RestartCallback cb) noexcept;
 
-    // Pre-activate AVAudioSession and start Audio Unit with silence.
-    // Reduces first-frame latency by keeping hardware "hot".
-    // Call before audio is expected, then call start() when ready for real audio.
     [[nodiscard]] bool warmUp() noexcept;
-
     [[nodiscard]] bool start() noexcept;
     void stop() noexcept;
 
@@ -103,6 +85,18 @@ public:
     [[nodiscard]] bool isRunning() const noexcept {
         uint8_t state = callbackState_.load(std::memory_order_acquire);
         return state == kStateWarmUp || state == kStateActive;
+    }
+
+    void pauseToWarmUp() noexcept {
+        uint8_t expected = kStateActive;
+        callbackState_.compare_exchange_strong(expected, kStateWarmUp,
+            std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
+
+    void resumeFromWarmUp() noexcept {
+        uint8_t expected = kStateWarmUp;
+        callbackState_.compare_exchange_strong(expected, kStateActive,
+            std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 
     [[nodiscard]] int64_t framesWritten() const noexcept {
@@ -199,8 +193,6 @@ private:
     std::atomic<int32_t> grantedSampleRate_{0};
     std::atomic<bool> sampleRateValid_{false};
 
-    // Cached AudioSessionManager pointer for RT callback path (avoids Meyers-singleton guard)
-    std::atomic<class AudioSessionManager*> sessionMgr_{nullptr};
 };
 
 }  // namespace media

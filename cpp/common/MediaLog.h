@@ -37,10 +37,6 @@ inline std::atomic<Level>& minLevel() noexcept {
     return level;
 }
 
-inline void setMinLevel(Level level) noexcept {
-    minLevel().store(level, std::memory_order_relaxed);
-}
-
 inline Level getMinLevel() noexcept {
     return minLevel().load(std::memory_order_relaxed);
 }
@@ -106,14 +102,5 @@ inline void log(Level level, const char* msg) noexcept {
 #define MEDIA_LOG_I(fmt, ...) ::media::log::log(::media::log::Level::Info, fmt, ##__VA_ARGS__)
 #define MEDIA_LOG_W(fmt, ...) ::media::log::log(::media::log::Level::Warn, fmt, ##__VA_ARGS__)
 #define MEDIA_LOG_E(fmt, ...) ::media::log::log(::media::log::Level::Error, fmt, ##__VA_ARGS__)
-
-// Simplified error codes - only define what's actually used
-namespace error {
-
-constexpr int kSuccess = 0;
-constexpr int kInvalidArgument = -1;
-constexpr int kEncoderFailed = -2;
-
-}  // namespace error
 
 }  // namespace media

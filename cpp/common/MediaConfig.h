@@ -11,8 +11,6 @@
 
 namespace media::config {
 
-constexpr const char* kVersion = "1.0.0";
-
 #ifdef __cpp_lib_hardware_interference_size
     constexpr size_t kCacheLineSize = std::hardware_destructive_interference_size;
 #else
@@ -20,11 +18,6 @@ constexpr const char* kVersion = "1.0.0";
 #endif
 
 constexpr size_t kSimdAlignment = 16;
-
-namespace limits {
-    constexpr int kMaxParticipants = 64;
-    constexpr int kMaxAudioSlots = 16;
-}
 
 namespace audio {
     constexpr int kSampleRate = 48000;
@@ -35,11 +28,9 @@ namespace audio {
     constexpr int kFrameSize = kFrameSamples * kChannels;
     constexpr size_t kMaxEncodedFrameSize = 1275;  // Opus spec maximum per packet
 
-    constexpr size_t kDecodePoolSize = 64;
-    constexpr size_t kDecodeQueueDepth = 32;
-    constexpr size_t kPcmPoolSize = 64;
-    constexpr size_t kPcmQueueDepth = 32;
-    constexpr size_t kPendingFrameCapacity = 128;
+    constexpr size_t kDecodePoolSize = 16;
+    constexpr size_t kDecodeQueueDepth = 8;
+    constexpr size_t kPendingFrameCapacity = 16;
 
     constexpr int kMaxConsecutiveDecodeErrors = 10;
 
@@ -50,10 +41,10 @@ namespace audio {
     static_assert((kPendingFrameCapacity & (kPendingFrameCapacity - 1)) == 0);
 
     constexpr int64_t kPLCThresholdUs = 40000;  // 2 frames proactive — generate PLC while 1 real frame remains
-    // Burst absorption ceiling: sized to absorb worst-case Hypercore bursts
-    // (75+ frames in <5ms) without front-door drops. Fast-drain in readSamples()
-    // discards excess decoded frames to keep actual latency near jitter target.
-    constexpr int64_t kMaxBufferedUs = 2560000;
+    // Burst absorption ceiling: upper bound on buffered audio duration.
+    // Fast-drain in readSamples() discards excess decoded frames to keep
+    // actual latency near jitter target.
+    constexpr int64_t kMaxBufferedUs = 400000;  // 400ms — 20 frames
 }
 
 namespace jitter {
@@ -67,13 +58,6 @@ namespace jitter {
     constexpr int kMinSamplesForEstimate = 8;
 }
 
-// Bluetooth A2DP conservative latency fallback.
-// Per-codec detection requires hidden Android APIs and is unavailable on iOS,
-// so we use a conservative default covering worst-case SBC latency (~150ms).
-namespace a2dp {
-    constexpr int64_t kLatencyUnknownUs = 150000;  // 150ms - conservative SBC worst-case (cross-platform)
-}
-
 namespace mix {
     constexpr float kDefaultGain = 1.0f;
     constexpr float kMinGain = 0.0f;
@@ -82,13 +66,9 @@ namespace mix {
 
 namespace thread {
     constexpr int64_t kDecodeLoopSleepUs = 500;
-    constexpr int64_t kAdmissionIntervalUs = 25000;
 
     // Idle cycle handling - increase sleep after consecutive idle cycles
     constexpr int kIdleCycleThreshold = 4;
-
-    // Watchdog timeout - detect decode thread stalls
-    constexpr int64_t kWatchdogTimeoutUs = 2'000'000;
 
     // Soft deadline: poll exitFlag up to this long before escalating
     constexpr int64_t kThreadJoinTimeoutMs = 500;
@@ -172,7 +152,7 @@ namespace fastdrain {
 
 namespace crossfade {
     // Underrun/resume crossfade length — prevents clicks on silence transitions.
-    // 5ms matches Chromium WebRTC's CNG (comfort noise generator) fade length.
+    // 5ms matches Chromium WebRTC's fade length.
     constexpr size_t kFadeSamples = 240;  // 5ms at 48kHz
 }
 
@@ -202,53 +182,12 @@ namespace aaudio {
     constexpr int32_t kRestartDelayMs = 100;
 }
 
-namespace admission {
-    constexpr int64_t kMinSlotHoldUs = 500000;
-    constexpr int64_t kInactivityTimeoutUs = 30'000'000;       // 30s before slot release
-    constexpr int64_t kInactivityCheckIntervalUs = 5'000'000;  // Check every 5s during idle
-}
-
 namespace pool {
-    constexpr size_t kBackpressureThresholdPercent = 25;  // Signal backpressure when < 25% available
-    // Per-slot decoded frame cap prevents any single slot from exhausting the
-    // shared DecodedAudioPool. Without this, N slots in Buffering state could
-    // each fill their decoded queue, consuming all pool tokens and stalling
-    // decode for all other slots (liveness failure).
-    // Value: pool / slots = 64 / 16 = 4 decoded frames (80ms) per slot.
-    constexpr size_t kMaxDecodedPerSlot = audio::kDecodePoolSize / limits::kMaxAudioSlots;
-    static_assert(kMaxDecodedPerSlot >= 2, "Per-slot cap must allow at least 2 decoded frames");
+    constexpr size_t kBackpressureThresholdPercent = 25;
 }
 
 namespace sentinel {
-    constexpr int kNoParticipant = -1;
-    constexpr int kNoSlot = -1;
     constexpr int64_t kNoTimestamp = INT64_MIN;
-}
-
-namespace dtx {
-    // DTX silence marker: application-level sentinel for discontinuous transmission.
-    // Sent by encoder when DTX detects silence (0 bytes output), recognized by
-    // decoder to output clean silence instead of PLC concealment.
-    //
-    // Collision analysis: {0xFC, 0xFF, 0xFE} IS a structurally valid Opus packet
-    // (TOC=0xFC → config 31 = CELT 2.5ms mono, 1 frame, 2-byte payload). However,
-    // this encoder only produces 20ms frames (config 15 at 48kHz), and real encoded
-    // frames are typically 60-80 bytes at 32kbps. A 3-byte packet with TOC config 31
-    // cannot originate from this encoder's configuration. Collision requires:
-    //   1. Frame size = 3 bytes (extremely small for any real audio)
-    //   2. First byte = 0xFC (wrong frame duration for this encoder)
-    //   3. Exact payload bytes {0xFF, 0xFE}
-    // Risk is negligible for this closed system; transport corruption is handled by
-    // checksums at the Hypercore layer.
-    constexpr uint8_t kDtxFrame[3] = { 0xFC, 0xFF, 0xFE };
-
-    // Comfort noise level during DTX silence (replaces dead digital zeros)
-    constexpr float kComfortNoiseLevel = 0.001f;        // -60dBFS peak amplitude
-    constexpr float kComfortNoiseCutoffHz = 1000.0f;     // Lowpass shaping cutoff
-
-    // Verify our frame duration never produces TOC config 31 (2.5ms CELT)
-    static_assert(audio::kFrameDurationMs >= 10,
-                  "DTX marker assumes frame duration >= 10ms (TOC config != 31)");
 }
 
 namespace plc {
@@ -283,12 +222,6 @@ namespace validation {
     static_assert(jitter::kDefaultBufferUs < audio::kMaxBufferedUs);
 
     static_assert(audio::kDecodePoolSize >= audio::kDecodeQueueDepth + 4);
-    static_assert(audio::kPcmPoolSize >= audio::kPcmQueueDepth + 4);
-    static_assert((audio::kPcmPoolSize & (audio::kPcmPoolSize - 1)) == 0);
-    static_assert((audio::kPcmQueueDepth & (audio::kPcmQueueDepth - 1)) == 0);
-
-    static_assert(limits::kMaxParticipants > 0 && limits::kMaxParticipants <= 256);
-    static_assert(limits::kMaxAudioSlots > 0 && limits::kMaxAudioSlots <= limits::kMaxParticipants);
 
     static_assert(mix::kMinGain >= 0.0f);
     static_assert(mix::kMaxGain > mix::kMinGain);

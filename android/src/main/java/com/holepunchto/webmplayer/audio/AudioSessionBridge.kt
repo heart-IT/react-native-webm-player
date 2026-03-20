@@ -1,4 +1,4 @@
-// AudioSessionBridge.kt - Manages audio session, AEC, focus, lifecycle, and Bluetooth
+// AudioSessionBridge.kt - Manages audio routing and Bluetooth for playback
 package com.holepunchto.webmplayer.audio
 
 import android.Manifest
@@ -14,17 +14,14 @@ import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
-import android.media.AudioFormat
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.AudioTrack
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
-import java.util.concurrent.atomic.AtomicInteger
 
 object AudioSessionBridge : DefaultLifecycleObserver {
     private const val TAG = "AudioSessionBridge"
@@ -40,89 +37,20 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         const val USB_DEVICE = 6
     }
 
-    // Echo modes matching native enum
-    object EchoMode {
-        const val HARDWARE_AEC = 0
-        const val BLUETOOTH_AEC = 1
-        const val NONE = 2
-    }
-
-    // Audio focus states matching native enum
-    object FocusState {
-        const val NONE = 0
-        const val GAIN = 1
-        const val LOSS = 2
-        const val LOSS_TRANSIENT = 3
-        const val LOSS_TRANSIENT_CAN_DUCK = 4
-    }
-
     @Volatile private var audioManager: AudioManager? = null
     @Volatile private var context: Context? = null
     @Volatile private var initialized = false
-    private var currentSessionId: Int = AudioManager.AUDIO_SESSION_ID_GENERATE
-    @Volatile private var voiceModeEnabled = false
-    @Volatile private var isForeground = true
-    @Volatile private var hasAudioFocus = false
-    @Volatile private var focusDelayedPending = false
     @Volatile private var speakerPreferred = true  // Default to speaker on app start
     @Volatile private var hasEarpiece = true  // Cached at init, false on tablets
     @Volatile private var connectedBtDeviceName: String? = null
-    // User's preferred BT type for routeToBestDevice(). When both SCO and A2DP are
-    // available, this determines which one auto-routing selects. Defaults to SCO
-    // (bidirectional, lower latency for voice). Updated by explicit setAudioRoute() calls.
     @Volatile private var preferredBtType: Int = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-    // Tracks pending legacy SCO connection attempt. Set before startBluetoothSco(),
-    // cleared on ACTION_SCO_AUDIO_STATE_UPDATED (CONNECTED or DISCONNECTED).
-    @Volatile private var scoConnectionPending = false
-    // Monotonic counter incremented on each legacy SCO connection attempt.
-    // Timeout lambdas capture the current value and only act if it still matches,
-    // preventing stale timeouts from cancelling valid SCO connections.
-    private val scoGeneration = AtomicInteger(0)
-    private val focusLock = Any()
+    @Volatile private var audioFocusRequest: AudioFocusRequest? = null
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val activeStreams = AtomicInteger(0)
 
     private var routeReceiver: BroadcastReceiver? = null
     private var bluetoothReceiver: BroadcastReceiver? = null
-    private var audioFocusRequest: AudioFocusRequest? = null
     private var communicationDeviceListener: Any? = null
     private var audioDeviceCallback: AudioDeviceCallback? = null
-    // Ensures JNI focus callbacks run on main thread
-    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
-        mainHandler.post {
-            handleAudioFocusChange(focusChange)
-        }
-    }
-
-    private fun handleAudioFocusChange(focusChange: Int) {
-        synchronized(focusLock) {
-            val state = when (focusChange) {
-                AudioManager.AUDIOFOCUS_GAIN,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK -> {
-                    hasAudioFocus = true
-                    focusDelayedPending = false
-                    FocusState.GAIN
-                }
-                AudioManager.AUDIOFOCUS_LOSS -> {
-                    hasAudioFocus = false
-                    focusDelayedPending = false
-                    FocusState.LOSS
-                }
-                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                    hasAudioFocus = false
-                    FocusState.LOSS_TRANSIENT
-                }
-                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                    FocusState.LOSS_TRANSIENT_CAN_DUCK
-                }
-                else -> FocusState.NONE
-            }
-
-            Log.i(TAG, "Audio focus changed: ${focusStateToString(state)}")
-            nativeOnAudioFocusChanged(state)
-        }
-    }
 
     @JvmStatic
     @Synchronized
@@ -148,6 +76,7 @@ object AudioSessionBridge : DefaultLifecycleObserver {
             registerCommunicationDeviceListener()
         }
         registerLifecycleObserver()
+        requestAudioFocus()
 
         initialized = true
 
@@ -166,21 +95,17 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         unregisterAudioDeviceCallback()
         unregisterRouteReceiver()
         unregisterBluetoothReceiver()
-        abandonAudioFocus()
-        setVoiceMode(false)
 
-        // Cancel all pending mainHandler callbacks (BT restart, SCO timeout,
-        // routeToBestDevice debounce) BEFORE nativeDestroy() to prevent stale
-        // runnables from invoking JNI on destroyed native state.
+        // Cancel all pending mainHandler callbacks (BT restart, routeToBestDevice debounce)
+        // BEFORE nativeDestroy() to prevent stale runnables from invoking JNI on destroyed
+        // native state.
         mainHandler.removeCallbacksAndMessages(null)
 
+        abandonAudioFocus()
         nativeDestroy()
 
-        activeStreams.set(0)
         connectedBtDeviceName = null
         preferredBtType = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-        scoConnectionPending = false
-        scoGeneration.set(0)
         speakerPreferred = true
         audioManager = null
         context = null
@@ -189,85 +114,12 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         Log.d(TAG, "AudioSessionBridge destroyed")
     }
 
-    /**
-     * Called internally when a capture or playback stream starts.
-     * On first stream: requests audio focus, enables voice mode, generates session ID.
-     */
-    @JvmStatic
-    @Synchronized
-    fun startSession() {
-        if (!initialized) return
-
-        val count = activeStreams.incrementAndGet()
-        if (count == 1) {
-            Log.i(TAG, "startSession: first stream, configuring audio session")
-            // Re-attempt BT receiver registration if it was skipped at init
-            // (BLUETOOTH_CONNECT wasn't granted yet). By startSession() time
-            // the app should have requested permissions.
-            if (bluetoothReceiver == null) {
-                registerBluetoothReceiver()
-            }
-            queryConnectedBtDeviceName()
-            setVoiceMode(true)
-            if (!requestAudioFocus()) {
-                nativeOnAudioFocusChanged(FocusState.LOSS_TRANSIENT)
-            }
-            generateSessionId()
-
-            // Deferred BT restart: if BT is the active device at startup, the SCO/HFP
-            // link may still be negotiating parameters (sample rate, codec). Schedule a
-            // route re-detection after 1s so streams are restarted with the actual
-            // negotiated parameters. Parity with iOS AudioSessionManager deferred restart.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val am = audioManager
-                val currentDevice = am?.communicationDevice
-                if (currentDevice != null && isBtType(currentDevice.type)) {
-                    Log.i(TAG, "startSession: BT active at startup, scheduling deferred restart")
-                    mainHandler.postDelayed({
-                        if (initialized && activeStreams.get() > 0) {
-                            Log.i(TAG, "startSession: executing deferred BT restart")
-                            onRouteChanged()
-                        }
-                    }, 1000)
-                }
-            }
-        } else {
-            Log.i(TAG, "startSession: stream count=$count")
-        }
-    }
-
-    /**
-     * Called internally when a capture or playback stream stops.
-     * On last stream: abandons audio focus, disables voice mode.
-     */
-    @JvmStatic
-    @Synchronized
-    fun stopSession() {
-        if (!initialized) return
-
-        val count = activeStreams.updateAndGet { c -> maxOf(0, c - 1) }
-        if (count == 0) {
-            Log.i(TAG, "stopSession: last stream, releasing audio session")
-            abandonAudioFocus()
-            setVoiceMode(false)
-        } else {
-            Log.i(TAG, "stopSession: stream count=$count")
-        }
-    }
-
     override fun onStart(owner: LifecycleOwner) {
-        isForeground = true
         Log.i(TAG, "App foregrounded")
-        nativeOnLifecycleChanged(true)
-
-        // Xiaomi MIUI recovery is now handled by the C++ XiaomiModeResetQuirk
-        // via LifecycleForeground event dispatched to the routing state machine.
     }
 
     override fun onStop(owner: LifecycleOwner) {
-        isForeground = false
         Log.i(TAG, "App backgrounded")
-        nativeOnLifecycleChanged(false)
     }
 
     private fun registerLifecycleObserver() {
@@ -288,168 +140,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
     }
 
     /**
-     * Request audio focus for voice communication.
-     * Call this before starting capture/playback.
-     * Returns true if focus granted immediately, false if denied.
-     * Use isFocusDelayedPending() to check if focus was delayed.
-     */
-    @JvmStatic
-    fun requestAudioFocus(): Boolean {
-        val am = audioManager ?: return false
-
-        synchronized(focusLock) {
-            if (hasAudioFocus) {
-                Log.d(TAG, "Already have audio focus")
-                return true
-            }
-
-            val attributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-
-            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(attributes)
-                .setAcceptsDelayedFocusGain(true)
-                .setWillPauseWhenDucked(false)
-                .setOnAudioFocusChangeListener(audioFocusChangeListener, mainHandler)
-                .build()
-
-            val result = am.requestAudioFocus(audioFocusRequest!!)
-
-            when (result) {
-                AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> {
-                    hasAudioFocus = true
-                    focusDelayedPending = false
-                    nativeOnAudioFocusChanged(FocusState.GAIN)
-                    Log.i(TAG, "Audio focus request: granted")
-                    return true
-                }
-                AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> {
-                    hasAudioFocus = false
-                    focusDelayedPending = true
-                    Log.i(TAG, "Audio focus request: delayed (will be granted later)")
-                    return false
-                }
-                else -> {
-                    hasAudioFocus = false
-                    focusDelayedPending = false
-                    Log.i(TAG, "Audio focus request: denied")
-                    return false
-                }
-            }
-        }
-    }
-
-    /**
-     * Abandon audio focus.
-     * Call this when stopping audio.
-     */
-    @JvmStatic
-    fun abandonAudioFocus() {
-        val am = audioManager ?: return
-
-        synchronized(focusLock) {
-            if (!hasAudioFocus && audioFocusRequest == null && !focusDelayedPending) return
-
-            audioFocusRequest?.let {
-                am.abandonAudioFocusRequest(it)
-                audioFocusRequest = null
-            }
-
-            hasAudioFocus = false
-            focusDelayedPending = false
-            nativeOnAudioFocusChanged(FocusState.NONE)
-            Log.i(TAG, "Audio focus abandoned")
-        }
-    }
-
-    /**
-     * Generate a session ID from AudioTrack for AEC correlation.
-     * CRITICAL: Both input and output streams must use this session ID for AEC to work.
-     */
-    @JvmStatic
-    fun generateSessionId(): Int {
-        if (audioManager == null) return AudioManager.AUDIO_SESSION_ID_GENERATE
-
-        val attributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build()
-
-        val format = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(48000)
-            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-            .build()
-
-        val minBufferSize = AudioTrack.getMinBufferSize(
-            48000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
-        )
-
-        val track = try {
-            AudioTrack.Builder()
-                .setAudioAttributes(attributes)
-                .setAudioFormat(format)
-                .setBufferSizeInBytes(minBufferSize)
-                .setSessionId(AudioManager.AUDIO_SESSION_ID_GENERATE)
-                .build()
-        } catch (e: Exception) {
-            Log.w(TAG, "generateSessionId: AudioTrack.Builder failed: ${e.message}")
-            return AudioManager.AUDIO_SESSION_ID_GENERATE
-        }
-
-        try {
-            currentSessionId = track.audioSessionId
-            nativeOnSessionIdGenerated(currentSessionId)
-            Log.i(TAG, "Generated session ID: $currentSessionId")
-            return currentSessionId
-        } finally {
-            track.release()
-        }
-    }
-
-    /**
-     * Enable voice communication mode for AEC/NS.
-     * Call this before starting audio capture/playback.
-     */
-    @JvmStatic
-    fun setVoiceMode(enable: Boolean) {
-        val am = audioManager ?: return
-
-        // Set voiceModeEnabled BEFORE routing so guards in AudioDeviceCallback
-        // and BluetoothReceiver read the correct value if they fire during setup.
-        voiceModeEnabled = enable
-
-        if (enable) {
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
-
-            // Route to the best available device: prefer connected BT/wired/USB over builtin.
-            // Use routeToBestDeviceNow() — setup path needs immediate effect, not debounced.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                routeToBestDeviceNow()
-            } else {
-                @Suppress("DEPRECATION")
-                if (am.isBluetoothScoOn) {
-                    // SCO already active — keep it
-                    am.isSpeakerphoneOn = false
-                } else {
-                    am.isSpeakerphoneOn = speakerPreferred
-                }
-            }
-        } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                am.clearCommunicationDevice()
-            }
-            am.mode = AudioManager.MODE_NORMAL
-        }
-
-        nativeSetVoiceMode(enable)
-
-        Log.i(TAG, "Voice mode: ${if (enable) "enabled" else "disabled"}, speaker=$speakerPreferred")
-    }
-
-    /**
      * Set the audio output route.
      * @param route One of Route.SPEAKER, Route.EARPIECE, Route.BLUETOOTH_SCO
      * @param deviceId Optional platform-specific device ID to target a specific device.
@@ -459,11 +149,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
     @JvmStatic
     fun setAudioRoute(route: Int, deviceId: String = ""): Boolean {
         val am = audioManager ?: return false
-
-        if (!voiceModeEnabled) {
-            Log.w(TAG, "setAudioRoute: called before voice mode enabled")
-            return false
-        }
 
         Log.i(TAG, "setAudioRoute: ${routeToString(route)}${if (deviceId.isNotEmpty()) " deviceId=$deviceId" else ""}")
 
@@ -561,29 +246,9 @@ object AudioSessionBridge : DefaultLifecycleObserver {
             }
             Route.BLUETOOTH_SCO -> {
                 am.isSpeakerphoneOn = false
-                scoConnectionPending = true
-                val gen = scoGeneration.incrementAndGet()
                 am.startBluetoothSco()
                 am.isBluetoothScoOn = true
-                // SCO link takes 100-500ms to establish. Don't call onRouteChanged()
-                // now — the route isn't active yet. ACTION_SCO_AUDIO_STATE_UPDATED
-                // fires when SCO actually connects and triggers onRouteChanged() there.
-                Log.i(TAG, "setAudioRoute (legacy): BT SCO requested, waiting for connection (gen=$gen)")
-                // Fallback if SCO never connects (device out of range, BT stack error).
-                // Uses generation counter to prevent stale timeouts from cancelling
-                // valid SCO connections started by a subsequent setAudioRoute() call.
-                mainHandler.postDelayed({
-                    if (voiceModeEnabled && scoConnectionPending && scoGeneration.get() == gen) {
-                        Log.w(TAG, "setAudioRoute (legacy): SCO connection timeout (gen=$gen), falling back")
-                        scoConnectionPending = false
-                        @Suppress("DEPRECATION")
-                        am.stopBluetoothSco()
-                        @Suppress("DEPRECATION")
-                        am.isBluetoothScoOn = false
-                        am.isSpeakerphoneOn = speakerPreferred
-                        onRouteChanged()
-                    }
-                }, 4000)
+                Log.i(TAG, "setAudioRoute (legacy): BT SCO requested")
                 return true
             }
             Route.BLUETOOTH_A2DP -> {
@@ -618,7 +283,7 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         // Post route notification asynchronously. On pre-API 31, setAudioRoute() may be
         // called from native via JNI while the C++ routingMutex_ is held. Calling
         // nativeOnAudioRouteChanged synchronously would re-acquire routingMutex_ on the
-        // same thread (non-recursive mutex → deadlock). Posting to mainHandler defers the
+        // same thread (non-recursive mutex -> deadlock). Posting to mainHandler defers the
         // notification until after the JNI call returns and routingMutex_ is released.
         mainHandler.post { onRouteChanged() }
         return true
@@ -709,8 +374,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
 
     /**
      * Get list of all available audio devices with names and IDs.
-     * Returns a flat array: [route0, nameLen0, name0..., id0, route1, ...].
-     * The JNI layer unpacks this into AudioDeviceInfo structs.
      * Encoding: for each device, emit [route, deviceName, deviceId] as String[].
      */
     @JvmStatic
@@ -719,8 +382,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         val result = mutableListOf<String>()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // On API 31+, enumerate all communication devices including built-ins.
-            // This gives us real device IDs that match setCommunicationDevice().
             val seen = mutableSetOf<Int>()
 
             // Earpiece first (parity with iOS ordering)
@@ -827,8 +488,7 @@ object AudioSessionBridge : DefaultLifecycleObserver {
                         cacheBtDeviceName(intent, connected)
                         Log.i(TAG, "Bluetooth A2DP: ${if (connected) "connected" else "disconnected"}")
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            if (!voiceModeEnabled) return
-                            if (connected) nativeOnDeviceConnected() else nativeOnDeviceDisconnected()
+                            routeToBestDeviceNow()
                         } else if (connected) {
                             onRouteChanged()
                         } else {
@@ -845,8 +505,7 @@ object AudioSessionBridge : DefaultLifecycleObserver {
                         cacheBtDeviceName(intent, connected)
                         Log.i(TAG, "Bluetooth SCO headset: ${if (connected) "connected" else "disconnected"}")
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            if (!voiceModeEnabled) return
-                            if (connected) nativeOnDeviceConnected() else nativeOnDeviceDisconnected()
+                            routeToBestDeviceNow()
                         } else if (connected) {
                             onRouteChanged()
                         } else {
@@ -861,30 +520,12 @@ object AudioSessionBridge : DefaultLifecycleObserver {
                         )
                         Log.i(TAG, "Bluetooth SCO audio: ${scoAudioStateToString(scoState)}")
 
-                        val wasPending = scoConnectionPending
-                        if (scoState == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
-                            scoState == AudioManager.SCO_AUDIO_STATE_DISCONNECTED) {
-                            scoConnectionPending = false
-                        }
-
-                        // API 31+: CommunicationDeviceChangedListener handles notification.
                         // Pre-31: need explicit route detection for SCO audio state changes.
                         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-                            // SCO failed to connect — reset policy flag and fall back
-                            if (scoState == AudioManager.SCO_AUDIO_STATE_DISCONNECTED && wasPending) {
-                                Log.w(TAG, "Bluetooth SCO: connection failed, falling back")
-                                val mgr = audioManager
-                                if (mgr != null) {
-                                    @Suppress("DEPRECATION")
-                                    mgr.isBluetoothScoOn = false
-                                    mgr.isSpeakerphoneOn = speakerPreferred
-                                }
-                            }
                             onRouteChanged()
                         }
                     }
                     BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED -> {
-                        // API 31+: not actionable, CommunicationDeviceChangedListener handles.
                         // Pre-31: may indicate BT availability change.
                         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
                             onRouteChanged()
@@ -925,7 +566,7 @@ object AudioSessionBridge : DefaultLifecycleObserver {
      * Register listener for communication device changes (API 31+).
      * This listener fires when setCommunicationDevice() takes effect, receiving
      * the actual AudioDeviceInfo. It is the single source of truth for route
-     * notifications on API 31+, replacing all direct onRouteChanged() calls.
+     * notifications on API 31+.
      */
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.S)
     private fun registerCommunicationDeviceListener() {
@@ -933,7 +574,7 @@ object AudioSessionBridge : DefaultLifecycleObserver {
 
         val listener = AudioManager.OnCommunicationDeviceChangedListener { device ->
             // Samsung One UI 5.x+ sends spurious null during internal audio policy
-            // reconfiguration. Verify by checking the actual communication device state —
+            // reconfiguration. Verify by checking the actual communication device state --
             // if it's still set, the null is spurious and should be ignored.
             if (device == null) {
                 val actual = am.communicationDevice
@@ -945,13 +586,11 @@ object AudioSessionBridge : DefaultLifecycleObserver {
 
             val route = if (device != null) deviceTypeToRoute(device.type)
                 else if (speakerPreferred) Route.SPEAKER else Route.EARPIECE
-            val echoMode = getEchoModeForRoute(route)
             Log.i(TAG, "CommunicationDevice changed: ${routeToString(route)} (type=${device?.type})")
 
             val deviceId = device?.id?.toString() ?: ""
 
-            // Dedup and restart decisions are handled by the C++ RouteHandler.
-            nativeOnAudioRouteChanged(route, echoMode, deviceId)
+            nativeOnAudioRouteChanged(route, deviceId)
         }
         am.addOnCommunicationDeviceChangedListener(mainHandler::post, listener)
         communicationDeviceListener = listener
@@ -971,8 +610,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
     /**
      * Register AudioDeviceCallback for device availability changes.
      * Fires onAudioDevicesAdded/Removed when devices connect or disconnect from the system.
-     * On API 31+: re-routes to the best device and notifies JS of updated device list.
-     * Pre-31: notifies JS via onRouteChanged() so the device list refreshes.
      */
     private fun registerAudioDeviceCallback() {
         val am = audioManager ?: return
@@ -982,13 +619,8 @@ object AudioSessionBridge : DefaultLifecycleObserver {
                 if (addedDevices.isNullOrEmpty()) return
                 Log.i(TAG, "AudioDeviceCallback: ${addedDevices.size} device(s) added")
 
-                if (!voiceModeEnabled) return
-
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    // Dispatch DeviceConnected to C++ state machine.
-                    // SM calls routeToBestDevice via adapter which triggers
-                    // CommunicationDeviceChangedListener → nativeOnAudioRouteChanged.
-                    nativeOnDeviceConnected()
+                    routeToBestDeviceNow()
                 } else {
                     onRouteChanged()
                 }
@@ -998,10 +630,8 @@ object AudioSessionBridge : DefaultLifecycleObserver {
                 if (removedDevices.isNullOrEmpty()) return
                 Log.i(TAG, "AudioDeviceCallback: ${removedDevices.size} device(s) removed")
 
-                if (!voiceModeEnabled) return
-
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    nativeOnDeviceDisconnected()
+                    routeToBestDeviceNow()
                 } else {
                     onRouteChanged()
                 }
@@ -1025,19 +655,12 @@ object AudioSessionBridge : DefaultLifecycleObserver {
     /**
      * Route to the best available device (API 31+).
      * Prefers external devices (BT, wired, USB) over builtin speaker/earpiece.
-     * When an external device is found, setCommunicationDevice triggers
-     * CommunicationDeviceChangedListener → nativeOnAudioRouteChanged → JS notified.
-     * Dedup logic is handled by the C++ RouteHandler.
-     * Called from C++ via JNI on device connect/disconnect.
      */
     @JvmStatic
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.S)
     fun routeToBestDeviceNow() {
         val am = audioManager ?: return
 
-        // Prefer wired/USB (deterministic, low latency) over BT.
-        // When both BT SCO and A2DP are available, honor the user's last explicit
-        // BT type preference (preferredBtType) instead of always picking SCO.
         val externalTypes = setOf(
             AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
             AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
@@ -1051,7 +674,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         val candidates = am.availableCommunicationDevices.filter { it.type in externalTypes }
         val nonBt = candidates.filter { !isBtType(it.type) }
         // Wired/USB always wins (lowest latency), then user's preferred BT, then any BT.
-        // Match BLE counterparts: BLE_HEADSET is equivalent to SCO, BLE_SPEAKER to A2DP.
         val externalDevice = nonBt.minByOrNull { deviceRoutePriority(it.type) }
             ?: candidates.firstOrNull { it.type == preferredBtType || isPreferredBleCounterpart(it.type) }
             ?: run {
@@ -1066,8 +688,7 @@ object AudioSessionBridge : DefaultLifecycleObserver {
             val success = am.setCommunicationDevice(externalDevice)
             Log.i(TAG, "routeToBestDevice: type=${externalDevice.type} success=$success")
         } else {
-            // No external device available — fall back to builtin based on user preference.
-            // If a device connects later, AudioDeviceCallback will re-trigger routing.
+            // No external device available -- fall back to builtin based on user preference.
             val currentDevice = am.communicationDevice
             val currentType = currentDevice?.type
             val targetType = if (speakerPreferred) {
@@ -1078,16 +699,10 @@ object AudioSessionBridge : DefaultLifecycleObserver {
             if (currentType != targetType) {
                 val device = am.availableCommunicationDevices.firstOrNull { it.type == targetType }
                 if (device != null) {
-                    // setCommunicationDevice triggers CommunicationDeviceChangedListener
-                    // → nativeOnAudioRouteChanged → JS gets route + device list.
                     am.setCommunicationDevice(device)
                 }
                 Log.i(TAG, "routeToBestDevice: switching to builtin (speaker=$speakerPreferred)")
             } else {
-                // Already on the correct builtin — route hasn't changed, but the
-                // available device list has (external device was added/removed).
-                // The SM's handleStable() fires adapter_.fireJsCallback() after
-                // routeToBestDevice() returns, so JS gets the updated device list.
                 Log.i(TAG, "routeToBestDevice: already on preferred builtin (speaker=$speakerPreferred)")
             }
         }
@@ -1113,8 +728,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
     }
 
     // Lower value = higher priority for auto-routing.
-    // Wired/USB preferred (deterministic, low latency), then BT SCO (bidirectional),
-    // then BT A2DP (output-only, higher latency).
     private fun deviceRoutePriority(type: Int): Int = when (type) {
         AudioDeviceInfo.TYPE_WIRED_HEADSET,
         AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> 0
@@ -1139,18 +752,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> Route.SPEAKER
         AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> Route.EARPIECE
         else -> Route.UNKNOWN
-    }
-
-    @JvmStatic
-    fun getEchoModeForRoute(route: Int): Int {
-        return when (route) {
-            // A2DP is output-only — the device mic stays active for capture,
-            // so the platform's built-in AEC remains effective (parity with iOS).
-            Route.SPEAKER, Route.EARPIECE, Route.BLUETOOTH_A2DP -> EchoMode.HARDWARE_AEC
-            Route.BLUETOOTH_SCO -> EchoMode.BLUETOOTH_AEC
-            Route.WIRED_HEADSET, Route.USB_DEVICE -> EchoMode.NONE
-            else -> EchoMode.NONE
-        }
     }
 
     @Suppress("MissingPermission")
@@ -1217,9 +818,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
     @Suppress("MissingPermission")
     private fun cacheBtDeviceName(intent: Intent, connected: Boolean) {
         if (!connected) {
-            // Only clear cache if the disconnecting device matches the cached name.
-            // Prevents clearing the cache when a different BT device disconnects
-            // while our target device is still connected.
             val btDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE, android.bluetooth.BluetoothDevice::class.java)
             } else {
@@ -1244,33 +842,46 @@ object AudioSessionBridge : DefaultLifecycleObserver {
     }
 
     @Suppress("MissingPermission")
-    private fun queryConnectedBtDeviceName() {
-        if (connectedBtDeviceName != null) return
-        val ctx = context ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            ContextCompat.checkSelfPermission(ctx, Manifest.permission.BLUETOOTH_CONNECT)
-                != PackageManager.PERMISSION_GRANTED) return
-
-        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
-        adapter.getProfileProxy(ctx, object : BluetoothProfile.ServiceListener {
-            @Suppress("MissingPermission")
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                val devices = proxy.connectedDevices
-                if (devices.isNotEmpty() && connectedBtDeviceName == null) {
-                    connectedBtDeviceName = btDeviceName(devices[0])
-                }
-                adapter.closeProfileProxy(profile, proxy)
-            }
-            override fun onServiceDisconnected(profile: Int) {}
-        }, BluetoothProfile.HEADSET)
-    }
-
-    @Suppress("MissingPermission")
     private fun btDeviceName(device: android.bluetooth.BluetoothDevice): String? {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             device.alias ?: device.name
         } else {
             device.name
+        }
+    }
+
+    private fun requestAudioFocus() {
+        val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build()
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(attrs)
+                .setOnAudioFocusChangeListener { focusChange ->
+                    Log.i(TAG, "AudioFocus changed: $focusChange")
+                    nativeOnAudioFocusChanged(focusChange)
+                }
+                .build()
+            val result = am.requestAudioFocus(request)
+            if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                audioFocusRequest = request
+                Log.i(TAG, "Audio focus granted")
+            } else {
+                Log.w(TAG, "Audio focus request failed: $result")
+            }
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let {
+                am.abandonAudioFocusRequest(it)
+                audioFocusRequest = null
+                Log.i(TAG, "Audio focus abandoned")
+            }
         }
     }
 
@@ -1284,15 +895,12 @@ object AudioSessionBridge : DefaultLifecycleObserver {
                         val state = intent.getIntExtra("state", -1)
                         Log.i(TAG, "Headset plug: state=$state")
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            // setCommunicationDevice triggers CommunicationDeviceChangedListener
                             routeToBestDeviceNow()
                         } else {
                             onRouteChanged()
                         }
                     }
                     AudioManager.ACTION_AUDIO_BECOMING_NOISY -> {
-                        // Pre-31: noisy transition needs explicit route detection.
-                        // API 31+: ACTION_HEADSET_PLUG already handled via routeToBestDevice.
                         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
                             onRouteChanged()
                         }
@@ -1328,12 +936,10 @@ object AudioSessionBridge : DefaultLifecycleObserver {
 
     private fun onRouteChanged() {
         val route = getCurrentRoute()
-        val echoMode = getEchoModeForRoute(route)
         val deviceId = getCurrentRouteDeviceId()
 
-        // Dedup and restart decisions are handled by the C++ RouteHandler.
-        Log.i(TAG, "Route changed: ${routeToString(route)}, echo: ${echoModeToString(echoMode)}")
-        nativeOnAudioRouteChanged(route, echoMode, deviceId)
+        Log.i(TAG, "Route changed: ${routeToString(route)}")
+        nativeOnAudioRouteChanged(route, deviceId)
     }
 
     private fun getCurrentRouteDeviceId(): String {
@@ -1354,22 +960,6 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         else -> "Unknown"
     }
 
-    private fun echoModeToString(mode: Int): String = when (mode) {
-        EchoMode.HARDWARE_AEC -> "HardwareAEC"
-        EchoMode.BLUETOOTH_AEC -> "BluetoothAEC"
-        EchoMode.NONE -> "None"
-        else -> "Unknown"
-    }
-
-    private fun focusStateToString(state: Int): String = when (state) {
-        FocusState.NONE -> "None"
-        FocusState.GAIN -> "Gain"
-        FocusState.LOSS -> "Loss"
-        FocusState.LOSS_TRANSIENT -> "LossTransient"
-        FocusState.LOSS_TRANSIENT_CAN_DUCK -> "LossTransientCanDuck"
-        else -> "Unknown"
-    }
-
     private fun scoAudioStateToString(state: Int): String = when (state) {
         AudioManager.SCO_AUDIO_STATE_CONNECTED -> "Connected"
         AudioManager.SCO_AUDIO_STATE_DISCONNECTED -> "Disconnected"
@@ -1378,45 +968,8 @@ object AudioSessionBridge : DefaultLifecycleObserver {
         else -> "Unknown($state)"
     }
 
-    /**
-     * Returns true if AudioManager.communicationDevice is non-null.
-     * Called from C++ SamsungNullDeviceQuirk to verify spurious null events.
-     */
-    @JvmStatic
-    fun validateDeviceState(): Boolean {
-        val am = audioManager ?: return false
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            am.communicationDevice != null
-        } else {
-            false
-        }
-    }
-
-    /**
-     * Re-assert MODE_IN_COMMUNICATION if it was reset (Xiaomi MIUI bug).
-     * Called from C++ XiaomiModeResetQuirk on LifecycleForeground.
-     */
-    @JvmStatic
-    fun reassertVoiceMode() {
-        val am = audioManager ?: return
-        if (voiceModeEnabled && activeStreams.get() > 0) {
-            if (am.mode != AudioManager.MODE_IN_COMMUNICATION) {
-                Log.w(TAG, "reassertVoiceMode: mode was reset (mode=${am.mode}), re-asserting")
-                am.mode = AudioManager.MODE_IN_COMMUNICATION
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    routeToBestDeviceNow()
-                }
-            }
-        }
-    }
-
     private external fun nativeInit()
     private external fun nativeDestroy()
-    private external fun nativeOnSessionIdGenerated(sessionId: Int)
-    private external fun nativeSetVoiceMode(enable: Boolean)
-    private external fun nativeOnAudioRouteChanged(route: Int, echoMode: Int, deviceId: String)
-    private external fun nativeOnAudioFocusChanged(focusState: Int)
-    private external fun nativeOnLifecycleChanged(foreground: Boolean)
-    private external fun nativeOnDeviceConnected()
-    private external fun nativeOnDeviceDisconnected()
+    private external fun nativeOnAudioRouteChanged(route: Int, deviceId: String)
+    private external fun nativeOnAudioFocusChanged(focusChange: Int)
 }

@@ -8,45 +8,60 @@ import {
 
 // --- Types ---
 
-export interface FeedResult {
-  audioPackets: number
-  videoPackets: number
-  error?: string
-}
-
 export interface PlayerMetrics {
   health: {
     running: boolean
     responsive: boolean
+    detached: boolean
     watchdogTripped: boolean
+    watchdogTripCount: number
     timeSinceHeartbeatMs: number
   }
-  audio: {
+  quality: {
     underruns: number
-    framesDecoded: number
     framesDropped: number
+    framesDrained: number
     decodeErrors: number
     decoderResets: number
-    samplesOutput: number
+    ptsDiscontinuities: number
+    fastPathSwitches: number
+    catchupDeadZoneSnaps: number
+    maxInterFrameGapMs: number
+    gapsOver50ms: number
+    gapsOver100ms: number
+    gapsOver500ms: number
   }
   video: {
-    activeStreams: number
     avSyncOffsetUs: number
+    framesReceived: number
     framesDecoded: number
     framesDropped: number
     decodeErrors: number
     currentFps: number
     width: number
     height: number
+    jitterUs: number
+    bufferTargetUs: number
     lateFrames: number
     skippedFrames: number
+    decoderResets: number
+    surfaceLostCount: number
+    maxInterFrameGapMs: number
+    gapsOver50ms: number
+    gapsOver100ms: number
+    gapsOver500ms: number
   }
   session: {
     uptimeMs: number
+    samplesOutput: number
   }
   latency: {
     mode: string
     isLowestLatency: boolean
+  }
+  pools: {
+    decodedUnderPressure: boolean
+    encodedUnderPressure: boolean
   }
   audioOutput: {
     restartCount: number
@@ -54,11 +69,18 @@ export interface PlayerMetrics {
     actualSampleRate: number
     latencyUs: number
   }
-}
-
-export interface BluetoothMetrics {
-  route: string
-  isA2dp: boolean
+  bluetooth: {
+    route: string
+    isA2dp: boolean
+  }
+  jitter: {
+    jitterUs: number
+    bufferTargetUs: number
+  }
+  drift: {
+    driftPpm: number
+    active: boolean
+  }
 }
 
 /**
@@ -76,6 +98,30 @@ export enum AudioRoute {
 }
 
 /**
+ * Playback state for UI display.
+ */
+export enum PlaybackState {
+  Idle = 0,
+  Buffering = 1,
+  Playing = 2,
+  Paused = 3,
+  Stalled = 4,
+  Failed = 5
+}
+
+/**
+ * Audio focus states (Android only — iOS handled by AVAudioSession).
+ */
+export enum AudioFocusState {
+  Gained = 0,
+  Lost = 1,
+  LostTransient = 2,
+  LostTransientCanDuck = 3
+}
+
+export type AudioFocusCallback = (state: AudioFocusState) => void
+
+/**
  * Describes a specific audio device with its route type, name, and platform ID.
  */
 export interface AudioDeviceInfo {
@@ -84,26 +130,52 @@ export interface AudioDeviceInfo {
   deviceId: string
 }
 
-/**
- * Echo cancellation mode.
- * - 0: Hardware AEC (built-in speaker/earpiece)
- * - 1: Bluetooth AEC (SCO headset)
- * - 2: None (wired headset, A2DP, USB — no echo path)
- */
-export type EchoMode = 0 | 1 | 2
-
 export interface AudioRouteChangeEvent {
   route: AudioRoute
-  echoMode: EchoMode
   availableDevices: AudioDeviceInfo[]
 }
 
 export type AudioRouteCallback = (event: AudioRouteChangeEvent) => void
 
+/**
+ * Stream health states reported by the health watchdog callback.
+ * Values must match native StreamHealth enum.
+ */
+export enum StreamHealth {
+  Healthy = 0,
+  Buffering = 1,
+  Degraded = 2,
+  Stalled = 3,
+  Failed = 4
+}
+
+export interface HealthEvent {
+  status: StreamHealth
+  detail: string
+  metrics: {
+    underruns: number
+    decodeErrors: number
+    framesDropped: number
+    avSyncOffsetUs: number
+    bufferTargetUs: number
+    gapsOver100ms: number
+  }
+}
+
+export type HealthCallback = (event: HealthEvent) => void
+
+export interface TrackInfo {
+  audioCodecId: string
+  videoCodecId: string
+  videoWidth: number
+  videoHeight: number
+}
+
+export type KeyFrameNeededCallback = () => void
+
 export interface VideoViewProps {
-  participantId: number
   mirror?: boolean
-  /** 0 = fit (letterbox), 1 = fill (crop). @default 0 */
+  /** 0 = fit (letterbox), 1 = fill (crop). @default 1 */
   scaleMode?: 0 | 1
   style?: ViewStyle
 }
@@ -115,66 +187,38 @@ interface WebmPlayerModuleType {
 }
 
 interface MediaPipelineJSI {
-  warmUp(): boolean
   start(): boolean
   stop(): boolean
   isRunning(): boolean
-  addParticipant(): number
-  removeParticipant(participantId: number): boolean
-  pushAudioFrame(
-    participantId: number,
-    buffer: ArrayBuffer | Uint8Array,
-    ptsUs: number,
-    durationUs: number
-  ): boolean
-  setMuted(participantId: number, muted: boolean): boolean
-  setGain(participantId: number, gain: number): boolean
+  feedData(buffer: ArrayBuffer | Uint8Array): boolean
+  setMuted(muted: boolean): boolean
+  setGain(gain: number): boolean
   getMetrics(): PlayerMetrics
-  resetWatchdog(): boolean
   setAudioRoute(route: AudioRoute, deviceId?: string): boolean
   getAvailableAudioRoutes(): AudioRoute[]
   getAvailableAudioDevices(): AudioDeviceInfo[]
   getCurrentAudioRoute(): AudioRoute
   setAudioRouteCallback(callback: AudioRouteCallback | null): boolean
-}
-
-interface VideoPipelineJSI {
-  start(): boolean
-  stop(): boolean
-  isRunning(): boolean
-  pushVideoFrame(
-    participantId: number,
-    buffer: ArrayBuffer | Uint8Array,
-    ptsUs: number,
-    isKeyFrame: boolean
+  setHealthCallback(callback: HealthCallback | null): boolean
+  getTrackInfo(): TrackInfo | null
+  resetStream(): boolean
+  requestKeyFrame(): boolean
+  warmUp(): boolean
+  setKeyFrameNeededCallback(
+    callback: KeyFrameNeededCallback | null
   ): boolean
-  removeParticipant(participantId: number): boolean
-  requestKeyFrame(participantId: number): boolean
-  getMetrics(): {
-    activeStreams: number
-    avSyncOffsetUs: number
-    participants: Array<{
-      id: number
-      framesReceived: number
-      framesDecoded: number
-      framesDropped: number
-      decodeErrors: number
-      currentFps: number
-      width: number
-      height: number
-      jitterUs: number
-      bufferTargetUs: number
-      lateFrames: number
-      skippedFrames: number
-    }>
-  }
+  pause(): boolean
+  resume(): boolean
+  isPaused(): boolean
+  getCurrentTimeUs(): number
+  getPlaybackState(): PlaybackState
+  setBufferTarget(audioMs: number, videoMs: number): boolean
+  setAudioFocusCallback(callback: AudioFocusCallback | null): boolean
 }
 
 declare global {
   // eslint-disable-next-line no-var
   var __MediaPipeline: MediaPipelineJSI | undefined
-  // eslint-disable-next-line no-var
-  var __VideoPipeline: VideoPipelineJSI | undefined
 }
 
 const WebmPlayerNativeModule = NativeModules.WebmPlayer as
@@ -204,214 +248,57 @@ function ensureJSIInstalled(): void {
   jsiInstalled = true
 }
 
-// --- Public API ---
-
-export const MediaPipeline = {
-  warmUp(): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.warmUp()
-  },
-
-  start(): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.start()
-  },
-
-  stop(): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.stop()
-  },
-
-  isRunning(): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.isRunning()
-  },
-
-  addParticipant(): number {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.addParticipant()
-  },
-
-  removeParticipant(participantId: number): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.removeParticipant(participantId)
-  },
-
-  pushAudioFrame(
-    participantId: number,
-    buffer: ArrayBuffer | Uint8Array,
-    ptsUs: number,
-    durationUs: number
-  ): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.pushAudioFrame(
-      participantId,
-      buffer,
-      ptsUs,
-      durationUs
-    )
-  },
-
-  setMuted(participantId: number, muted: boolean): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.setMuted(participantId, muted)
-  },
-
-  setGain(participantId: number, gain: number): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.setGain(participantId, gain)
-  },
-
-  getMetrics(): PlayerMetrics {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.getMetrics()
-  },
-
-  resetWatchdog(): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.resetWatchdog()
-  },
-
-  setAudioRoute(route: AudioRoute, deviceId?: string): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.setAudioRoute(route, deviceId)
-  },
-
-  getAvailableAudioRoutes(): AudioRoute[] {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.getAvailableAudioRoutes()
-  },
-
-  getAvailableAudioDevices(): AudioDeviceInfo[] {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.getAvailableAudioDevices()
-  },
-
-  getCurrentAudioRoute(): AudioRoute {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.getCurrentAudioRoute()
-  },
-
-  setAudioRouteCallback(callback: AudioRouteCallback | null): boolean {
-    ensureJSIInstalled()
-    if (!global.__MediaPipeline) {
-      throw new Error('MediaPipeline JSI module not available')
-    }
-    return global.__MediaPipeline.setAudioRouteCallback(callback)
-  }
+function getMediaPipeline(): MediaPipelineJSI {
+  ensureJSIInstalled()
+  const m = global.__MediaPipeline
+  if (!m) throw new Error('MediaPipeline JSI module not available')
+  return m
 }
 
-export const VideoPipeline = {
-  start(): boolean {
-    ensureJSIInstalled()
-    if (!global.__VideoPipeline) {
-      throw new Error('VideoPipeline JSI module not available')
-    }
-    return global.__VideoPipeline.start()
-  },
+// --- Public API ---
 
-  stop(): boolean {
-    ensureJSIInstalled()
-    if (!global.__VideoPipeline) {
-      throw new Error('VideoPipeline JSI module not available')
-    }
-    return global.__VideoPipeline.stop()
-  },
-
-  isRunning(): boolean {
-    ensureJSIInstalled()
-    if (!global.__VideoPipeline) {
-      throw new Error('VideoPipeline JSI module not available')
-    }
-    return global.__VideoPipeline.isRunning()
-  },
-
-  pushVideoFrame(
-    participantId: number,
-    buffer: ArrayBuffer | Uint8Array,
-    ptsUs: number,
-    isKeyFrame: boolean
-  ): boolean {
-    ensureJSIInstalled()
-    if (!global.__VideoPipeline) {
-      throw new Error('VideoPipeline JSI module not available')
-    }
-    return global.__VideoPipeline.pushVideoFrame(
-      participantId,
-      buffer,
-      ptsUs,
-      isKeyFrame
-    )
-  },
-
-  removeParticipant(participantId: number): boolean {
-    ensureJSIInstalled()
-    if (!global.__VideoPipeline) {
-      throw new Error('VideoPipeline JSI module not available')
-    }
-    return global.__VideoPipeline.removeParticipant(participantId)
-  },
-
-  requestKeyFrame(participantId: number): boolean {
-    ensureJSIInstalled()
-    if (!global.__VideoPipeline) {
-      throw new Error('VideoPipeline JSI module not available')
-    }
-    return global.__VideoPipeline.requestKeyFrame(participantId)
-  },
-
-  getMetrics() {
-    ensureJSIInstalled()
-    if (!global.__VideoPipeline) {
-      throw new Error('VideoPipeline JSI module not available')
-    }
-    return global.__VideoPipeline.getMetrics()
-  }
+/**
+ * Single broadcast stream player.
+ * Feed muxed WebM data via feedData() — native demuxes and plays audio + video.
+ * start() initializes both audio and video pipelines.
+ */
+export const MediaPipeline = {
+  start: (): boolean => getMediaPipeline().start(),
+  stop: (): boolean => getMediaPipeline().stop(),
+  isRunning: (): boolean => getMediaPipeline().isRunning(),
+  feedData: (buffer: ArrayBuffer | Uint8Array): boolean =>
+    getMediaPipeline().feedData(buffer),
+  setMuted: (muted: boolean): boolean => getMediaPipeline().setMuted(muted),
+  setGain: (gain: number): boolean => getMediaPipeline().setGain(gain),
+  getMetrics: (): PlayerMetrics => getMediaPipeline().getMetrics(),
+  setAudioRoute: (route: AudioRoute, deviceId?: string): boolean =>
+    getMediaPipeline().setAudioRoute(route, deviceId),
+  getAvailableAudioRoutes: (): AudioRoute[] =>
+    getMediaPipeline().getAvailableAudioRoutes(),
+  getAvailableAudioDevices: (): AudioDeviceInfo[] =>
+    getMediaPipeline().getAvailableAudioDevices(),
+  getCurrentAudioRoute: (): AudioRoute =>
+    getMediaPipeline().getCurrentAudioRoute(),
+  setAudioRouteCallback: (callback: AudioRouteCallback | null): boolean =>
+    getMediaPipeline().setAudioRouteCallback(callback),
+  setHealthCallback: (callback: HealthCallback | null): boolean =>
+    getMediaPipeline().setHealthCallback(callback),
+  getTrackInfo: (): TrackInfo | null => getMediaPipeline().getTrackInfo(),
+  resetStream: (): boolean => getMediaPipeline().resetStream(),
+  requestKeyFrame: (): boolean => getMediaPipeline().requestKeyFrame(),
+  warmUp: (): boolean => getMediaPipeline().warmUp(),
+  setKeyFrameNeededCallback: (
+    callback: KeyFrameNeededCallback | null
+  ): boolean => getMediaPipeline().setKeyFrameNeededCallback(callback),
+  pause: (): boolean => getMediaPipeline().pause(),
+  resume: (): boolean => getMediaPipeline().resume(),
+  isPaused: (): boolean => getMediaPipeline().isPaused(),
+  getCurrentTimeUs: (): number => getMediaPipeline().getCurrentTimeUs(),
+  getPlaybackState: (): PlaybackState => getMediaPipeline().getPlaybackState(),
+  setBufferTarget: (audioMs: number, videoMs: number): boolean =>
+    getMediaPipeline().setBufferTarget(audioMs, videoMs),
+  setAudioFocusCallback: (callback: AudioFocusCallback | null): boolean =>
+    getMediaPipeline().setAudioFocusCallback(callback)
 }
 
 // --- VideoView Native Component ---
@@ -419,6 +306,10 @@ export const VideoPipeline = {
 const NativeVideoView =
   requireNativeComponent<VideoViewProps>('WebmVideoView')
 
+/**
+ * Native video view for rendering decoded VP9 frames from the broadcast stream.
+ * Only a single VideoView instance is supported at a time.
+ */
 export function VideoView(props: VideoViewProps): React.ReactElement {
   return React.createElement(NativeVideoView, props)
 }

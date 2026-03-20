@@ -15,11 +15,15 @@ Pod::Spec.new do |s|
 
   # iOS-specific sources (Objective-C++)
   # libwebm mkvparser sources vendored under cpp/third_party/libwebm/
+  # SpeexDSP resampler sources vendored under cpp/third_party/speexdsp/
   s.source_files = [
     "ios/**/*.{h,m,mm,cpp}",
     "cpp/**/*.{h,hpp,cpp}",
     "cpp/third_party/libwebm/mkvparser/*.{cc,h}",
-    "cpp/third_party/libwebm/common/*.h"
+    "cpp/third_party/libwebm/common/*.h",
+    "cpp/third_party/speexdsp/libspeexdsp/resample.c",
+    "cpp/third_party/speexdsp/libspeexdsp/*.h",
+    "cpp/third_party/speexdsp/include/speex/*.h"
   ]
 
   # Exclude build artifacts
@@ -32,7 +36,8 @@ Pod::Spec.new do |s|
     "ios/**/*.h",
     "cpp/**/*.h",
     "cpp/**/*.hpp",
-    "cpp/third_party/libwebm/**/*.h"
+    "cpp/third_party/libwebm/**/*.h",
+    "cpp/third_party/speexdsp/**/*.h"
   ]
 
   # Required frameworks for audio, video, and SIMD
@@ -50,13 +55,15 @@ Pod::Spec.new do |s|
       '$(PODS_TARGET_SRCROOT)/cpp/video',
       '$(PODS_TARGET_SRCROOT)/cpp/demux',
       '$(PODS_TARGET_SRCROOT)/cpp/third_party/libwebm',
+      '$(PODS_TARGET_SRCROOT)/cpp/third_party/speexdsp/include',
+      '$(PODS_TARGET_SRCROOT)/cpp/third_party/speexdsp/libspeexdsp',
       '$(PODS_TARGET_SRCROOT)/ios',
       '$(PODS_TARGET_SRCROOT)/ios/playback',
       '$(PODS_TARGET_SRCROOT)/ios/video',
       '$(PODS_TARGET_SRCROOT)/ios/opus/lib/include'
     ].join(' '),
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
-    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) HAVE_OPUS=1',
+    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) HAVE_OPUS=1 FLOATING_POINT=1 EXPORT=',
     # USE_NEON only on ARM — x86_64 simulator has no NEON registers
     'OTHER_CFLAGS[arch=arm64]' => '-DUSE_NEON=1 -fstack-protector-strong',
     # Hide internal symbols to prevent clashes with host app

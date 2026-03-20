@@ -16,9 +16,7 @@
 
 #include <atomic>
 #include <algorithm>
-#include <bit>
 #include <cmath>
-#include <cstring>
 #include <speex/speex_resampler.h>
 #include "common/MediaConfig.h"
 #include "common/CompilerHints.h"
@@ -42,7 +40,7 @@ namespace drift_config {
 class DriftCompensator {
 public:
     void updateDrift(int64_t cumulativeDriftUs, int64_t measurementWindowUs,
-                     uint32_t sampleCount, float networkStability = 0.5f) noexcept {
+                     uint32_t sampleCount) noexcept {
         if (measurementWindowUs <= 0 || sampleCount < drift_config::kMinSamplesForDrift) {
             return;
         }
@@ -62,17 +60,15 @@ public:
                                      1.0f + drift_config::kMaxRatioDeviation);
         }
 
-        float alpha = drift_config::kRatioSmoothingAlphaMax -
-                      networkStability * (drift_config::kRatioSmoothingAlphaMax -
-                                          drift_config::kRatioSmoothingAlphaMin);
-
-        storeTargetAlpha(targetRatio, alpha);
+        targetRatio_.store(targetRatio, std::memory_order_relaxed);
+        smoothingAlpha_.store(drift_config::kRatioSmoothingAlphaDefault, std::memory_order_relaxed);
     }
 
     // Audio callback only — smoothed drift ratio.
     [[nodiscard]] HOT_FUNCTION
     float currentRatio() noexcept {
-        auto [target, alpha] = loadTargetAlpha();
+        float target = targetRatio_.load(std::memory_order_relaxed);
+        float alpha = smoothingAlpha_.load(std::memory_order_relaxed);
 
         float smoothed = smoothedRatio_.load(std::memory_order_relaxed);
         smoothed = smoothed + alpha * (target - smoothed);
@@ -92,39 +88,15 @@ public:
 
     void reset() noexcept {
         driftPpm_.store(0, std::memory_order_relaxed);
-        storeTargetAlpha(1.0f, drift_config::kRatioSmoothingAlphaDefault);
+        targetRatio_.store(1.0f, std::memory_order_relaxed);
+        smoothingAlpha_.store(drift_config::kRatioSmoothingAlphaDefault, std::memory_order_relaxed);
         smoothedRatio_.store(1.0f, std::memory_order_relaxed);
     }
 
 private:
-    void storeTargetAlpha(float target, float alpha) noexcept {
-        uint64_t packed;
-        uint32_t t, a;
-        std::memcpy(&t, &target, sizeof(t));
-        std::memcpy(&a, &alpha, sizeof(a));
-        packed = (static_cast<uint64_t>(t) << 32) | static_cast<uint64_t>(a);
-        targetAlpha_.store(packed, std::memory_order_relaxed);
-    }
-
-    struct TargetAlpha { float target; float alpha; };
-    [[nodiscard]] TargetAlpha loadTargetAlpha() const noexcept {
-        uint64_t packed = targetAlpha_.load(std::memory_order_relaxed);
-        uint32_t t = static_cast<uint32_t>(packed >> 32);
-        uint32_t a = static_cast<uint32_t>(packed);
-        float target, alpha;
-        std::memcpy(&target, &t, sizeof(target));
-        std::memcpy(&alpha, &a, sizeof(alpha));
-        return {target, alpha};
-    }
-
-    static constexpr uint64_t packFloats(float hi, float lo) noexcept {
-        return (static_cast<uint64_t>(std::bit_cast<uint32_t>(hi)) << 32)
-             | std::bit_cast<uint32_t>(lo);
-    }
-
     std::atomic<int32_t> driftPpm_{0};
-    std::atomic<uint64_t> targetAlpha_{
-        packFloats(1.0f, drift_config::kRatioSmoothingAlphaDefault)};
+    std::atomic<float> targetRatio_{1.0f};
+    std::atomic<float> smoothingAlpha_{drift_config::kRatioSmoothingAlphaDefault};
     std::atomic<float> smoothedRatio_{1.0f};
 };
 
@@ -187,15 +159,15 @@ private:
 };
 
 // Speex-based resampler for drift/catchup compensation.
-// Initialized once at slot creation with a non-unity ratio to pre-allocate
+// Initialized once at creation with a non-unity ratio to pre-allocate
 // filter tables. Ratio updates via set_rate_frac are RT-safe when the
 // reduced denominator doesn't exceed the pre-allocated table size.
 //
 // Quality 3 (~80dB stopband) eliminates the aliasing artifacts that
-// linear interpolation produced at voice frequencies.
+// linear interpolation produced at audio frequencies.
 class SpeexDriftResampler {
     // Speex quality for drift resampling. Quality 3 provides ~80dB stopband
-    // attenuation with 48-tap filter — sufficient for ±10% ratio changes on voice.
+    // attenuation with 48-tap filter — sufficient for ±10% ratio changes on audio.
     static constexpr int kDriftResamplerQuality = 3;
 
     // Denominator scale for fractional rate expression.
@@ -327,12 +299,6 @@ public:
 
         inputConsumed = static_cast<size_t>(inLen);
         return static_cast<size_t>(outLen);
-    }
-
-    // Check if ratio is close enough to unity that resampling can be skipped
-    [[nodiscard]] bool isUnity() const noexcept {
-        // Near-unity init value (kRateDenom+1) or exact kRateDenom
-        return currentNum_ <= kRateDenom + 1;
     }
 
     void reset() noexcept {

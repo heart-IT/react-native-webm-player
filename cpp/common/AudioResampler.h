@@ -147,7 +147,6 @@ private:
     std::atomic<uint64_t> processErrors_{0};
 };
 
-using AudioResamplerInt16 = AudioResampler<int16_t>;
 using AudioResamplerFloat = AudioResampler<float>;
 
 }  // namespace media

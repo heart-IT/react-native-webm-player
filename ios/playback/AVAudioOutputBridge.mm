@@ -49,7 +49,6 @@ bool AVAudioOutputBridge::warmUp() noexcept {
     uint8_t expected = kStateStopped;
     if (!callbackState_.compare_exchange_strong(expected, kStateWarmUp,
             std::memory_order_acq_rel, std::memory_order_relaxed)) {
-        // Already warming up or active - success
         uint8_t current = callbackState_.load(std::memory_order_acquire);
         return current == kStateWarmUp || current == kStateActive;
     }
@@ -82,23 +81,16 @@ bool AVAudioOutputBridge::start() noexcept {
     std::lock_guard<std::mutex> lk(lifecycleMtx_);
 
     uint8_t expected = kStateWarmUp;
-
-    // If already warmed up, transition to active (CAS to avoid racing with error callback)
     if (callbackState_.compare_exchange_strong(expected, kStateActive,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
         MEDIA_LOG_I("AVAudioOutputBridge: warm-up -> active (zero latency transition)");
         return true;
     }
+    if (expected == kStateActive) return true;
 
-    // If already active, nothing to do
-    if (expected == kStateActive) {
-        return true;
-    }
-
-    // Cold start path - full initialization
     expected = kStateStopped;
     if (!callbackState_.compare_exchange_strong(expected, kStateActive,
-            std::memory_order_acq_rel, std::memory_order_acquire)) {
+            std::memory_order_acq_rel, std::memory_order_relaxed)) {
         return false;
     }
 
@@ -111,16 +103,11 @@ bool AVAudioOutputBridge::start() noexcept {
     restartThread_ = std::thread([this] { restartLoop(); });
 
     if (!startAudioUnit()) {
-        // Signal restart thread to exit before cleanup
         restartRequested_.store(true, std::memory_order_release);
         restartRequested_.notify_one();
-
-        // Transition to shutting down so restart thread exits its loop
         callbackState_.store(kStateShuttingDown, std::memory_order_release);
-
         timedJoin(restartThread_, restartThreadExited_,
                   config::thread::kThreadJoinTimeoutMs, "AVAudioOutputBridge::start");
-
         destroyAudioUnit();
         callbackState_.store(kStateStopped, std::memory_order_release);
         return false;
@@ -138,7 +125,6 @@ void AVAudioOutputBridge::stop() noexcept {
         // Already stopped, nothing to do
         if (current == kStateStopped) return;
 
-        // Transition from warm-up or active to shutting down
         if (current == kStateWarmUp || current == kStateActive) {
             callbackState_.store(kStateShuttingDown, std::memory_order_release);
         } else if (current == kStateShuttingDown) {
@@ -181,14 +167,12 @@ size_t AVAudioOutputBridge::renderAudio(float* output, size_t frameCount) noexce
     }
 
     uint8_t state = callbackState_.load(std::memory_order_acquire);
-    if (state == kStateWarmUp) {
-        // Warm-up mode: output silence to keep hardware hot
+    if (UNLIKELY(!AudioSessionManager::instance().canPlayAudio())) {
         std::memset(output, 0, frameCount * config_.channelCount * sizeof(float));
-        return frameCount;  // Report frames written to keep Audio Unit happy
+        return frameCount;
     }
-    // Interruption state via cached pointer (avoids Meyers-singleton guard on RT path)
-    auto* mgr = sessionMgr_.load(std::memory_order_acquire);
-    if (UNLIKELY(!mgr || !mgr->canPlayAudio())) {
+    if (UNLIKELY(state == kStateWarmUp)) {
+        // Warm-up mode: output silence to keep hardware hot
         std::memset(output, 0, frameCount * config_.channelCount * sizeof(float));
         return frameCount;
     }
@@ -252,12 +236,6 @@ bool AVAudioOutputBridge::createAudioUnit() noexcept {
         NSError* error = nil;
 
         AVAudioSession* session = [AVAudioSession sharedInstance];
-
-        // Cache AudioSessionManager reference for RT callback path
-        // (avoids Meyers-singleton guard lock). Lifecycle (initialize/shutdown)
-        // is owned by MediaSession — bridges must not bump refCount.
-        auto& mgr = AudioSessionManager::instance();
-        sessionMgr_.store(&mgr, std::memory_order_release);
 
         BOOL success;
 
@@ -343,7 +321,7 @@ bool AVAudioOutputBridge::createAudioUnit() noexcept {
             return false;
         }
 
-        // Disable input on bus 1 (microphone) - capture is handled separately by VoiceProcessingIO
+        // Disable input on bus 1 (microphone) - playback-only: input bus disabled, no capture
         UInt32 enableInput = 0;
         status = AudioUnitSetProperty(audioUnit,
                                        kAudioOutputUnitProperty_EnableIO,
@@ -448,12 +426,10 @@ bool AVAudioOutputBridge::createAudioUnit() noexcept {
         audioUnit_ = audioUnit;
         audioUnitActive_.store(true, std::memory_order_release);
 
-        // Cache and report measured output latency.
-        // Cached value makes totalLatencyUs() callable from any thread without ObjC.
+        // Cache measured output latency for totalLatencyUs() (callable from any thread without ObjC).
         int64_t measuredLatencyUs = static_cast<int64_t>(
             (session.outputLatency + session.IOBufferDuration) * 1000000.0);
         cachedLatencyUs_.store(measuredLatencyUs, std::memory_order_relaxed);
-        AudioSessionManager::instance().updateMeasuredOutputLatency(measuredLatencyUs);
 
         double actualOutputLatency = session.outputLatency * 1000.0;
         double actualIOBufferDuration = session.IOBufferDuration * 1000.0;
@@ -556,7 +532,7 @@ void AVAudioOutputBridge::restartLoop() noexcept {
         restartRequested_.store(false, std::memory_order_release);
 
         {
-            // Serialize audioUnit_ access with stop()/warmUp()/start() on the JS thread.
+            // Serialize audioUnit_ access with stop()/start() on the JS thread.
             std::lock_guard<std::mutex> lk(lifecycleMtx_);
 
             uint8_t state = callbackState_.load(std::memory_order_acquire);

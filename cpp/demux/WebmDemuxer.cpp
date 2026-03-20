@@ -13,10 +13,17 @@ namespace media::demux {
 // to prevent unbounded memory growth.
 class StreamReader final : public mkvparser::IMkvReader {
 public:
+    static constexpr size_t kMaxBufferSize = 2 * 1024 * 1024;  // 2MB cap
+
     StreamReader() = default;
 
-    void append(const uint8_t* data, size_t len) {
+    // Returns false if buffer would exceed max size
+    bool append(const uint8_t* data, size_t len) {
+        if (buffer_.size() + len > kMaxBufferSize) {
+            return false;
+        }
         buffer_.insert(buffer_.end(), data, data + len);
+        return true;
     }
 
     // IMkvReader interface
@@ -84,6 +91,10 @@ private:
 // Default audio frame duration for Opus: 20ms
 static constexpr int64_t kDefaultAudioDurationUs = 20'000;
 
+// Minimum bytes before declaring a parse failure (vs needing more data)
+static constexpr size_t kMinBytesForEBML = 64;
+static constexpr size_t kMinBytesForSegment = 256;
+
 WebmDemuxer::WebmDemuxer()
     : reader_(std::make_unique<StreamReader>()) {}
 
@@ -96,20 +107,25 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         return result;
     }
 
-    reader_->append(data, len);
+    if (!reader_->append(data, len)) {
+        result.error = "demuxer buffer overflow";
+        return result;
+    }
 
     // Advance parse state as far as possible
     switch (state_) {
     case ParseState::WaitingForEBML:
         if (!parseEBMLHeader()) {
-            return result;  // Need more data
+            if (!parseError_.empty()) result.error = parseError_;
+            return result;
         }
         state_ = ParseState::WaitingForSegment;
         [[fallthrough]];
 
     case ParseState::WaitingForSegment:
         if (!parseSegment()) {
-            return result;  // Need more data
+            if (!parseError_.empty()) result.error = parseError_;
+            return result;
         }
         state_ = ParseState::ParsingTracks;
         [[fallthrough]];
@@ -134,10 +150,14 @@ bool WebmDemuxer::parseEBMLHeader() {
     long long pos = 0;
     long long ret = ebmlHeader_->Parse(reader_.get(), pos);
     if (ret < 0) {
-        // E_BUFFER_NOT_FULL or other error — need more data or bad stream
         ebmlHeader_.reset();
+        // Distinguish "need more data" from "bad stream"
+        if (reader_->bufferSize() >= kMinBytesForEBML) {
+            parseError_ = "invalid EBML header";
+        }
         return false;
     }
+    parseError_.clear();
     return true;
 }
 
@@ -158,8 +178,12 @@ bool WebmDemuxer::parseSegment() {
     mkvparser::Segment* rawSegment = nullptr;
     long long ret = mkvparser::Segment::CreateInstance(reader_.get(), pos, rawSegment);
     if (ret != 0 || !rawSegment) {
+        if (reader_->bufferSize() >= kMinBytesForSegment) {
+            parseError_ = "invalid WebM segment";
+        }
         return false;
     }
+    parseError_.clear();
     segment_.reset(rawSegment);
     return true;
 }
@@ -351,6 +375,7 @@ void WebmDemuxer::reset() {
     blockEntry_ = nullptr;
     trackInfo_ = TrackInfo{};
     state_ = ParseState::WaitingForEBML;
+    parseError_.clear();
     compactOffset_ = 0;
 }
 

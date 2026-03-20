@@ -166,16 +166,10 @@ public:
     void release(size_t index) noexcept {
         if (index < PoolSize) {
             inUse_[index].store(false, std::memory_order_release);
-            // Saturate at PoolSize: use CAS loop to prevent transient over-count
-            // when multiple threads release concurrently
-            size_t current = freeCount_.load(std::memory_order_relaxed);
-            while (true) {
-                if (current >= PoolSize) break;
-                if (freeCount_.compare_exchange_weak(current, current + 1,
-                        std::memory_order_relaxed, std::memory_order_relaxed)) {
-                    break;
-                }
-            }
+            // Approximate counter — transient over-count from concurrent
+            // acquire/release is acceptable (used for diagnostics and
+            // backpressure heuristics only, not exact accounting).
+            freeCount_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -279,19 +273,6 @@ public:
     [[nodiscard]] bool full() const noexcept { return count() >= QueueSize; }
 
     void clear() noexcept { while (pop()) {} }
-
-    // Clears queue contents. Thread-safe when called with external synchronization
-    // (e.g., when slot is unbound and audio callback has exited via boundParticipant_ check).
-    // Caller must ensure no concurrent push/pop operations.
-    void clearWithSync() noexcept {
-        size_t tail = tail_.load(std::memory_order_relaxed);
-        size_t head = head_.load(std::memory_order_relaxed);
-        while (tail < head) {
-            slots_[tail & kMask].release();
-            ++tail;
-        }
-        tail_.store(head, std::memory_order_release);
-    }
 
 private:
     std::array<Token, QueueSize> slots_;

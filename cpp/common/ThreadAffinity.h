@@ -122,8 +122,8 @@ inline cpu_set_t bigCoreMask() noexcept {
 }  // namespace android
 
 // Android thread priority configuration
-// AAudio callbacks get system-managed priority, but DecodeThread and EncoderThread
-// are not AAudio callbacks and need explicit priority elevation.
+// AAudio callbacks get system-managed priority, but DecodeThread
+// is not an AAudio callback and needs explicit priority elevation.
 inline ConfigureResult configureCurrentThreadForDecode() noexcept {
     ConfigureResult result;
 
@@ -148,36 +148,6 @@ inline ConfigureResult configureCurrentThreadForDecode() noexcept {
     }
 
     // Core affinity: prefer big/prime cores for decode performance
-    cpu_set_t bigCores = android::bigCoreMask();
-    if (sched_setaffinity(tid, sizeof(cpu_set_t), &bigCores) == 0) {
-        result.affinitySet = true;
-    }
-
-    return result;
-}
-
-inline ConfigureResult configureCurrentThreadForEncode() noexcept {
-    ConfigureResult result;
-
-    pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
-
-    // Encode thread also needs high priority for low-latency capture
-    if (setpriority(PRIO_PROCESS, static_cast<id_t>(tid), nice::kAudioCritical) == 0) {
-        result.niceSet = true;
-    } else {
-        MEDIA_LOG_W("configureCurrentThreadForEncode: setpriority failed (errno=%d)", errno);
-    }
-
-    // Try SCHED_FIFO (will likely fail without root, but try anyway)
-    struct sched_param param;
-    param.sched_priority = 2;
-    if (sched_setscheduler(tid, SCHED_FIFO, &param) == 0) {
-        result.prioritySet = true;
-    } else {
-        result.prioritySet = false;
-    }
-
-    // Core affinity: prefer big/prime cores
     cpu_set_t bigCores = android::bigCoreMask();
     if (sched_setaffinity(tid, sizeof(cpu_set_t), &bigCores) == 0) {
         result.affinitySet = true;
@@ -233,10 +203,6 @@ inline ConfigureResult configureCurrentThreadForDecode() noexcept {
     result.niceSet = true;
 
     return result;
-}
-
-inline ConfigureResult configureCurrentThreadForEncode() noexcept {
-    return configureCurrentThreadForDecode();
 }
 
 inline ConfigureResult configureCurrentThreadForWorker() noexcept {

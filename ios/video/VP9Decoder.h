@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <functional>
 #include <atomic>
+#include "../../cpp/video/VideoTypes.h"
+#include "../../cpp/common/MediaTime.h"
 
 namespace videomodule {
 
@@ -19,6 +21,7 @@ public:
     void setOutputLayer(AVSampleBufferDisplayLayer* layer);
     void setFps(int fps) { fps_ = fps > 0 ? fps : 30; }
     void setKeyFrameRequestFn(std::function<void()> fn) { keyFrameRequestFn_ = std::move(fn); }
+    void setVideoMetrics(media::VideoStreamMetrics* m) noexcept { videoMetrics_ = m; }
     void shutdown();
     bool isInitialized() const noexcept { return layer_ != nil; }
 
@@ -53,13 +56,21 @@ private:
     VTDecompressionSessionRef session_ = nullptr;
     CMVideoFormatDescriptionRef formatDesc_ = nullptr;
 
+    static constexpr int kMaxConsecutiveErrors = 5;
+
     int fps_ = 30;
     int sessionWidth_ = 0;
     int sessionHeight_ = 0;
     std::atomic<int> decodedWidth_{0};
     std::atomic<int> decodedHeight_{0};
     bool hwSupported_ = false;
+    int consecutiveErrors_ = 0;
+    int64_t lastResetTimeUs_ = 0;
+    int64_t resetBackoffUs_ = 100000;
+    int resetsSinceSuccess_ = 0;
+    media::VideoStreamMetrics* videoMetrics_ = nullptr;
     std::function<void()> keyFrameRequestFn_;
+    dispatch_queue_t renderQueue_ = nullptr;
 };
 
 }  // namespace videomodule

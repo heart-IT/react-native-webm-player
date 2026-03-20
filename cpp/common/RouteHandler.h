@@ -9,7 +9,7 @@ namespace media {
 
 struct RouteCallbacks {
     std::function<void()> restartStreams;
-    std::function<void(AudioRoute, EchoMode)> fireJsCallback;
+    std::function<void(AudioRoute)> fireJsCallback;
     std::function<void()> resetDrift;
 };
 
@@ -18,40 +18,36 @@ public:
     void setCallbacks(RouteCallbacks cbs) noexcept { cbs_ = std::move(cbs); }
 
     void onInitialRoute(const RouteDetectionResult& result) noexcept {
-        confirmed_ = {result.route, result.echoMode, result.deviceId};
+        confirmed_ = {result.route, result.deviceId};
         initialized_ = true;
-        MEDIA_LOG_I("RouteHandler: initial route=%s echo=%s device=%s",
+        MEDIA_LOG_I("RouteHandler: initial route=%s device=%s",
                     audioRouteToString(result.route),
-                    echoModeToString(result.echoMode),
                     result.deviceId.c_str());
-        if (cbs_.fireJsCallback) cbs_.fireJsCallback(confirmed_.route, confirmed_.echoMode);
+        if (cbs_.fireJsCallback) cbs_.fireJsCallback(confirmed_.route);
     }
 
     void onRouteDetected(const RouteDetectionResult& result) noexcept {
         if (!initialized_) return;
 
         if (result.route == confirmed_.route &&
-            result.echoMode == confirmed_.echoMode &&
             result.deviceId == confirmed_.deviceId) {
-            // Dedup — device list may have changed, fire callback for UI update
-            if (cbs_.fireJsCallback) cbs_.fireJsCallback(confirmed_.route, confirmed_.echoMode);
+            if (cbs_.fireJsCallback) cbs_.fireJsCallback(confirmed_.route);
             return;
         }
 
         AudioRoute oldRoute = confirmed_.route;
-        confirmed_ = {result.route, result.echoMode, result.deviceId};
+        confirmed_ = {result.route, result.deviceId};
 
-        MEDIA_LOG_I("RouteHandler: route changed %s -> %s echo=%s device=%s",
+        MEDIA_LOG_I("RouteHandler: route changed %s -> %s device=%s",
                     audioRouteToString(oldRoute),
                     audioRouteToString(confirmed_.route),
-                    echoModeToString(confirmed_.echoMode),
                     confirmed_.deviceId.c_str());
 
         if (result.route != oldRoute) {
             if (cbs_.resetDrift) cbs_.resetDrift();
         }
 
-        if (cbs_.fireJsCallback) cbs_.fireJsCallback(confirmed_.route, confirmed_.echoMode);
+        if (cbs_.fireJsCallback) cbs_.fireJsCallback(confirmed_.route);
 
         if (needsRestart(oldRoute, confirmed_.route)) {
             MEDIA_LOG_I("RouteHandler: restart needed (%s -> %s)",
@@ -61,50 +57,34 @@ public:
         }
     }
 
-    void onExplicitRouteRequested(AudioRoute route) noexcept {
-        if (route == AudioRoute::Speaker) {
-            speakerPreferred_ = true;
-        } else if (route != AudioRoute::Unknown) {
-            speakerPreferred_ = false;
-        }
-    }
-
     void reset() noexcept {
         confirmed_ = {};
-        speakerPreferred_ = true;
         initialized_ = false;
     }
 
     [[nodiscard]] AudioRoute currentRoute() const noexcept { return confirmed_.route; }
-    [[nodiscard]] EchoMode currentEchoMode() const noexcept { return confirmed_.echoMode; }
     [[nodiscard]] const std::string& currentDeviceId() const noexcept { return confirmed_.deviceId; }
-    [[nodiscard]] bool speakerPreferred() const noexcept { return speakerPreferred_; }
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 
     static bool needsRestart(AudioRoute from, AudioRoute to) noexcept {
         if (from == to) return false;
         if (from == AudioRoute::Unknown) return false;
-
-        // Speaker <-> earpiece: same hardware path, no restart
+        // Builtin transitions (Speaker <-> Earpiece): no restart, same hardware path
         if (isBuiltinRoute(from) && isBuiltinRoute(to)) return false;
-
-        // A2DP <-> builtin: A2DP is output-only, capture path unchanged
+        // A2DP <-> builtin: no restart (output-only, same audio path)
         if ((from == AudioRoute::BluetoothA2dp && isBuiltinRoute(to)) ||
-            (to == AudioRoute::BluetoothA2dp && isBuiltinRoute(from))) {
+            (isBuiltinRoute(from) && to == AudioRoute::BluetoothA2dp)) {
             return false;
         }
-
         return true;
     }
 
 private:
     struct ConfirmedRoute {
         AudioRoute route{AudioRoute::Unknown};
-        EchoMode echoMode{EchoMode::HardwareAEC};
         std::string deviceId;
     } confirmed_;
 
-    bool speakerPreferred_{true};
     bool initialized_{false};
     RouteCallbacks cbs_;
 };

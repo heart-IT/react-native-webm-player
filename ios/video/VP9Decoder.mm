@@ -127,19 +127,23 @@ void VP9Decoder::setOutputLayer(AVSampleBufferDisplayLayer* layer) {
     if (layer) {
         layer_ = layer;
         [layer_ retain];
+        renderQueue_ = dispatch_queue_create("com.holepunchto.vp9.render", DISPATCH_QUEUE_SERIAL);
 
-        // Check HW support at layer assignment time
-        if (@available(iOS 16.0, *)) {
-            hwSupported_ = VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9);
-        } else {
-            hwSupported_ = false;
-        }
+        // VP9 FourCC 'vp09' — use raw value to avoid iOS 16+ SDK constant
+        // requirement. VTIsHardwareDecodeSupported is available from iOS 11;
+        // VP9 HW decode is available on A12+ chips from iOS 14.
+        constexpr CMVideoCodecType kVP9CodecType = 'vp09';
+        hwSupported_ = VTIsHardwareDecodeSupported(kVP9CodecType);
         MEDIA_LOG_I("VP9Decoder: HW decode %s", hwSupported_ ? "supported" : "not supported");
     }
 }
 
 void VP9Decoder::shutdown() {
     destroyDecompressionSession();
+    if (renderQueue_) {
+        dispatch_sync(renderQueue_, ^{});  // drain pending work
+        renderQueue_ = nil;
+    }
     if (layer_) {
         [layer_ release];
         layer_ = nil;
@@ -158,10 +162,11 @@ bool VP9Decoder::createDecompressionSession(int width, int height) {
         return false;
     }
 
-    // Create format description for VP9
+    // Create format description for VP9 (raw FourCC, see setOutputLayer)
+    constexpr CMVideoCodecType kVP9CodecType = 'vp09';
     OSStatus status = CMVideoFormatDescriptionCreate(
         kCFAllocatorDefault,
-        kCMVideoCodecType_VP9,
+        kVP9CodecType,
         width,
         height,
         nullptr,  // extensions
@@ -213,6 +218,10 @@ void VP9Decoder::destroyDecompressionSession() {
         VTDecompressionSessionInvalidate(session_);
         CFRelease(session_);
         session_ = nullptr;
+    }
+    // Drain render queue to ensure no pending blocks reference stale state
+    if (renderQueue_) {
+        dispatch_sync(renderQueue_, ^{});
     }
     if (formatDesc_) {
         CFRelease(formatDesc_);
@@ -266,6 +275,7 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
 
     if (status != noErr || !blockBuffer) {
         MEDIA_LOG_E("VP9Decoder: CMBlockBufferCreate failed: %d", (int)status);
+        if (blockBuffer) CFRelease(blockBuffer);
         return false;
     }
 
@@ -303,8 +313,8 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
         return false;
     }
 
-    // Store ptsUs in the sourceFrameRefCon via a heap-allocated value
-    int64_t* ptsContext = new int64_t(ptsUs);
+    // Pack int64_t PTS directly into void* (both 8 bytes on 64-bit ARM)
+    void* ptsContext = reinterpret_cast<void*>(static_cast<uintptr_t>(ptsUs));
 
     VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
     VTDecodeInfoFlags infoFlagsOut = 0;
@@ -319,15 +329,30 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
     CFRelease(sampleBuffer);
 
     if (status != noErr) {
-        delete ptsContext;
-        MEDIA_LOG_E("VP9Decoder: VTDecompressionSessionDecodeFrame failed: %d", (int)status);
-        if (status == kVTInvalidSessionErr) {
+        ++consecutiveErrors_;
+        MEDIA_LOG_E("VP9Decoder: VTDecompressionSessionDecodeFrame failed: %d (consecutive=%d)",
+                    (int)status, consecutiveErrors_);
+        if (status == kVTInvalidSessionErr || consecutiveErrors_ >= kMaxConsecutiveErrors) {
+            int64_t now = media::nowUs();
+            if (now - lastResetTimeUs_ < resetBackoffUs_) {
+                return false;  // Within backoff window, just drop
+            }
+            MEDIA_LOG_W("VP9Decoder: resetting decoder after %d errors (backoff=%lldms)",
+                        consecutiveErrors_, static_cast<long long>(resetBackoffUs_ / 1000));
             destroyDecompressionSession();
+            consecutiveErrors_ = 0;
+            lastResetTimeUs_ = now;
+            resetBackoffUs_ = std::min(resetBackoffUs_ * 2, int64_t{2000000});
+            ++resetsSinceSuccess_;
+            if (videoMetrics_) videoMetrics_->decoderResets.fetch_add(1, std::memory_order_relaxed);
             if (keyFrameRequestFn_) keyFrameRequestFn_();
         }
         return false;
     }
 
+    consecutiveErrors_ = 0;
+    resetBackoffUs_ = 100000;
+    resetsSinceSuccess_ = 0;
     return true;
 }
 
@@ -339,9 +364,7 @@ void VP9Decoder::vtDecompressionCallback(void* decompressionOutputRefCon,
                                           CMTime presentationTimeStamp,
                                           CMTime presentationDuration) {
     auto* self = static_cast<VP9Decoder*>(decompressionOutputRefCon);
-    auto* ptsContext = static_cast<int64_t*>(sourceFrameRefCon);
-    int64_t ptsUs = ptsContext ? *ptsContext : 0;
-    delete ptsContext;
+    int64_t ptsUs = static_cast<int64_t>(reinterpret_cast<uintptr_t>(sourceFrameRefCon));
 
     if (status != noErr) {
         MEDIA_LOG_W("VP9Decoder: decode callback error: %d", (int)status);
@@ -392,10 +415,19 @@ void VP9Decoder::outputCallback(CVImageBufferRef imageBuffer, int64_t ptsUs) {
         return;
     }
 
-    // Enqueue to display layer — this callback fires on a VT internal thread
-    if ([layer_ isReadyForMoreMediaData]) {
-        [layer_ enqueueSampleBuffer:sampleBuffer];
-    }
+    // Dispatch to render queue to serialize enqueue calls from VT internal threads.
+    // Retain layer to prevent use-after-free if VP9Decoder is destroyed while
+    // the block is queued.
+    AVSampleBufferDisplayLayer* layer = layer_;
+    [layer retain];
+    CFRetain(sampleBuffer);
+    dispatch_async(renderQueue_, ^{
+        if ([layer isReadyForMoreMediaData]) {
+            [layer enqueueSampleBuffer:sampleBuffer];
+        }
+        CFRelease(sampleBuffer);
+        [layer release];
+    });
     CFRelease(sampleBuffer);
 }
 

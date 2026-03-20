@@ -11,7 +11,8 @@ enum class StreamState : uint8_t {
     Inactive = 0,
     Buffering,
     Playing,
-    Underrun
+    Underrun,
+    Paused
 };
 
 struct RawAudioFrame {
@@ -59,9 +60,8 @@ struct StreamMetrics {
     std::atomic<uint64_t> samplesOutput{0};
     std::atomic<uint64_t> ptsDiscontinuities{0};
 
-    // Bluetooth crackling diagnostics
+    // Playback diagnostics
     std::atomic<uint64_t> fastPathSwitches{0};       // fast-path ↔ resampler mode transitions
-    std::atomic<uint64_t> softClipClamps{0};         // hard-clamp activations after soft-clip
     std::atomic<uint64_t> catchupDeadZoneSnaps{0};   // catchup ratio snapped to unity
 
     // Inter-frame delivery gap tracking (pushEncodedFrame timing)
@@ -80,7 +80,6 @@ struct StreamMetrics {
         samplesOutput.store(0, std::memory_order_relaxed);
         ptsDiscontinuities.store(0, std::memory_order_relaxed);
         fastPathSwitches.store(0, std::memory_order_relaxed);
-        softClipClamps.store(0, std::memory_order_relaxed);
         catchupDeadZoneSnaps.store(0, std::memory_order_relaxed);
         maxInterFrameGapUs.store(0, std::memory_order_relaxed);
         gapsOver50ms.store(0, std::memory_order_relaxed);
@@ -88,5 +87,19 @@ struct StreamMetrics {
         gapsOver500ms.store(0, std::memory_order_relaxed);
     }
 };
+
+enum class LatencyMode : uint8_t {
+    Unknown = 0,
+    LowLatency,   // Lowest latency (exclusive hardware access on Android)
+    Standard       // Higher latency (shared with other apps on Android)
+};
+
+inline const char* latencyModeToString(LatencyMode mode) noexcept {
+    switch (mode) {
+        case LatencyMode::LowLatency: return "LowLatency";
+        case LatencyMode::Standard:   return "Standard";
+        default:                      return "Unknown";
+    }
+}
 
 }  // namespace media

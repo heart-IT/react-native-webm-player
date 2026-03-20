@@ -2,25 +2,22 @@
 
 #include <memory>
 #include <mutex>
-#include <array>
 #include <string>
 #include "common/MediaConfig.h"
 #include "MediaTypes.h"
 #include "common/MediaLog.h"
 #include "FramePool.h"
-#include "SyncController.h"
-#include "AudioDecodeSlot.h"
+#include "JitterEstimator.h"
+#include "AudioDecodeChannel.h"
 #include "AudioMixer.h"
-#include "Participant.h"
-#include "SlotAdmission.h"
 #include "DecodeThread.h"
+#include "common/HealthWatchdog.h"
 #include "AAudioOutputBridge.h"
 #include "AudioSessionManager.h"
 
 namespace media {
 
 struct SessionConfig {
-    int localParticipantId = config::sentinel::kNoParticipant;
     bool enableAudioOutput = true;
     AAudioConfig audioConfig{};
 };
@@ -32,41 +29,7 @@ enum class SessionState {
     Stopping
 };
 
-struct ParticipantMetrics {
-    bool active = false;
-    int audioSlot = -1;
-    uint64_t audioFramesReceived = 0;
-    uint64_t framesDropped = 0;
-    uint64_t framesDrained = 0;
-    uint64_t decodeErrors = 0;
-    uint64_t decoderResets = 0;
-    uint64_t underruns = 0;
-    uint64_t ptsDiscontinuities = 0;
-    bool muted = false;
-
-    // Clock drift compensation metrics
-    int32_t driftPpm = 0;              // Current drift estimate in parts-per-million
-    bool driftCompensationActive = false;
-
-    // Bluetooth crackling diagnostics
-    uint64_t fastPathSwitches = 0;
-    uint64_t catchupDeadZoneSnaps = 0;
-
-    // Inter-frame delivery gap diagnostics
-    int64_t maxInterFrameGapUs = 0;
-    uint64_t gapsOver50ms = 0;
-    uint64_t gapsOver100ms = 0;
-    uint64_t gapsOver500ms = 0;
-
-    // Per-participant jitter buffer metrics (from JitterEstimator)
-    int64_t jitterUs = 0;
-    int64_t bufferTargetUs = 0;
-    float networkStability = 1.0f;
-};
-
 struct SessionMetrics {
-    int activeParticipants = 0;
-    int boundAudioSlots = 0;
     uint64_t totalSamplesOutput = 0;
     int64_t uptimeUs = 0;
 
@@ -83,6 +46,7 @@ struct SessionMetrics {
     uint32_t audioRestartCount = 0;
     int audioLastError = 0;
     int32_t actualSampleRate = 0;
+    bool sampleRateValid = true;
     int64_t audioOutputLatencyUs = 0;
 
     // Pool pressure indicators
@@ -92,34 +56,42 @@ struct SessionMetrics {
     // Bluetooth route tracking
     AudioRoute currentRoute = AudioRoute::Unknown;
 
-    // Mixer-level diagnostics
-    uint64_t softClipClamps = 0;
+    // Audio channel metrics
+    uint64_t audioFramesReceived = 0;
+    uint64_t framesDropped = 0;
+    uint64_t framesDrained = 0;
+    uint64_t decodeErrors = 0;
+    uint64_t decoderResets = 0;
+    uint64_t underruns = 0;
+    uint64_t ptsDiscontinuities = 0;
+    bool muted = false;
 
-    std::array<ParticipantMetrics, config::limits::kMaxParticipants> participants;
+    // Clock drift compensation metrics
+    int32_t driftPpm = 0;
+    bool driftCompensationActive = false;
+
+    // Bluetooth crackling diagnostics
+    uint64_t fastPathSwitches = 0;
+    uint64_t catchupDeadZoneSnaps = 0;
+
+    // Inter-frame delivery gap diagnostics
+    int64_t maxInterFrameGapUs = 0;
+    uint64_t gapsOver50ms = 0;
+    uint64_t gapsOver100ms = 0;
+    uint64_t gapsOver500ms = 0;
+
+    // Jitter buffer metrics
+    int64_t jitterUs = 0;
+    int64_t bufferTargetUs = 0;
 };
 
 class MediaSession {
 public:
-    static constexpr int kMaxAudioSlots = config::limits::kMaxAudioSlots;
-
     explicit MediaSession(SessionConfig config = {}) noexcept
         : config_(config)
-        , decodeThread_(audioSlots_)
-        , admission_(participants_, audioSlots_, sync_, decodeThread_) {
+        , decodeThread_(audio_) {
 
-        for (size_t i = 0; i < static_cast<size_t>(kMaxAudioSlots); ++i) {
-            auto slot = std::make_unique<AudioDecodeSlot>(audioPool_);
-            slot->setSlotId(static_cast<int>(i));
-            audioSlotStorage_[i] = std::move(slot);
-            audioSlots_[i] = audioSlotStorage_[i].get();
-        }
-
-        mixer_.setSlots(audioSlots_);
-
-        decodeThread_.setInactivityCallback(participants_,
-            [](void* ctx, int slotIndex) {
-                static_cast<SlotAdmission*>(ctx)->releaseInactiveSlot(slotIndex);
-            }, &admission_);
+        mixer_.setChannel(&audio_);
     }
 
     ~MediaSession() noexcept { stop(); }
@@ -139,22 +111,18 @@ public:
         startTimeUs_ = nowUs();
         MEDIA_LOG_I("MediaSession starting");
 
-        // Cache AudioSessionManager pointer for RT callback path (avoids Meyers-singleton guard lock)
+        // Initialize AudioSessionManager for route/interruption handling.
+        // Skip if warmUp() already called initialize().
         auto& mgr = AudioSessionManager::instance();
-        sessionMgr_.store(&mgr, std::memory_order_release);
-
-        if (!mgr.canPlayAudio()) {
-            MEDIA_LOG_W("MediaSession::start - no audio focus granted, playback may be interrupted");
+        if (!warmUpCalled_) {
+            mgr.initialize();
         }
 
-        for (size_t i = 0; i < static_cast<size_t>(kMaxAudioSlots); ++i) {
-            if (audioSlots_[i]) {
-                audioSlots_[i]->setDecoder(std::make_unique<OpusDecoderAdapter>());
-            }
-        }
+        audio_.setDecoder(std::make_unique<OpusDecoderAdapter>());
 
         if (!decodeThread_.start()) {
             MEDIA_LOG_E("MediaSession::start failed: decode thread start failed");
+            AudioSessionManager::instance().shutdown(nullptr);
             state_.store(SessionState::Stopped, std::memory_order_release);
             return false;
         }
@@ -164,18 +132,11 @@ public:
             bool audioPreWarmed = audioOutput_ && audioOutput_->isWarmingUp();
 
             if (!audioOutput_) {
-                AAudioConfig audioConfig = config_.audioConfig;
-
-                int32_t sessionId = AudioSessionManager::instance().currentSessionId();
-                if (sessionId != AAUDIO_SESSION_ID_ALLOCATE && sessionId > 0) {
-                    audioConfig.sessionId = sessionId;
-                    MEDIA_LOG_I("MediaSession: Using shared session ID %d for AEC", sessionId);
-                }
-
                 audioOutput_ = std::make_unique<AAudioOutputBridge>(
                     [this](float* output, size_t frames) { return onAudioCallback(output, frames); },
-                    audioConfig
+                    config_.audioConfig
                 );
+                audioOutput_->setRestartCallback([this] { decodeThread_.wake(); });
             }
 
             if (!audioOutput_->start()) {
@@ -211,8 +172,15 @@ public:
         std::lock_guard<std::mutex> lk(lifecycleMtx_);
 
         SessionState current = state_.load(std::memory_order_acquire);
-        if (current == SessionState::Stopped) return;
-        
+        if (current == SessionState::Stopped) {
+            // warmUp() may have called initialize() without start() ever running.
+            if (warmUpCalled_) {
+                warmUpCalled_ = false;
+                AudioSessionManager::instance().shutdown(nullptr);
+            }
+            return;
+        }
+
         if (!state_.compare_exchange_strong(current, SessionState::Stopping,
                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
             return;
@@ -226,15 +194,11 @@ public:
         }
 
         decodeThread_.stop();
+        audio_.deactivate();
+        jitter_.reset();
 
-        for (size_t i = 0; i < static_cast<size_t>(kMaxAudioSlots); ++i) {
-            if (audioSlots_[i]) {
-                audioSlots_[i]->unbind();
-            }
-        }
-
-        participants_.reset();
-        sync_.resetAll();
+        warmUpCalled_ = false;
+        AudioSessionManager::instance().shutdown(nullptr);
 
         state_.store(SessionState::Stopped, std::memory_order_release);
         MEDIA_LOG_I("MediaSession stopped");
@@ -250,9 +214,11 @@ public:
     [[nodiscard]] bool warmUp() noexcept {
         std::lock_guard<std::mutex> lk(lifecycleMtx_);
 
-        // Cache AudioSessionManager pointer for RT callback path if not already cached
-        if (!sessionMgr_.load(std::memory_order_acquire)) {
-            sessionMgr_.store(&AudioSessionManager::instance(), std::memory_order_release);
+        // Initialize AudioSessionManager if not already done (mirrors iOS)
+        if (!warmUpCalled_) {
+            auto& mgr = AudioSessionManager::instance();
+            mgr.initialize();
+            warmUpCalled_ = true;
         }
 
         if (!config_.enableAudioOutput) return true;
@@ -263,16 +229,10 @@ public:
         }
 
         // Create audio output if needed
-        AAudioConfig audioConfig = config_.audioConfig;
-        int32_t sessionId = AudioSessionManager::instance().currentSessionId();
-        if (sessionId != AAUDIO_SESSION_ID_ALLOCATE && sessionId > 0) {
-            audioConfig.sessionId = sessionId;
-        }
-
         if (!audioOutput_) {
             audioOutput_ = std::make_unique<AAudioOutputBridge>(
                 [this](float* output, size_t frames) { return onAudioCallback(output, frames); },
-                audioConfig
+                config_.audioConfig
             );
         }
 
@@ -290,95 +250,63 @@ public:
         return audioOutput_ && audioOutput_->isWarmingUp();
     }
 
+    [[nodiscard]] bool pause() noexcept {
+        if (!isRunning()) return false;
+        audio_.pause();
+        if (audioOutput_) audioOutput_->pauseToWarmUp();
+        return true;
+    }
+
+    [[nodiscard]] bool resume() noexcept {
+        if (!isRunning()) return false;
+        audio_.resume();
+        if (audioOutput_) audioOutput_->resumeFromWarmUp();
+        decodeThread_.wake();
+        return true;
+    }
+
+    [[nodiscard]] bool isPaused() const noexcept {
+        return audio_.state() == StreamState::Paused;
+    }
+
+    [[nodiscard]] int64_t currentTimeUs() const noexcept {
+        return audio_.lastRenderedPtsUs();
+    }
+
+    [[nodiscard]] StreamState audioState() const noexcept {
+        return audio_.state();
+    }
+
+    void setBufferTargetOverride(int64_t audioUs, int64_t videoUs) noexcept {
+        jitter_.setBufferTargetOverride(audioUs);
+        (void)videoUs;  // forwarded by caller to VideoFrameQueue
+    }
+
     [[nodiscard]] int64_t uptimeUs() const noexcept {
         return startTimeUs_ > 0 ? nowUs() - startTimeUs_ : 0;
     }
 
-    [[nodiscard]] Participant* addParticipant(bool isSelf = false) noexcept {
-        Participant* p = participants_.acquireSlot();
-        if (!p) {
-            MEDIA_LOG_W("MediaSession::addParticipant: no free slots");
-            return nullptr;
-        }
-
-        p->setIsSelf(isSelf);
-        p->setState(ParticipantState::Connected);
-
-        MEDIA_LOG_I("MediaSession: added participant %d%s", p->id(), isSelf ? " (self)" : "");
-        return p;
-    }
-
-    [[nodiscard]] Participant* addParticipantWithId(int externalId) noexcept {
-        Participant* p = participants_.findOrCreate(externalId);
-        if (!p) {
-            MEDIA_LOG_W("MediaSession::addParticipantWithId: no free slots for externalId=%d", externalId);
-            return nullptr;
-        }
-
-        p->setState(ParticipantState::Connected);
-
-        MEDIA_LOG_I("MediaSession: added participant %d (external=%d)", p->id(), externalId);
-        return p;
-    }
-
-    void removeParticipant(int participantId) noexcept {
-        admission_.releaseParticipant(participantId);
-        sync_.release(participantId);
-        participants_.remove(participantId);
-        
-        MEDIA_LOG_I("MediaSession: removed participant %d", participantId);
-    }
-
-    [[nodiscard]] Participant* participant(int id) noexcept {
-        return participants_.get(id);
-    }
-
-    [[nodiscard]] const Participant* participant(int id) const noexcept {
-        return participants_.get(id);
-    }
-
-    [[nodiscard]] bool isParticipantActive(int participantId) const noexcept {
-        return participants_.get(participantId) != nullptr;
-    }
-
-    [[nodiscard]] int participantCount() const noexcept {
-        return participants_.count();
-    }
-
-    [[nodiscard]] bool pushAudioFrame(int participantId, const uint8_t* data, size_t size,
+    [[nodiscard]] bool pushAudioFrame(const uint8_t* data, size_t size,
                                        int64_t timestampUs, int64_t durationUs = 0) noexcept {
         if (!isRunning()) return false;
 
         checkAudioOutputHealth();
 
-        Participant* p = participants_.get(participantId);
-        if (!p) return false;
-
-        if (!admission_.admitParticipant(participantId)) {
-            return false;
+        // Activate audio on first frame
+        if (!audio_.isActive()) {
+            audio_.activate();
+            decodeThread_.notifyActive();
         }
 
-        int slotIdx = p->audioSlot();
-        if (slotIdx < 0 || slotIdx >= kMaxAudioSlots) {
-            return false;
-        }
-        AudioDecodeSlot* slot = audioSlots_[static_cast<size_t>(slotIdx)];
-        if (!slot) return false;
+        jitter_.onPacket(timestampUs, nowUs());
+        audio_.setBufferTarget(jitter_.bufferTargetUs());
 
-        if (auto* jitter = sync_.getJitter(participantId)) {
-            jitter->onPacket(timestampUs, nowUs());
-            // Apply per-codec latency compensation for Bluetooth A2DP
-            int64_t routeOffset = AudioSessionManager::instance().effectiveRouteLatencyUs();
-            slot->setBufferTarget(jitter->bufferTargetUs(routeOffset));
-
-            // Update clock drift compensation if we have enough measurement data
-            if (jitter->hasValidLongTermDrift()) {
-                slot->updateDriftCompensation(
-                    jitter->cumulativeDriftUs(),
-                    jitter->measurementWindowUs(),
-                    jitter->sampleCount(),
-                    jitter->networkStability());
-            }
+        // Update clock drift compensation if we have enough measurement data
+        if (jitter_.hasValidLongTermDrift()) {
+            audio_.updateDriftCompensation(
+                jitter_.cumulativeDriftUs(),
+                jitter_.measurementWindowUs(),
+                jitter_.sampleCount());
         }
 
         RawAudioFrame frame;
@@ -386,69 +314,25 @@ public:
         frame.size = size;
         frame.timestampUs = timestampUs;
         frame.durationUs = durationUs;
-        bool pushed = slot->pushEncodedFrame(frame);
+        bool pushed = audio_.pushEncodedFrame(frame);
 
         if (pushed) {
-            p->updateActivity();
-            p->setHasAudio(true);
             decodeThread_.wake();
         }
 
         return pushed;
     }
 
-    [[nodiscard]] bool setParticipantGain(int participantId, float gain) noexcept {
-        int slotIndex = audioSlotFor(participantId);
-        if (slotIndex >= 0 && slotIndex < kMaxAudioSlots && audioSlots_[static_cast<size_t>(slotIndex)]) {
-            audioSlots_[static_cast<size_t>(slotIndex)]->setGain(gain);
-            return true;
-        }
-        return false;
+    void setGain(float gain) noexcept {
+        audio_.setGain(gain);
     }
 
-    [[nodiscard]] bool setParticipantMuted(int participantId, bool muted) noexcept {
-        if (Participant* p = participants_.get(participantId)) {
-            p->setMuted(muted);
-            (void)setParticipantGain(participantId, muted ? 0.0f : config::mix::kDefaultGain);
-            return true;
-        }
-        return false;
+    void setMuted(bool muted) noexcept {
+        muted_ = muted;
+        audio_.setGain(muted ? 0.0f : config::mix::kDefaultGain);
     }
 
-    void scheduleAudioRestart() noexcept {
-        std::lock_guard<std::mutex> lk(lifecycleMtx_);
-        if (state_.load(std::memory_order_acquire) != SessionState::Running) return;
-
-        if (audioOutput_ && audioOutput_->isRunning()) {
-            audioOutput_->scheduleRestart();
-        } else {
-            restartAudioOutput();
-        }
-    }
-
-    void pauseAudio() noexcept {
-        std::lock_guard<std::mutex> lk(lifecycleMtx_);
-        if (audioPaused_.load(std::memory_order_acquire)) return;
-        audioPaused_.store(true, std::memory_order_release);
-        if (audioOutput_) {
-            audioOutput_->stop();
-            MEDIA_LOG_I("MediaSession: audio paused");
-        }
-    }
-
-    void resumeAudio() noexcept {
-        std::lock_guard<std::mutex> lk(lifecycleMtx_);
-        if (!audioPaused_.load(std::memory_order_acquire)) return;
-        audioPaused_.store(false, std::memory_order_release);
-        if (state_.load(std::memory_order_acquire) == SessionState::Running) {
-            restartAudioOutput();
-            MEDIA_LOG_I("MediaSession: audio resumed");
-        }
-    }
-
-    [[nodiscard]] bool isAudioPaused() const noexcept {
-        return audioPaused_.load(std::memory_order_acquire);
-    }
+    [[nodiscard]] bool isMuted() const noexcept { return muted_; }
 
     void getMetrics(SessionMetrics& out) noexcept {
         out = metrics();
@@ -472,76 +356,48 @@ public:
 
         // Latency mode tracking
         m.grantedLatencyMode = audio ? audio->grantedLatencyMode() : LatencyMode::Unknown;
-        
-        // Pool pressure - check any active slot
-        bool decodedPressure = false;
-        bool encodedPressure = false;
 
-        int activeCount = 0;
-        int boundSlots = 0;
+        // Audio channel metrics
+        if (audio_.isActive()) {
+            const auto& sm = audio_.metrics();
+            m.audioFramesReceived = sm.framesReceived.load(std::memory_order_relaxed);
+            m.framesDropped = sm.framesDropped.load(std::memory_order_relaxed);
+            m.framesDrained = sm.framesDrained.load(std::memory_order_relaxed);
+            m.decodeErrors = sm.decodeErrors.load(std::memory_order_relaxed);
+            m.decoderResets = sm.decoderResets.load(std::memory_order_relaxed);
+            m.underruns = sm.underruns.load(std::memory_order_relaxed);
+            m.ptsDiscontinuities = sm.ptsDiscontinuities.load(std::memory_order_relaxed);
+            m.muted = muted_;
 
-        participants_.forEach([&](const Participant& p) {
-            if (p.id() >= 0 && p.id() < config::limits::kMaxParticipants) {
-                auto& pm = m.participants[static_cast<size_t>(p.id())];
-                pm.active = p.isConnected();
-                pm.audioSlot = p.audioSlot();
-                pm.muted = p.isMuted();
+            // Bluetooth crackling diagnostics
+            m.fastPathSwitches = sm.fastPathSwitches.load(std::memory_order_relaxed);
+            m.catchupDeadZoneSnaps = audio_.catchupDeadZoneSnaps();
 
-                if (pm.audioSlot >= 0 && pm.audioSlot < kMaxAudioSlots) {
-                    if (const auto* slot = audioSlots_[static_cast<size_t>(pm.audioSlot)]) {
-                        const auto& sm = slot->metrics();
-                        pm.audioFramesReceived = sm.framesReceived.load(std::memory_order_relaxed);
-                        pm.framesDropped = sm.framesDropped.load(std::memory_order_relaxed);
-                        pm.framesDrained = sm.framesDrained.load(std::memory_order_relaxed);
-                        pm.decodeErrors = sm.decodeErrors.load(std::memory_order_relaxed);
-                        pm.decoderResets = sm.decoderResets.load(std::memory_order_relaxed);
-                        pm.underruns = sm.underruns.load(std::memory_order_relaxed);
-                        pm.ptsDiscontinuities = sm.ptsDiscontinuities.load(std::memory_order_relaxed);
+            // Inter-frame delivery gap diagnostics
+            m.maxInterFrameGapUs = sm.maxInterFrameGapUs.load(std::memory_order_relaxed);
+            m.gapsOver50ms = sm.gapsOver50ms.load(std::memory_order_relaxed);
+            m.gapsOver100ms = sm.gapsOver100ms.load(std::memory_order_relaxed);
+            m.gapsOver500ms = sm.gapsOver500ms.load(std::memory_order_relaxed);
 
-                        // Bluetooth crackling diagnostics
-                        pm.fastPathSwitches = sm.fastPathSwitches.load(std::memory_order_relaxed);
-                        pm.catchupDeadZoneSnaps = slot->catchupDeadZoneSnaps();
+            // Clock drift compensation metrics
+            m.driftPpm = audio_.driftPpm();
+            m.driftCompensationActive = audio_.isDriftCompensationActive();
 
-                        // Inter-frame delivery gap diagnostics
-                        pm.maxInterFrameGapUs = sm.maxInterFrameGapUs.load(std::memory_order_relaxed);
-                        pm.gapsOver50ms = sm.gapsOver50ms.load(std::memory_order_relaxed);
-                        pm.gapsOver100ms = sm.gapsOver100ms.load(std::memory_order_relaxed);
-                        pm.gapsOver500ms = sm.gapsOver500ms.load(std::memory_order_relaxed);
+            // Jitter buffer metrics
+            m.jitterUs = jitter_.jitterUs();
+            m.bufferTargetUs = jitter_.bufferTargetUs();
 
-                        // Clock drift compensation metrics
-                        pm.driftPpm = slot->driftPpm();
-                        pm.driftCompensationActive = slot->isDriftCompensationActive();
-
-                        // Per-participant jitter buffer metrics
-                        if (auto* jitter = sync_.getJitter(p.id())) {
-                            pm.jitterUs = jitter->jitterUs();
-                            int64_t routeOffset = routeLatencyOffsetUs();
-                            pm.bufferTargetUs = jitter->bufferTargetUs(routeOffset);
-                            pm.networkStability = jitter->networkStability();
-                        }
-
-                        // Check pool pressure on any bound slot
-                        if (slot->isDecodedPoolUnderPressure()) decodedPressure = true;
-                        if (slot->isEncodedPoolUnderPressure()) encodedPressure = true;
-                    }
-                    boundSlots++;
-                }
-
-                if (pm.active) activeCount++;
-            }
-        });
-
-        m.activeParticipants = activeCount;
-        m.boundAudioSlots = boundSlots;
-        m.decodedPoolUnderPressure = decodedPressure;
-        m.encodedPoolUnderPressure = encodedPressure;
-        m.softClipClamps = mixer_.softClipClamps();
+            // Check pool pressure
+            m.decodedPoolUnderPressure = audio_.isDecodedPoolUnderPressure();
+            m.encodedPoolUnderPressure = audio_.isEncodedPoolUnderPressure();
+        }
 
         // Audio output health metrics
         if (audio) {
             m.audioRestartCount = audio->restartCount();
             m.audioLastError = audio->lastError();
             m.actualSampleRate = audio->actualSampleRate();
+            m.sampleRateValid = audio->isSampleRateValid();
             m.audioOutputLatencyUs = audio->totalLatencyUs();
         }
 
@@ -552,37 +408,14 @@ public:
     }
 
     void resetMetrics() noexcept {
-        for (size_t i = 0; i < static_cast<size_t>(kMaxAudioSlots); ++i) {
-            if (audioSlots_[i]) {
-                audioSlots_[i]->resetMetrics();
-            }
-        }
+        audio_.resetMetrics();
         audioPool_.resetExhaustedCount();
-        mixer_.resetSoftClipClamps();
         MEDIA_LOG_I("MediaSession: metrics reset");
     }
 
-    [[nodiscard]] int maxParticipants() const noexcept {
-        return config::limits::kMaxParticipants;
-    }
-    [[nodiscard]] int maxAudioSlots() const noexcept { return kMaxAudioSlots; }
-
-    [[nodiscard]] int audioSlotFor(int participantId) const noexcept {
-        return admission_.audioSlotFor(participantId);
-    }
-
-    [[nodiscard]] AudioDecodeSlot* audioSlot(int index) noexcept {
-        return (index >= 0 && index < kMaxAudioSlots) ? audioSlots_[static_cast<size_t>(index)] : nullptr;
-    }
-
     void setSyncCoordinator(AVSyncCoordinator* coordinator) noexcept {
-        for (size_t i = 0; i < kMaxAudioSlots; ++i) {
-            if (audioSlots_[i]) audioSlots_[i]->setSyncCoordinator(coordinator);
-        }
+        audio_.setSyncCoordinator(coordinator);
     }
-
-    SyncController& syncController() noexcept { return sync_; }
-    ParticipantRegistry& participants() noexcept { return participants_; }
 
     [[nodiscard]] bool isDecodeThreadResponsive() noexcept {
         return decodeThread_.isResponsive();
@@ -600,19 +433,19 @@ public:
         decodeThread_.resetWatchdogState();
     }
 
-    void setEvictionCallback(EvictionCallback cb) noexcept {
-        admission_.setEvictionCallback(std::move(cb));
+    void requestDriftReset() noexcept {
+        audio_.requestDriftReset();
     }
 
-    // Request drift state reset on all bound slots after audio route change.
-    // Prevents stale drift ratio from causing wrong playback speed.
-    void requestDriftResetAll() noexcept {
-        for (size_t i = 0; i < static_cast<size_t>(kMaxAudioSlots); ++i) {
-            if (audioSlots_[i] && audioSlots_[i]->isBound()) {
-                audioSlots_[i]->requestDriftReset();
-            }
-        }
+    void setHealthWatchdog(std::unique_ptr<HealthWatchdog> wd) noexcept {
+        decodeThread_.setHealthWatchdog(std::move(wd));
     }
+
+    // Lock-free accessors for health watchdog (called from decode thread)
+    [[nodiscard]] const auto& audioMetrics() const noexcept { return audio_.metrics(); }
+    [[nodiscard]] bool wasDecodeThreadDetached() const noexcept { return decodeThread_.wasDetached(); }
+    [[nodiscard]] bool isAudioOutputRunning() const noexcept { return audioOutput_ && audioOutput_->isRunning(); }
+    [[nodiscard]] int64_t bufferTargetUs() const noexcept { return audio_.bufferTarget(); }
 
 private:
     // Periodic liveness check: if session is Running but audio output is null
@@ -621,7 +454,6 @@ private:
     // avoid overhead on every frame push.
     void checkAudioOutputHealth() noexcept {
         if (!config_.enableAudioOutput) return;
-        if (audioPaused_.load(std::memory_order_acquire)) return;
 
         int64_t now = nowUs();
         if (now - lastAudioHealthCheckUs_ < config::thread::kAudioOutputCheckIntervalUs) return;
@@ -630,7 +462,6 @@ private:
         if (!audioOutput_ || !audioOutput_->isRunning()) {
             std::lock_guard<std::mutex> lk(lifecycleMtx_);
             if (state_.load(std::memory_order_acquire) != SessionState::Running) return;
-            if (audioPaused_.load(std::memory_order_acquire)) return;
             if (audioOutput_ && audioOutput_->isRunning()) return;
 
             MEDIA_LOG_W("MediaSession: audio output not running, attempting recovery");
@@ -641,16 +472,10 @@ private:
     void restartAudioOutput() noexcept {
         if (!config_.enableAudioOutput) return;
 
-        AAudioConfig cfg = config_.audioConfig;
-        int32_t sessionId = AudioSessionManager::instance().currentSessionId();
-        if (sessionId != AAUDIO_SESSION_ID_ALLOCATE && sessionId > 0) {
-            cfg.sessionId = sessionId;
-        }
-
         if (!audioOutput_) {
             audioOutput_ = std::make_unique<AAudioOutputBridge>(
                 [this](float* out, size_t frames) { return onAudioCallback(out, frames); },
-                cfg);
+                config_.audioConfig);
             audioOutput_->setRestartCallback([this] { decodeThread_.wake(); });
         }
 
@@ -659,73 +484,30 @@ private:
         }
     }
 
-    // Ducking gain applied when AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK (~-14dB attenuation)
-    static constexpr float kDuckGain = 0.2f;
-    static constexpr float kDuckRampTolerance = 0.001f;
-
     size_t onAudioCallback(float* output, size_t frameCount) noexcept {
         if (state_.load(std::memory_order_acquire) != SessionState::Running) {
             return 0;
         }
 
-        size_t written = mixer_.mix(output, frameCount, config_.localParticipantId);
-
-        if (written > 0) {
-            // Determine duck target via cached pointer (avoids Meyers-singleton guard on RT path)
-            auto* smgr = sessionMgr_.load(std::memory_order_acquire);
-            float targetGain = (smgr && smgr->shouldDuck()) ? kDuckGain : 1.0f;
-            const size_t sampleCount = written * config::audio::kChannels;
-
-            bool needsRamp = std::abs(targetGain - duckGain_) > kDuckRampTolerance;
-            if (needsRamp) {
-                // Smooth ramp from current to target over the frame (~20ms)
-                float gain = duckGain_;
-                float increment = (targetGain - duckGain_) / static_cast<float>(sampleCount);
-                for (size_t i = 0; i < sampleCount; ++i) {
-                    output[i] *= gain;
-                    gain += increment;
-                }
-                duckGain_ = targetGain;
-            } else if (targetGain < 1.0f - kDuckRampTolerance) {
-                // Steady-state ducking — flat gain multiply
-                for (size_t i = 0; i < sampleCount; ++i) {
-                    output[i] *= targetGain;
-                }
-                duckGain_ = targetGain;
-            }
-            // targetGain ≈ 1.0 and no ramp needed → skip multiply entirely
-        }
-
-        return written;
+        return mixer_.mix(output, frameCount);
     }
 
     const SessionConfig config_;
     std::mutex lifecycleMtx_;
     std::atomic<SessionState> state_{SessionState::Stopped};
-    std::atomic<bool> audioPaused_{false};
     int64_t startTimeUs_ = 0;
 
     DecodedAudioPool audioPool_;
-
-    std::array<std::unique_ptr<AudioDecodeSlot>, kMaxAudioSlots> audioSlotStorage_;
-    std::array<AudioDecodeSlot*, kMaxAudioSlots> audioSlots_{};
-
-    ParticipantRegistry participants_;
-    SyncController sync_;
+    AudioDecodeChannel audio_{audioPool_};
+    JitterEstimator jitter_;
 
     AudioMixer mixer_;
-
     DecodeThread decodeThread_;
-    SlotAdmission admission_;
 
     std::unique_ptr<AAudioOutputBridge> audioOutput_;
 
-    // Cached AudioSessionManager pointer for RT callback path (avoids Meyers-singleton guard)
-    std::atomic<AudioSessionManager*> sessionMgr_{nullptr};
-
-    // Current duck gain level — audio callback thread only, no synchronization needed.
-    // Ramps smoothly between 1.0 (normal) and kDuckGain (0.2) to avoid clicks.
-    float duckGain_ = 1.0f;
+    bool muted_ = false;
+    bool warmUpCalled_ = false;
 
     // Audio output liveness check — JS thread only, no synchronization needed.
     int64_t lastAudioHealthCheckUs_ = 0;
