@@ -15,6 +15,8 @@ bool MediaCodecDecoder::initialize(ANativeWindow* surface) {
 
     // Configure VP9 decoder immediately — no SPS/PPS handshake needed
     if (!configureCodec(media::video_config::kDefaultWidth, media::video_config::kDefaultHeight)) {
+        ANativeWindow_release(surface_);
+        surface_ = nullptr;
         return false;
     }
 
@@ -80,8 +82,8 @@ bool MediaCodecDecoder::configureCodec(int width, int height) {
         return false;
     }
 
-    decodedWidth_ = width;
-    decodedHeight_ = height;
+    decodedWidth_.store(width, std::memory_order_relaxed);
+    decodedHeight_.store(height, std::memory_order_relaxed);
     configured_.store(true, std::memory_order_release);
     MEDIA_LOG_I("MediaCodecDecoder: VP9 configured %dx%d", width, height);
     return true;
@@ -101,9 +103,11 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
             if (keyFrameRequestFn_) keyFrameRequestFn_();
             return false;
         }
-        if (info.width != decodedWidth_ || info.height != decodedHeight_) {
+        int curW = decodedWidth_.load(std::memory_order_relaxed);
+        int curH = decodedHeight_.load(std::memory_order_relaxed);
+        if (info.width != curW || info.height != curH) {
             MEDIA_LOG_I("MediaCodecDecoder: VP9 resolution %dx%d -> %dx%d, reconfiguring",
-                        decodedWidth_, decodedHeight_, info.width, info.height);
+                        curW, curH, info.width, info.height);
             if (!configureCodec(info.width, info.height)) {
                 return false;
             }
@@ -139,9 +143,8 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
             consecutiveErrors_ = 0;
             lastResetTimeUs_ = now;
             resetBackoffUs_ = std::min(resetBackoffUs_ * 2, int64_t{2000000});
-            ++resetsSinceSuccess_;
-            if (videoMetrics_) videoMetrics_->decoderResets.fetch_add(1, std::memory_order_relaxed);
-            configureCodec(decodedWidth_, decodedHeight_);
+            configureCodec(decodedWidth_.load(std::memory_order_relaxed),
+                          decodedHeight_.load(std::memory_order_relaxed));
             if (keyFrameRequestFn_) keyFrameRequestFn_();
         }
         return false;
@@ -149,7 +152,6 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
 
     consecutiveErrors_ = 0;
     resetBackoffUs_ = 100000;
-    resetsSinceSuccess_ = 0;
     return true;
 }
 
@@ -172,8 +174,8 @@ int MediaCodecDecoder::releaseOutputBuffers() {
                 if (AMediaFormat_getInt32(outputFormat, AMEDIAFORMAT_KEY_WIDTH, &w) &&
                     AMediaFormat_getInt32(outputFormat, AMEDIAFORMAT_KEY_HEIGHT, &h)) {
                     if (w > 0 && h > 0) {
-                        decodedWidth_ = w;
-                        decodedHeight_ = h;
+                        decodedWidth_.store(w, std::memory_order_relaxed);
+                        decodedHeight_.store(h, std::memory_order_relaxed);
                         MEDIA_LOG_I("MediaCodecDecoder: resolution changed to %dx%d", w, h);
                     }
                 }
@@ -192,11 +194,6 @@ int MediaCodecDecoder::releaseOutputBuffers() {
 
 void MediaCodecDecoder::postDecode() {
     releaseOutputBuffers();
-}
-
-void MediaCodecDecoder::flush() {
-    if (!codec_) return;
-    AMediaCodec_flush(codec_);
 }
 
 }  // namespace videomodule

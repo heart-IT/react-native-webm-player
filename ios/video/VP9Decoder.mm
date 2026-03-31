@@ -239,7 +239,6 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
             lastResetTimeUs_ = now;
             resetBackoffUs_ = std::min(resetBackoffUs_ * 2, int64_t{2000000});
             ++resetsSinceSuccess_;
-            if (videoMetrics_) videoMetrics_->decoderResets.fetch_add(1, std::memory_order_relaxed);
             if (keyFrameRequestFn_) keyFrameRequestFn_();
         }
         return false;

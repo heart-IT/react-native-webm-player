@@ -99,3 +99,30 @@ target_link_libraries(test_ubsan PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 add_executable(test_route_handler
     test_route_handler.cpp
 )
+
+# ---- Demuxer fuzz test ----
+# libwebm mkvparser source (vendored)
+set(LIBWEBM_ROOT "${CPP_ROOT}/third_party/libwebm")
+
+option(FUZZ "Build with libFuzzer instrumentation (requires clang)" OFF)
+
+if(FUZZ)
+    # libFuzzer mode: clang provides main() and coverage-guided mutation
+    add_executable(fuzz_demuxer
+        fuzz_demuxer.cpp
+        ${CPP_ROOT}/demux/WebmDemuxer.cpp
+        ${LIBWEBM_ROOT}/mkvparser/mkvparser.cc
+    )
+    target_include_directories(fuzz_demuxer PRIVATE ${LIBWEBM_ROOT})
+    target_compile_options(fuzz_demuxer PRIVATE -fsanitize=fuzzer)
+    target_link_options(fuzz_demuxer PRIVATE -fsanitize=fuzzer)
+    target_compile_definitions(fuzz_demuxer PRIVATE FUZZING_BUILD_MODE_INSTRUMENTATION)
+else()
+    # Standalone mode: built-in mutation harness with ASAN, runs in CI
+    add_executable(fuzz_demuxer
+        fuzz_demuxer.cpp
+        ${CPP_ROOT}/demux/WebmDemuxer.cpp
+        ${LIBWEBM_ROOT}/mkvparser/mkvparser.cc
+    )
+    target_include_directories(fuzz_demuxer PRIVATE ${LIBWEBM_ROOT})
+endif()

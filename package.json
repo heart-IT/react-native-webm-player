@@ -39,6 +39,7 @@
     "test:asan": "cmake -B tests/sanitizer/build-asan -S tests/sanitizer -DSANITIZER=address && cmake --build tests/sanitizer/build-asan && tests/sanitizer/build-asan/test_lsan",
     "test:tsan": "cmake -B tests/sanitizer/build-tsan -S tests/sanitizer -DSANITIZER=thread && cmake --build tests/sanitizer/build-tsan && tests/sanitizer/build-tsan/test_tsan",
     "test:ubsan": "cmake -B tests/sanitizer/build-ubsan -S tests/sanitizer -DSANITIZER=undefined && cmake --build tests/sanitizer/build-ubsan && tests/sanitizer/build-ubsan/test_ubsan",
+    "test:fuzz": "cmake -B tests/sanitizer/build-fuzz -S tests/sanitizer -DSANITIZER=address && cmake --build tests/sanitizer/build-fuzz --target fuzz_demuxer && tests/sanitizer/build-fuzz/fuzz_demuxer",
     "lint": "lunte src/ example/src/",
     "build": "yarn clean && yarn prepare",
     "pack": "yarn build && npm pack"

@@ -85,14 +85,19 @@ public:
     const uint8_t* bufferData() const { return buffer_.data() + logicalStart_; }
     size_t bufferSize() const { return buffer_.size() - logicalStart_; }
 
-    // Get pointer to data at absolute position (for zero-copy packet access)
-    const uint8_t* dataAt(long long absPos) const {
+    // Get pointer to data at absolute position (for zero-copy packet access).
+    // Validates that [absPos, absPos+len) is fully within the buffer.
+    const uint8_t* dataAt(long long absPos, long long len = 1) const {
         long long localPos = absPos - baseOffset_;
-        if (localPos < static_cast<long long>(logicalStart_) ||
-            static_cast<size_t>(localPos) >= buffer_.size()) {
+        if (localPos < static_cast<long long>(logicalStart_) || len <= 0) {
             return nullptr;
         }
-        return buffer_.data() + localPos;
+        auto upos = static_cast<size_t>(localPos);
+        auto ulen = static_cast<size_t>(len);
+        if (ulen > buffer_.size() || upos > buffer_.size() - ulen) {
+            return nullptr;
+        }
+        return buffer_.data() + upos;
     }
 
 private:
@@ -116,6 +121,10 @@ static constexpr int kMaxConsecutiveBlockErrors = 3;
 
 // Reject video frames larger than this (matches VideoConfig::kMaxEncodedFrameSize)
 static constexpr size_t kMaxVideoFrameSize = 512 * 1024;
+
+// Maximum allowed stream header (EBML + Segment + Tracks, before first cluster).
+// Normal WebM headers are 1-10KB. Cap defends against malformed cluster positions.
+static constexpr size_t kMaxStreamHeaderSize = 64 * 1024;
 
 WebmDemuxer::WebmDemuxer()
     : reader_(std::make_unique<StreamReader>()) {
@@ -150,9 +159,9 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     size_t accepted = reader_->append(data, len);
     totalAccepted += accepted;
 
-    if (accepted == 0 && state_ == ParseState::Streaming) {
-        // Buffer full — parse existing data to advance compaction, then retry.
-        // Flush deferred compaction immediately so append can succeed.
+    if (totalAccepted < len && state_ == ParseState::Streaming) {
+        // Buffer full or partially full — parse existing data to advance
+        // compaction, then retry remaining bytes.
         parseBlocks(cachedResult_);
         if (pendingCompactPos_ > 0) {
             reader_->compact(pendingCompactPos_);
@@ -335,7 +344,8 @@ bool WebmDemuxer::parseTracks() {
     // header that can be prepended to cluster data for standalone playback.
     if (cluster_ && !cluster_->EOS()) {
         long long headerEnd = cluster_->GetPosition();
-        if (headerEnd > 0 && streamHeader_.empty()) {
+        if (headerEnd > 0 && static_cast<size_t>(headerEnd) <= kMaxStreamHeaderSize
+            && streamHeader_.empty()) {
             streamHeader_.resize(static_cast<size_t>(headerEnd));
             int readResult = reader_->Read(0, static_cast<long>(headerEnd),
                                            streamHeader_.data());
@@ -390,7 +400,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 const mkvparser::Block::Frame& frame = block->GetFrame(f);
 
                 // Verify the data is readable from our buffer
-                const uint8_t* frameData = reader_->dataAt(frame.pos);
+                const uint8_t* frameData = reader_->dataAt(frame.pos, frame.len);
                 if (!frameData) {
                     // Frame data beyond readable range — likely compacted or
                     // gap in stream. Skip this block to prevent permanent stall.

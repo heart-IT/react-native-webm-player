@@ -372,7 +372,8 @@ public:
                 });
         case MethodId::CaptureClip:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    if (!weak.lock()) return jsi::Value::undefined();
                     if (count < 1 || !args[0].isNumber()) throw jsi::JSError(rt, "captureClip requires (seconds: number)");
                     float seconds = static_cast<float>(args[0].asNumber());
                     auto weakOwner = weakOwner_;
@@ -397,7 +398,10 @@ public:
                                 auto clipData = std::make_shared<std::vector<uint8_t>>(std::move(clipResult.data));
                                 // Hold strong ref to keep module (and thus orch) alive until async callback completes
                                 auto owner = weakOwner.lock();
-                                orch->joinClipThread();
+                                // Detach previous clip thread if still running — it holds
+                                // a strong owner ref so the module stays alive. Blocking
+                                // join here would stall the JS thread for the full I/O.
+                                if (orch->clipThread_.joinable()) orch->clipThread_.detach();
                                 orch->clipThread_ = std::thread([clipData, resolve, reject, callInvoker, owner, orch]() {
                                     std::string filePath = media::ClipBuffer::generateFilePath();
                                     std::string error;
@@ -440,7 +444,7 @@ public:
 
     std::vector<jsi::PropNameID> getPropertyNames(jsi::Runtime& rt) {
         std::vector<jsi::PropNameID> names;
-        names.reserve(34);
+        names.reserve(32);
         for (const char* n : {
             "feedData", "setMuted", "setGain", "getMetrics", "start", "stop", "isRunning",
             "setAudioRoute", "getAvailableAudioRoutes", "getAvailableAudioDevices",
@@ -976,11 +980,6 @@ private:
 
         refeedBytes(clipResult.data.data(), clipResult.data.size());
 
-        if (!livePendingBuffer_.empty()) {
-            refeedBytes(livePendingBuffer_.data(), livePendingBuffer_.size());
-            livePendingBuffer_.clear();
-        }
-
         timeshifting_ = false;
         MEDIA_LOG_I("seekTo: completed seek to %.1fs", offsetSeconds);
         return jsi::Value(true);
@@ -1014,7 +1013,6 @@ private:
     std::shared_ptr<jsi::Function> healthCallback_;
     std::shared_ptr<jsi::Function> keyFrameNeededCallback_;
     std::shared_ptr<jsi::Function> audioFocusCallback_;
-    bool autoPausedByFocus_{false};
     bool timeshifting_{false};
     static constexpr size_t kMaxLivePendingBytes = 4 * 1024 * 1024;  // 4MB cap
     std::vector<uint8_t> livePendingBuffer_;

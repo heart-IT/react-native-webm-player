@@ -109,7 +109,7 @@ private:
     AudioSessionManager& operator=(const AudioSessionManager&) = delete;
 
     std::mutex mutex_;
-    bool initialized_{false};
+    std::atomic<bool> initialized_{false};
     std::atomic<bool> interrupted_{false};
     int32_t refCount_{0};
 

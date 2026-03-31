@@ -44,9 +44,6 @@ private:
 
     media::VideoFrameQueue frameQueue_;
     media::VideoDecodeThread decodeThread_;
-
-    std::shared_ptr<facebook::react::CallInvoker> callInvoker_;
-    facebook::jsi::Runtime* runtime_{nullptr};
 };
 
 }  // namespace videomodule

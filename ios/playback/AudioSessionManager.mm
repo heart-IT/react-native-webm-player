@@ -173,6 +173,7 @@ void AudioSessionManager::shutdown() noexcept {
     routeCallback_ = nullptr;
     restartCallback_ = nullptr;
     driftResetCallback_ = nullptr;
+    audioFocusCallback_ = nullptr;
 
     // Deactivate audio session to release hardware and allow other apps to use audio
     @autoreleasepool {

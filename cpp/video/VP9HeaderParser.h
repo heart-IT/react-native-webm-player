@@ -27,6 +27,7 @@ public:
         : data_(data), size_(size) {}
 
     uint32_t readBits(int n) {
+        if (n > 32) { error_ = true; return 0; }
         uint32_t val = 0;
         for (int i = 0; i < n; ++i) {
             if (byteOffset_ >= size_) { error_ = true; return 0; }

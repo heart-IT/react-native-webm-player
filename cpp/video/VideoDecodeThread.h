@@ -71,6 +71,8 @@ public:
         fpsCounter_.reset();
         lastAnchorTimeUs_ = 0;
         consecutiveErrors_ = 0;
+        decoderResetTimeUs_ = 0;
+        decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
         syncCoordinator_.reset();
         pendingClockReset_.store(false, std::memory_order_relaxed);
         frameQueue_ = nullptr;
@@ -91,15 +93,17 @@ public:
         wakeVersion_.notify_one();
     }
 
-    void destroyDecoder() {
-        std::lock_guard<std::mutex> lk(decoderMtx_);
-        decoder_.reset();
-    }
-
 private:
-    VideoDecoder* getOrCreateDecoder() {
-        std::lock_guard<std::mutex> lk(decoderMtx_);
+    // Caller must hold decoderMtx_
+    VideoDecoder* getOrCreateDecoderLocked() {
         if (decoder_) return decoder_.get();
+
+        // Backoff after error-driven decoder reset to prevent HAL thrashing
+        if (decoderResetTimeUs_ > 0) {
+            int64_t elapsed = nowUs() - decoderResetTimeUs_;
+            if (elapsed < decoderResetBackoffUs_) return nullptr;
+            decoderResetTimeUs_ = 0;
+        }
 
         if (!VideoSurfaceRegistry::instance().hasSurface()) return nullptr;
         if (!decoderFactory_) return nullptr;
@@ -169,7 +173,10 @@ private:
                 // Pop and decode
                 auto popResult = frameQueue_->tryPopReadyFrame(frame, renderClock_, now);
                 if (popResult != PopResult::Nothing) {
-                    auto* dec = getOrCreateDecoder();
+                    // Hold lock for entire submit+postDecode cycle so the
+                    // decoder pointer stays valid through both operations
+                    std::lock_guard<std::mutex> lk(decoderMtx_);
+                    auto* dec = getOrCreateDecoderLocked();
                     if (dec) {
                         auto decodeStart = nowUs();
                         if (dec->submitFrame(frame.data.data(), frame.data.size(),
@@ -180,6 +187,7 @@ private:
                             frameQueue_->metrics().decodeLatencyUs.store(smoothed, std::memory_order_relaxed);
                             frameQueue_->metrics().lastDecodeTimeUs.store(nowUs(), std::memory_order_relaxed);
                             consecutiveErrors_ = 0;
+                            decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
                             frameQueue_->metrics().framesDecoded.fetch_add(1, std::memory_order_relaxed);
                             frameQueue_->metrics().currentFps.store(
                                 fpsCounter_.tick(nowUs()), std::memory_order_relaxed);
@@ -193,23 +201,22 @@ private:
                         } else {
                             frameQueue_->metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
                             if (++consecutiveErrors_ >= kMaxConsecutiveErrors) {
-                                MEDIA_LOG_E("VideoDecodeThread: %d consecutive errors, resetting decoder", consecutiveErrors_);
-                                destroyDecoder();
+                                MEDIA_LOG_E("VideoDecodeThread: %d consecutive errors, resetting decoder (backoff=%lldms)",
+                                            consecutiveErrors_, static_cast<long long>(decoderResetBackoffUs_ / 1000));
+                                decoder_.reset();
                                 renderClock_.reset();
                                 lastAnchorTimeUs_ = 0;
+                                decoderResetTimeUs_ = nowUs();
+                                decoderResetBackoffUs_ = std::min(decoderResetBackoffUs_ * 2, kMaxDecoderResetBackoffUs);
                                 frameQueue_->requestKeyFrame();
                                 frameQueue_->metrics().decoderResets.fetch_add(1, std::memory_order_relaxed);
                                 consecutiveErrors_ = 0;
                             }
                         }
+                        // Release output buffers while still holding lock
+                        if (decoder_) decoder_->postDecode();
                     }
                     didWork = true;
-                }
-
-                // Platform-specific post-decode (e.g., release MediaCodec output buffers)
-                {
-                    std::lock_guard<std::mutex> lk(decoderMtx_);
-                    if (decoder_) decoder_->postDecode();
                 }
             }
 
@@ -262,7 +269,11 @@ private:
     std::atomic<bool> pendingClockReset_{false};
 
     static constexpr int kMaxConsecutiveErrors = 5;
+    static constexpr int64_t kInitialDecoderResetBackoffUs = 200'000;   // 200ms
+    static constexpr int64_t kMaxDecoderResetBackoffUs = 2'000'000;     // 2s
     int consecutiveErrors_ = 0;
+    int64_t decoderResetTimeUs_ = 0;
+    int64_t decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
 };
 
 }  // namespace media

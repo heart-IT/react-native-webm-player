@@ -39,7 +39,8 @@ public:
 
     void setEnabled(bool enabled) noexcept {
         std::lock_guard<std::mutex> lk(mutex_);
-        if (enabled && !enabled_) {
+        bool was = enabled_.load(std::memory_order_relaxed);
+        if (enabled && !was) {
             ringBuffer_.resize(bufferSize_);
             writePos_ = 0;
             totalBytesWritten_ = 0;
@@ -48,15 +49,15 @@ public:
             clusters_.resize(config::clip::kMaxClusters);
             pendingClusterSize_ = 0;
             hasPendingCluster_ = false;
-        } else if (!enabled && enabled_) {
+        } else if (!enabled && was) {
             ringBuffer_.clear();
             ringBuffer_.shrink_to_fit();
             clusters_.clear();
         }
-        enabled_ = enabled;
+        enabled_.store(enabled, std::memory_order_release);
     }
 
-    [[nodiscard]] bool isEnabled() const noexcept { return enabled_; }
+    [[nodiscard]] bool isEnabled() const noexcept { return enabled_.load(std::memory_order_acquire); }
 
     void setBufferSize(size_t bytes) noexcept {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -74,7 +75,7 @@ public:
 
     // Append raw WebM bytes to the ring buffer (called from feedData).
     void appendBytes(const uint8_t* data, size_t len) noexcept {
-        if (!enabled_ || len == 0) return;
+        if (!enabled_.load(std::memory_order_relaxed) || len == 0) return;
         std::lock_guard<std::mutex> lk(mutex_);
 
         if (ringBuffer_.empty()) return;
@@ -94,7 +95,7 @@ public:
     // Called when the demuxer enters a new cluster. Seals the previous
     // pending cluster (if any) into a ClusterRecord.
     void onNewCluster() noexcept {
-        if (!enabled_) return;
+        if (!enabled_.load(std::memory_order_relaxed)) return;
         std::lock_guard<std::mutex> lk(mutex_);
         sealPendingCluster();
         hasPendingCluster_ = true;
@@ -106,7 +107,7 @@ public:
     }
 
     void onKeyFrame(int64_t ptsUs) noexcept {
-        if (!enabled_) return;
+        if (!enabled_.load(std::memory_order_relaxed)) return;
         std::lock_guard<std::mutex> lk(mutex_);
         pendingHasKeyFrame_ = true;
         if (pendingFirstPts_ == INT64_MIN) {
@@ -115,7 +116,7 @@ public:
     }
 
     void onBlockPts(int64_t ptsUs) noexcept {
-        if (!enabled_) return;
+        if (!enabled_.load(std::memory_order_relaxed)) return;
         std::lock_guard<std::mutex> lk(mutex_);
         if (pendingFirstPts_ == INT64_MIN) {
             pendingFirstPts_ = ptsUs;
@@ -343,7 +344,7 @@ private:
     }
 
     mutable std::mutex mutex_;
-    bool enabled_ = false;
+    std::atomic<bool> enabled_{false};
     size_t bufferSize_ = config::clip::kDefaultBufferSize;
 
     std::vector<uint8_t> ringBuffer_;

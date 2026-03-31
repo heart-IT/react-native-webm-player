@@ -206,7 +206,7 @@ std::vector<media::AudioDeviceInfo> jniGetAvailableAudioDevices() {
 
 // Called from AudioSessionManager::ensureRouteDetected() to query current route before session start
 int jniGetCurrentRoute() {
-    return withJni(g_getCurrentRouteMethod, 0, nullptr,
+    return withJni(g_getCurrentRouteMethod, 0, "jniGetCurrentRoute",
         [](JNIEnv* env, jclass cls, jmethodID method) {
             return static_cast<int>(env->CallStaticIntMethod(cls, method));
         });

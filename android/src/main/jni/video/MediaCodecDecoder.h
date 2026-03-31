@@ -10,7 +10,6 @@
 #include <android/native_window.h>
 #include "video/VideoDecoder.h"
 #include "video/VideoConfig.h"
-#include "video/VideoTypes.h"
 #include "common/MediaTime.h"
 
 namespace videomodule {
@@ -30,16 +29,14 @@ public:
     void shutdown() override;
     bool isInitialized() const noexcept { return initialized_.load(std::memory_order_acquire); }
 
-    void setVideoMetrics(media::VideoStreamMetrics* m) noexcept { videoMetrics_ = m; }
     void setKeyFrameRequestFn(std::function<void()> fn) noexcept { keyFrameRequestFn_ = std::move(fn); }
 
     bool submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bool isKeyFrame) override;
     void postDecode() override;
     int releaseOutputBuffers();
-    void flush();
 
-    int decodedWidth() const override { return decodedWidth_; }
-    int decodedHeight() const override { return decodedHeight_; }
+    int decodedWidth() const override { return decodedWidth_.load(std::memory_order_relaxed); }
+    int decodedHeight() const override { return decodedHeight_.load(std::memory_order_relaxed); }
 
 private:
     bool configureCodec(int width, int height);
@@ -51,13 +48,11 @@ private:
     std::atomic<bool> initialized_{false};
     std::atomic<bool> configured_{false};
 
-    int decodedWidth_ = 0;
-    int decodedHeight_ = 0;
+    std::atomic<int> decodedWidth_{0};
+    std::atomic<int> decodedHeight_{0};
     int consecutiveErrors_ = 0;
     int64_t lastResetTimeUs_ = 0;
     int64_t resetBackoffUs_ = 100000;  // 100ms initial backoff
-    int resetsSinceSuccess_ = 0;
-    media::VideoStreamMetrics* videoMetrics_ = nullptr;
     std::function<void()> keyFrameRequestFn_;
 };
 

@@ -48,6 +48,8 @@ export interface PlayerMetrics {
     gapsOver100ms: number
     gapsOver500ms: number
     driftPpm: number
+    decodeLatencyUs: number
+    lastDecodeTimeUs: number
     queueDepth: number
     needsKeyFrame: boolean
   }
@@ -113,6 +115,7 @@ export interface PlayerMetrics {
     videoPacketsEmitted: number
     overflowCount: number
     blockStallCount: number
+    bufferBytes: number
     parseState: number
   }
 }

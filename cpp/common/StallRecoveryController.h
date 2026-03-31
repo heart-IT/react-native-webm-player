@@ -84,13 +84,13 @@ public:
 
         if (current == StallState::Stalled) {
             // Data resumed after stall — transition to recovering
+            recoveryStartUs_.store(now, std::memory_order_relaxed);
             state_.store(StallState::Recovering, std::memory_order_release);
-            recoveryStartUs_ = now;
             MEDIA_LOG_I("StallRecovery: data resumed, rebuffering");
         } else if (current == StallState::Failed) {
             // Even after failure, if data arrives, attempt recovery
+            recoveryStartUs_.store(now, std::memory_order_relaxed);
             state_.store(StallState::Recovering, std::memory_order_release);
-            recoveryStartUs_ = now;
             MEDIA_LOG_I("StallRecovery: data resumed after failure, attempting recovery");
         } else if (current == StallState::Detecting) {
             // Data arrived before threshold — cancel detection
@@ -103,7 +103,8 @@ public:
     void onBufferSufficient() noexcept {
         StallState current = state_.load(std::memory_order_acquire);
         if (current == StallState::Recovering) {
-            int64_t stallDuration = recoveryStartUs_ - stallStartUs_;
+            int64_t stallDuration = recoveryStartUs_.load(std::memory_order_relaxed) -
+                                   stallStartUs_.load(std::memory_order_relaxed);
             lastStallDurationUs_.store(stallDuration, std::memory_order_relaxed);
             totalStallDurationUs_.fetch_add(stallDuration, std::memory_order_relaxed);
 
@@ -141,7 +142,7 @@ public:
         case StallState::Detecting:
             if (gap > config::stall::kStallThresholdUs) {
                 state_.store(StallState::Stalled, std::memory_order_release);
-                stallStartUs_ = lastData;
+                stallStartUs_.store(lastData, std::memory_order_relaxed);
                 stallCount_.fetch_add(1, std::memory_order_relaxed);
                 MEDIA_LOG_W("StallRecovery: feed stalled (gap=%lldms)",
                             static_cast<long long>(gap / 1000));
@@ -151,7 +152,7 @@ public:
 
         case StallState::Stalled: {
             // Check for max stall duration
-            int64_t stallDuration = now - stallStartUs_;
+            int64_t stallDuration = now - stallStartUs_.load(std::memory_order_relaxed);
             if (stallDuration > config::stall::kMaxStallDurationUs) {
                 state_.store(StallState::Failed, std::memory_order_release);
                 MEDIA_LOG_E("StallRecovery: max stall duration exceeded (%llds)",
@@ -160,7 +161,7 @@ public:
             }
 
             // Periodic keyframe re-requests during sustained stall
-            int64_t sinceLastRequest = now - lastKeyFrameRequestUs_;
+            int64_t sinceLastRequest = now - lastKeyFrameRequestUs_.load(std::memory_order_relaxed);
             if (sinceLastRequest >= config::stall::kKeyFrameRequestIntervalUs) {
                 requestKeyFrame(now);
             }
@@ -206,14 +207,14 @@ public:
         totalStallDurationUs_.store(0, std::memory_order_relaxed);
         lastStallDurationUs_.store(0, std::memory_order_relaxed);
         longestStallUs_.store(0, std::memory_order_relaxed);
-        stallStartUs_ = 0;
-        recoveryStartUs_ = 0;
-        lastKeyFrameRequestUs_ = 0;
+        stallStartUs_.store(0, std::memory_order_relaxed);
+        recoveryStartUs_.store(0, std::memory_order_relaxed);
+        lastKeyFrameRequestUs_.store(0, std::memory_order_relaxed);
     }
 
 private:
     void requestKeyFrame(int64_t now) noexcept {
-        lastKeyFrameRequestUs_ = now;
+        lastKeyFrameRequestUs_.store(now, std::memory_order_relaxed);
         keyFrameRequestCount_.fetch_add(1, std::memory_order_relaxed);
 
         if (videoKeyFrameRequestFn_) videoKeyFrameRequestFn_();
@@ -226,10 +227,10 @@ private:
     std::atomic<StallState> state_{StallState::Healthy};
     std::atomic<int64_t> lastDataTimeUs_{0};
 
-    // Stall tracking
-    int64_t stallStartUs_ = 0;
-    int64_t recoveryStartUs_ = 0;
-    int64_t lastKeyFrameRequestUs_ = 0;
+    // Stall tracking (cross-thread: JS writes onDataReceived, decode reads evaluate)
+    std::atomic<int64_t> stallStartUs_{0};
+    std::atomic<int64_t> recoveryStartUs_{0};
+    std::atomic<int64_t> lastKeyFrameRequestUs_{0};
 
     // Metrics (monotonic counters)
     std::atomic<uint32_t> stallCount_{0};

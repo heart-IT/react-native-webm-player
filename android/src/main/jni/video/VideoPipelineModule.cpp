@@ -20,8 +20,6 @@ bool VideoPipelineModule::install(jsi::Runtime& rt,
     }
 
     auto module = std::make_shared<VideoPipelineModule>();
-    module->callInvoker_ = callInvoker;
-    module->runtime_ = &rt;
     registry.registerModule(rtId, module);
 
     MEDIA_LOG_I("VideoPipelineModule: installed (internal, not exposed to JS)");
@@ -36,7 +34,6 @@ void VideoPipelineModule::uninstall(jsi::Runtime& rt) {
     if (!module) return;
 
     module->stop(rt);
-    module->runtime_ = nullptr;
 
     media::VideoSurfaceRegistry::instance().clear();
 
@@ -115,7 +112,7 @@ jsi::Value VideoPipelineModule::start(jsi::Runtime&) {
 
         auto dec = std::make_unique<MediaCodecDecoder>();
         if (!dec->initialize(surface)) {
-            ANativeWindow_release(surface);
+            // initialize() takes ownership and releases surface on failure
             MEDIA_LOG_E("VideoPipelineModule: failed to init decoder");
             return nullptr;
         }
