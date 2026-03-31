@@ -15,12 +15,16 @@ class StreamReader final : public mkvparser::IMkvReader {
 public:
     static constexpr size_t kMaxBufferSize = 2 * 1024 * 1024;  // 2MB cap
 
+    // Physical erase threshold — amortizes O(n) memmove to O(1) average
+    static constexpr size_t kCompactThreshold = 512 * 1024;
+
     StreamReader() { buffer_.reserve(65536); }
 
     // Returns number of bytes accepted (may be < len if buffer nearly full)
     size_t append(const uint8_t* data, size_t len) {
-        size_t available = (buffer_.size() < kMaxBufferSize) ? kMaxBufferSize - buffer_.size() : 0;
-        size_t accepted = std::min(len, available);
+        size_t logicalSize = buffer_.size() - logicalStart_;
+        size_t avail = (logicalSize < kMaxBufferSize) ? kMaxBufferSize - logicalSize : 0;
+        size_t accepted = std::min(len, avail);
         if (accepted == 0) return 0;
         buffer_.insert(buffer_.end(), data, data + accepted);
         return accepted;
@@ -29,7 +33,7 @@ public:
     // IMkvReader interface
     int Read(long long pos, long len, unsigned char* buf) override {
         long long localPos = pos - baseOffset_;
-        if (localPos < 0) {
+        if (localPos < static_cast<long long>(logicalStart_)) {
             return -1;  // Data already compacted away
         }
         auto upos = static_cast<size_t>(localPos);
@@ -52,17 +56,24 @@ public:
         return 0;
     }
 
-    // Discard all bytes before the given absolute position.
-    // After this call, Read() for positions < offset will fail.
+    // Logically discard all bytes before the given absolute position.
+    // Defers the physical erase until consumed bytes exceed kCompactThreshold,
+    // amortizing the O(n) memmove cost to O(1) average per call.
     void compact(long long offset) {
         long long localPos = offset - baseOffset_;
-        if (localPos <= 0) {
+        if (localPos <= static_cast<long long>(logicalStart_)) {
             return;
         }
-        auto discard = static_cast<size_t>(std::min(localPos,
+        auto newStart = static_cast<size_t>(std::min(localPos,
             static_cast<long long>(buffer_.size())));
-        buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<ptrdiff_t>(discard));
-        baseOffset_ += static_cast<long long>(discard);
+        logicalStart_ = newStart;
+
+        if (logicalStart_ >= kCompactThreshold) {
+            buffer_.erase(buffer_.begin(),
+                          buffer_.begin() + static_cast<ptrdiff_t>(logicalStart_));
+            baseOffset_ += static_cast<long long>(logicalStart_);
+            logicalStart_ = 0;
+        }
     }
 
     long long available() const {
@@ -71,13 +82,14 @@ public:
 
     long long baseOffset() const { return baseOffset_; }
 
-    const uint8_t* bufferData() const { return buffer_.data(); }
-    size_t bufferSize() const { return buffer_.size(); }
+    const uint8_t* bufferData() const { return buffer_.data() + logicalStart_; }
+    size_t bufferSize() const { return buffer_.size() - logicalStart_; }
 
     // Get pointer to data at absolute position (for zero-copy packet access)
     const uint8_t* dataAt(long long absPos) const {
         long long localPos = absPos - baseOffset_;
-        if (localPos < 0 || static_cast<size_t>(localPos) >= buffer_.size()) {
+        if (localPos < static_cast<long long>(logicalStart_) ||
+            static_cast<size_t>(localPos) >= buffer_.size()) {
             return nullptr;
         }
         return buffer_.data() + localPos;
@@ -86,6 +98,7 @@ public:
 private:
     std::vector<uint8_t> buffer_;
     long long baseOffset_ = 0;
+    size_t logicalStart_ = 0;  // Bytes at front of buffer_ consumed but not yet erased
 };
 
 // Default audio frame duration for Opus: 20ms
@@ -101,15 +114,22 @@ static constexpr int kMaxParseRetries = 3;
 // Consecutive unparseable blocks before reporting a stall
 static constexpr int kMaxConsecutiveBlockErrors = 3;
 
+// Reject video frames larger than this (matches VideoConfig::kMaxEncodedFrameSize)
+static constexpr size_t kMaxVideoFrameSize = 512 * 1024;
+
 WebmDemuxer::WebmDemuxer()
-    : reader_(std::make_unique<StreamReader>()) {}
+    : reader_(std::make_unique<StreamReader>()) {
+    cachedResult_.audioPackets.reserve(10);
+    cachedResult_.videoPackets.reserve(4);
+}
 
 WebmDemuxer::~WebmDemuxer() = default;
 
-DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
-    DemuxResult result;
-    result.audioPackets.reserve(10);
-    result.videoPackets.reserve(4);
+const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
+    cachedResult_.audioPackets.clear();
+    cachedResult_.videoPackets.clear();
+    cachedResult_.error.clear();
+    cachedResult_.newClusterCount = 0;
 
     ++feedDataCalls_;
 
@@ -122,7 +142,7 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     }
 
     if (!data || len == 0) {
-        return result;
+        return cachedResult_;
     }
 
     totalBytesFed_ += len;
@@ -133,7 +153,7 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     if (accepted == 0 && state_ == ParseState::Streaming) {
         // Buffer full — parse existing data to advance compaction, then retry.
         // Flush deferred compaction immediately so append can succeed.
-        parseBlocks(result);
+        parseBlocks(cachedResult_);
         if (pendingCompactPos_ > 0) {
             reader_->compact(pendingCompactPos_);
             pendingCompactPos_ = 0;
@@ -143,9 +163,9 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     }
 
     if (totalAccepted == 0) {
-        result.error = "demuxer buffer overflow";
+        cachedResult_.error = "demuxer buffer overflow";
         ++overflowCount_;
-        return result;
+        return cachedResult_;
     }
 
     // Advance parse state as far as possible
@@ -155,12 +175,12 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             if (!parseError_.empty()) {
                 if (++parseRetryCount_ >= kMaxParseRetries) {
                     state_ = ParseState::Error;
-                    result.error = "permanent parse failure: " + parseError_;
+                    cachedResult_.error = "permanent parse failure: " + parseError_;
                 } else {
-                    result.error = parseError_;
+                    cachedResult_.error = parseError_;
                 }
             }
-            return result;
+            return cachedResult_;
         }
         parseRetryCount_ = 0;
         state_ = ParseState::WaitingForSegment;
@@ -171,12 +191,12 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             if (!parseError_.empty()) {
                 if (++parseRetryCount_ >= kMaxParseRetries) {
                     state_ = ParseState::Error;
-                    result.error = "permanent parse failure: " + parseError_;
+                    cachedResult_.error = "permanent parse failure: " + parseError_;
                 } else {
-                    result.error = parseError_;
+                    cachedResult_.error = parseError_;
                 }
             }
-            return result;
+            return cachedResult_;
         }
         parseRetryCount_ = 0;
         state_ = ParseState::ParsingTracks;
@@ -185,23 +205,23 @@ DemuxResult WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     case ParseState::ParsingTracks:
         if (!parseTracks()) {
             if (state_ == ParseState::Error) {
-                result.error = "permanent parse failure: " + parseError_;
+                cachedResult_.error = "permanent parse failure: " + parseError_;
             }
-            return result;
+            return cachedResult_;
         }
         state_ = ParseState::Streaming;
         [[fallthrough]];
 
     case ParseState::Streaming:
-        parseBlocks(result);
+        parseBlocks(cachedResult_);
         break;
 
     case ParseState::Error:
-        result.error = "demuxer in error state, call reset() to recover";
-        return result;
+        cachedResult_.error = "demuxer in error state, call reset() to recover";
+        return cachedResult_;
     }
 
-    return result;
+    return cachedResult_;
 }
 
 bool WebmDemuxer::parseEBMLHeader() {
@@ -387,9 +407,13 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     result.audioPackets.push_back(pkt);
                     ++audioPacketsEmitted_;
                 } else if (trackNum == trackInfo_.videoTrackNum) {
+                    auto frameSize = static_cast<size_t>(frame.len);
+                    if (frameSize > kMaxVideoFrameSize) {
+                        continue;  // Reject oversized frames
+                    }
                     VideoPacket pkt;
                     pkt.data = frameData;
-                    pkt.size = static_cast<size_t>(frame.len);
+                    pkt.size = frameSize;
                     pkt.ptsUs = ptsUs;
                     pkt.isKeyFrame = block->IsKey();
                     result.videoPackets.push_back(pkt);
@@ -440,6 +464,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
     // Report if blocks are consistently unparseable despite data being available
     if (consecutiveBlockErrors >= kMaxConsecutiveBlockErrors && result.audioPackets.empty() && result.videoPackets.empty()) {
         result.error = "block parse stall: consecutive unparseable blocks";
+        ++blockStallCount_;
     }
 
     // Schedule compaction for the start of the next feedData() call.
@@ -477,6 +502,15 @@ void WebmDemuxer::reset() {
     feedDataCalls_ = 0;
     audioPacketsEmitted_ = 0;
     videoPacketsEmitted_ = 0;
+    blockStallCount_ = 0;
+    cachedResult_.audioPackets.clear();
+    cachedResult_.videoPackets.clear();
+    cachedResult_.error.clear();
+    cachedResult_.newClusterCount = 0;
+}
+
+size_t WebmDemuxer::bufferBytes() const noexcept {
+    return reader_ ? reader_->bufferSize() : 0;
 }
 
 }  // namespace media::demux

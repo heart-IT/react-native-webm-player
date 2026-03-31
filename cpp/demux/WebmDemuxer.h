@@ -66,6 +66,8 @@ struct DemuxerMetrics {
     uint64_t audioPacketsEmitted = 0;
     uint64_t videoPacketsEmitted = 0;
     uint64_t overflowCount = 0;
+    uint64_t blockStallCount = 0;  // consecutive block parse failures triggering stall error
+    size_t bufferBytes = 0;        // current StreamReader buffer size
     ParseState parseState = ParseState::WaitingForEBML;
 };
 
@@ -82,8 +84,8 @@ public:
     WebmDemuxer& operator=(const WebmDemuxer&) = delete;
 
     // Feed raw WebM bytes incrementally. Returns extracted packets (if any).
-    // Returned packet data pointers are valid until the next feedData() call.
-    DemuxResult feedData(const uint8_t* data, size_t len);
+    // Returned reference is valid until the next feedData() or reset() call.
+    const DemuxResult& feedData(const uint8_t* data, size_t len);
 
     const TrackInfo& trackInfo() const noexcept { return trackInfo_; }
 
@@ -93,6 +95,8 @@ public:
     ParseState parseState() const noexcept { return state_; }
     uint64_t overflowCount() const noexcept { return overflowCount_; }
 
+    size_t bufferBytes() const noexcept;
+
     DemuxerMetrics demuxerMetrics() const noexcept {
         DemuxerMetrics m{};
         m.totalBytesFed = totalBytesFed_;
@@ -100,6 +104,8 @@ public:
         m.audioPacketsEmitted = audioPacketsEmitted_;
         m.videoPacketsEmitted = videoPacketsEmitted_;
         m.overflowCount = overflowCount_;
+        m.blockStallCount = blockStallCount_;
+        m.bufferBytes = bufferBytes();
         m.parseState = state_;
         return m;
     }
@@ -112,6 +118,7 @@ private:
     bool parseTracks();
     void parseBlocks(DemuxResult& result);
 
+    DemuxResult cachedResult_;
     std::unique_ptr<StreamReader> reader_;
     std::unique_ptr<mkvparser::EBMLHeader> ebmlHeader_;
     std::unique_ptr<mkvparser::Segment> segment_;
@@ -135,6 +142,7 @@ private:
     uint64_t feedDataCalls_ = 0;
     uint64_t audioPacketsEmitted_ = 0;
     uint64_t videoPacketsEmitted_ = 0;
+    uint64_t blockStallCount_ = 0;
 };
 
 }  // namespace media::demux

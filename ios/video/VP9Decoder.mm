@@ -1,140 +1,26 @@
 #include "VP9Decoder.h"
 #include "../../cpp/common/MediaLog.h"
+#include "../../cpp/video/VP9HeaderParser.h"
 
 namespace videomodule {
 
-namespace {
+VP9Decoder::VP9Decoder() {
+    renderQueue_ = dispatch_queue_create("com.holepunchto.vp9.render", DISPATCH_QUEUE_SERIAL);
 
-// Minimal bitstream reader for VP9 uncompressed header parsing
-class BitstreamReader {
-public:
-    BitstreamReader(const uint8_t* data, size_t size)
-        : data_(data), size_(size) {}
-
-    uint32_t readBits(int n) {
-        uint32_t val = 0;
-        for (int i = 0; i < n; ++i) {
-            if (byteOffset_ >= size_) { error_ = true; return 0; }
-            uint32_t bit = (data_[byteOffset_] >> (7 - bitOffset_)) & 1;
-            val = (val << 1) | bit;
-            if (++bitOffset_ == 8) {
-                bitOffset_ = 0;
-                ++byteOffset_;
-            }
-        }
-        return val;
-    }
-
-    bool hasError() const { return error_; }
-    size_t bitsConsumed() const { return byteOffset_ * 8 + bitOffset_; }
-
-private:
-    const uint8_t* data_;
-    size_t size_;
-    size_t byteOffset_ = 0;
-    int bitOffset_ = 0;
-    bool error_ = false;
-};
-
-}  // namespace
-
-VP9Decoder::VP9FrameInfo VP9Decoder::parseVP9Header(const uint8_t* data, size_t size) {
-    VP9FrameInfo info{};
-    if (!data || size < 4) return info;
-
-    BitstreamReader reader(data, size);
-
-    // frame_marker: 2 bits, must be 0b10
-    uint32_t marker = reader.readBits(2);
-    if (reader.hasError() || marker != 0x2) return info;
-
-    // profile
-    uint32_t profileLow = reader.readBits(1);
-    uint32_t profileHigh = reader.readBits(1);
-    info.profile = static_cast<int>((profileHigh << 1) | profileLow);
-
-    if (info.profile == 3) {
-        reader.readBits(1); // reserved_zero
-    }
-
-    // show_existing_frame
-    uint32_t showExisting = reader.readBits(1);
-    if (showExisting) return info;
-
-    // frame_type: 0 = keyframe
-    uint32_t frameType = reader.readBits(1);
-    info.isKeyFrame = (frameType == 0);
-
-    // show_frame
-    reader.readBits(1);
-
-    // error_resilient_mode
-    reader.readBits(1);
-
-    if (reader.hasError()) return info;
-
-    if (!info.isKeyFrame) {
-        info.valid = true;
-        return info;
-    }
-
-    // Keyframe: frame_sync_code (24 bits = 0x49 0x83 0x42)
-    uint32_t sync1 = reader.readBits(8);
-    uint32_t sync2 = reader.readBits(8);
-    uint32_t sync3 = reader.readBits(8);
-    if (reader.hasError() || sync1 != 0x49 || sync2 != 0x83 || sync3 != 0x42) return info;
-
-    // Color config
-    if (info.profile >= 2) {
-        reader.readBits(1); // ten_or_twelve_bit
-    }
-
-    uint32_t colorSpace = reader.readBits(3);
-    if (reader.hasError()) return info;
-
-    if (colorSpace != 7) { // not CS_RGB
-        reader.readBits(1); // color_range
-        if (info.profile == 1 || info.profile == 3) {
-            reader.readBits(1); // subsampling_x
-            reader.readBits(1); // subsampling_y
-            reader.readBits(1); // reserved
-        }
-    } else {
-        // CS_RGB: color_range is implicitly 1
-        if (info.profile == 1 || info.profile == 3) {
-            reader.readBits(1); // reserved
-        }
-    }
-
-    if (reader.hasError()) return info;
-
-    // frame_width_minus1: 16 bits
-    uint32_t widthMinus1 = reader.readBits(16);
-    // frame_height_minus1: 16 bits
-    uint32_t heightMinus1 = reader.readBits(16);
-
-    if (reader.hasError()) return info;
-
-    info.width = static_cast<int>(widthMinus1 + 1);
-    info.height = static_cast<int>(heightMinus1 + 1);
-    info.valid = true;
-    return info;
+    // VP9 FourCC 'vp09' — use raw value to avoid iOS 16+ SDK constant
+    // requirement. VTIsHardwareDecodeSupported is available from iOS 11;
+    // VP9 HW decode is available on A12+ chips from iOS 14.
+    constexpr CMVideoCodecType kVP9CodecType = 'vp09';
+    hwSupported_ = VTIsHardwareDecodeSupported(kVP9CodecType);
+    MEDIA_LOG_I("VP9Decoder: HW decode %s", hwSupported_ ? "supported" : "not supported");
 }
 
 void VP9Decoder::setOutputLayer(AVSampleBufferDisplayLayer* layer) {
-    if (layer_ == layer) return;
+    if (layer_.load(std::memory_order_relaxed) == layer) return;
     shutdown();
     if (layer) {
-        layer_ = layer;
-        [layer_ retain];
-        renderQueue_ = dispatch_queue_create("com.holepunchto.vp9.render", DISPATCH_QUEUE_SERIAL);
-
-        // VP9 FourCC 'vp09' — use raw value to avoid iOS 16+ SDK constant
-        // requirement. VTIsHardwareDecodeSupported is available from iOS 11;
-        // VP9 HW decode is available on A12+ chips from iOS 14.
-        constexpr CMVideoCodecType kVP9CodecType = 'vp09';
-        hwSupported_ = VTIsHardwareDecodeSupported(kVP9CodecType);
-        MEDIA_LOG_I("VP9Decoder: HW decode %s", hwSupported_ ? "supported" : "not supported");
+        [layer retain];
+        layer_.store(layer, std::memory_order_release);
     }
 }
 
@@ -142,11 +28,11 @@ void VP9Decoder::shutdown() {
     destroyDecompressionSession();
     if (renderQueue_) {
         dispatch_sync(renderQueue_, ^{});  // drain pending work
-        renderQueue_ = nil;
     }
-    if (layer_) {
-        [layer_ release];
-        layer_ = nil;
+    auto* l = layer_.load(std::memory_order_acquire);
+    if (l) {
+        [l release];
+        layer_.store(nil, std::memory_order_release);
     }
     decodedWidth_.store(0, std::memory_order_relaxed);
     decodedHeight_.store(0, std::memory_order_relaxed);
@@ -214,6 +100,9 @@ bool VP9Decoder::createDecompressionSession(int width, int height) {
 
 void VP9Decoder::destroyDecompressionSession() {
     if (session_) {
+        // SAFETY-CRITICAL: WaitForAsynchronousFrames drains all pending VT callbacks
+        // before we invalidate the session. Skipping this causes use-after-free in
+        // vtDecompressionCallback (which captures 'this' via decompressionOutputRefCon).
         VTDecompressionSessionWaitForAsynchronousFrames(session_);
         VTDecompressionSessionInvalidate(session_);
         CFRelease(session_);
@@ -230,16 +119,20 @@ void VP9Decoder::destroyDecompressionSession() {
 }
 
 bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bool isKeyFrame) {
-    if (!layer_ || !data || size == 0) return false;
+    // @autoreleasepool: createDecompressionSession creates ObjC objects (NSDictionary)
+    // which need an autorelease pool on the decode thread (non-main, no implicit pool).
+    @autoreleasepool {
+
+    if (!layer_.load(std::memory_order_acquire) || !data || size == 0) return false;
 
     if (!hwSupported_) {
         MEDIA_LOG_E("VP9Decoder: HW decode not supported, cannot decode frame");
         return false;
     }
 
-    // Parse header for keyframes to detect dimensions
+    // Parse header for keyframes to detect dimensions (shared VP9 parser)
     if (isKeyFrame) {
-        VP9FrameInfo info = parseVP9Header(data, size);
+        auto info = media::vp9::parseHeader(data, size);
         if (!info.valid || info.width <= 0 || info.height <= 0) {
             MEDIA_LOG_E("VP9Decoder: failed to parse VP9 keyframe header");
             if (keyFrameRequestFn_) keyFrameRequestFn_();
@@ -313,7 +206,9 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
         return false;
     }
 
-    // Pack int64_t PTS directly into void* (both 8 bytes on 64-bit ARM)
+    // Pack int64_t PTS directly into void* (both 8 bytes on 64-bit ARM).
+    // PTS values from WebM are non-negative; negative values would corrupt on round-trip.
+    static_assert(sizeof(void*) >= sizeof(int64_t), "void* must be at least 64-bit for PTS packing");
     void* ptsContext = reinterpret_cast<void*>(static_cast<uintptr_t>(ptsUs));
 
     VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
@@ -354,6 +249,8 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
     resetBackoffUs_ = 100000;
     resetsSinceSuccess_ = 0;
     return true;
+
+    }  // @autoreleasepool
 }
 
 void VP9Decoder::vtDecompressionCallback(void* decompressionOutputRefCon,
@@ -384,7 +281,8 @@ void VP9Decoder::vtDecompressionCallback(void* decompressionOutputRefCon,
 }
 
 void VP9Decoder::outputCallback(CVImageBufferRef imageBuffer, int64_t ptsUs) {
-    if (!imageBuffer || !layer_) return;
+    auto* layer = layer_.load(std::memory_order_acquire);
+    if (!imageBuffer || !layer) return;
 
     int w = static_cast<int>(CVPixelBufferGetWidth(imageBuffer));
     int h = static_cast<int>(CVPixelBufferGetHeight(imageBuffer));
@@ -418,7 +316,6 @@ void VP9Decoder::outputCallback(CVImageBufferRef imageBuffer, int64_t ptsUs) {
     // Dispatch to render queue to serialize enqueue calls from VT internal threads.
     // Retain layer to prevent use-after-free if VP9Decoder is destroyed while
     // the block is queued.
-    AVSampleBufferDisplayLayer* layer = layer_;
     [layer retain];
     CFRetain(sampleBuffer);
     dispatch_async(renderQueue_, ^{

@@ -1,5 +1,6 @@
 #include "MediaCodecDecoder.h"
 #include "common/MediaLog.h"
+#include "video/VP9HeaderParser.h"
 #include <cstring>
 
 namespace videomodule {
@@ -7,6 +8,9 @@ namespace videomodule {
 bool MediaCodecDecoder::initialize(ANativeWindow* surface) {
     if (!surface) return false;
 
+    if (surface_) {
+        shutdown();
+    }
     surface_ = surface;
 
     // Configure VP9 decoder immediately — no SPS/PPS handshake needed
@@ -89,6 +93,23 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
     if (!data || size == 0) return false;
     if (!configured_.load(std::memory_order_acquire) || !codec_) return false;
 
+    // Parse VP9 keyframe header for early dimension detection and validation
+    if (isKeyFrame) {
+        auto info = media::vp9::parseHeader(data, size);
+        if (!info.valid || info.width <= 0 || info.height <= 0) {
+            MEDIA_LOG_E("MediaCodecDecoder: invalid VP9 keyframe header, requesting new keyframe");
+            if (keyFrameRequestFn_) keyFrameRequestFn_();
+            return false;
+        }
+        if (info.width != decodedWidth_ || info.height != decodedHeight_) {
+            MEDIA_LOG_I("MediaCodecDecoder: VP9 resolution %dx%d -> %dx%d, reconfiguring",
+                        decodedWidth_, decodedHeight_, info.width, info.height);
+            if (!configureCodec(info.width, info.height)) {
+                return false;
+            }
+        }
+    }
+
     ssize_t inputIdx = AMediaCodec_dequeueInputBuffer(codec_, 0);
     if (inputIdx < 0) return false;
 
@@ -167,6 +188,10 @@ int MediaCodecDecoder::releaseOutputBuffers() {
     }
 
     return released;
+}
+
+void MediaCodecDecoder::postDecode() {
+    releaseOutputBuffers();
 }
 
 void MediaCodecDecoder::flush() {

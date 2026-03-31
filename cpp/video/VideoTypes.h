@@ -37,6 +37,10 @@ struct VideoStreamMetrics {
     // Clock drift tracking
     std::atomic<int32_t> driftPpm{0};
 
+    // Decode performance
+    std::atomic<int64_t> decodeLatencyUs{0};       // EWMA of submitFrame() duration
+    std::atomic<int64_t> lastDecodeTimeUs{0};       // wall-clock time of last successful decode
+
     // Keyframe recovery state
     std::atomic<bool> needsKeyFrame{true};
 
@@ -59,6 +63,8 @@ struct VideoStreamMetrics {
         gapsOver100ms.store(0, std::memory_order_relaxed);
         gapsOver500ms.store(0, std::memory_order_relaxed);
         driftPpm.store(0, std::memory_order_relaxed);
+        decodeLatencyUs.store(0, std::memory_order_relaxed);
+        lastDecodeTimeUs.store(0, std::memory_order_relaxed);
         needsKeyFrame.store(true, std::memory_order_relaxed);
     }
 };

@@ -57,6 +57,7 @@ struct StreamMetrics {
     std::atomic<uint64_t> decodeErrors{0};
     std::atomic<uint64_t> decoderResets{0};
     std::atomic<uint64_t> underruns{0};
+    std::atomic<uint64_t> plcFrames{0};             // total PLC concealment frames generated
     std::atomic<uint64_t> samplesOutput{0};
     std::atomic<uint64_t> ptsDiscontinuities{0};
 
@@ -77,6 +78,7 @@ struct StreamMetrics {
         decodeErrors.store(0, std::memory_order_relaxed);
         decoderResets.store(0, std::memory_order_relaxed);
         underruns.store(0, std::memory_order_relaxed);
+        plcFrames.store(0, std::memory_order_relaxed);
         samplesOutput.store(0, std::memory_order_relaxed);
         ptsDiscontinuities.store(0, std::memory_order_relaxed);
         fastPathSwitches.store(0, std::memory_order_relaxed);

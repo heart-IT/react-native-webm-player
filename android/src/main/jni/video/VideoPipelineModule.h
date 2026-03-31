@@ -9,7 +9,7 @@
 #include "common/AVSyncCoordinator.h"
 #include "video/VideoFrameQueue.h"
 #include "video/VideoConfig.h"
-#include "VideoDecodeThread.h"
+#include "video/VideoDecodeThread.h"
 
 namespace videomodule {
 
@@ -43,7 +43,7 @@ private:
     std::atomic<bool> running_{false};
 
     media::VideoFrameQueue frameQueue_;
-    VideoDecodeThread decodeThread_;
+    media::VideoDecodeThread decodeThread_;
 
     std::shared_ptr<facebook::react::CallInvoker> callInvoker_;
     facebook::jsi::Runtime* runtime_{nullptr};

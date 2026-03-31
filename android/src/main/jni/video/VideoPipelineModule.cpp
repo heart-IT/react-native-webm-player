@@ -1,7 +1,9 @@
 #include "VideoPipelineModule.h"
+#include "MediaCodecDecoder.h"
 #include "common/MediaLog.h"
 #include "common/JsiUtils.h"
 #include "video/VideoSurfaceRegistry.h"
+#include <android/native_window_jni.h>
 
 namespace videomodule {
 
@@ -104,7 +106,26 @@ jsi::Value VideoPipelineModule::start(jsi::Runtime&) {
     if (running_.load(std::memory_order_acquire)) return jsi::Value(true);
     running_.store(true, std::memory_order_release);
     frameQueue_.reset();
-    decodeThread_.start(&frameQueue_);
+
+    // Platform decoder factory: creates MediaCodecDecoder with acquired surface
+    auto factory = []() -> std::unique_ptr<media::VideoDecoder> {
+        auto* surface = static_cast<ANativeWindow*>(
+            media::VideoSurfaceRegistry::instance().acquireSurface());
+        if (!surface) return nullptr;
+
+        auto dec = std::make_unique<MediaCodecDecoder>();
+        if (!dec->initialize(surface)) {
+            ANativeWindow_release(surface);
+            MEDIA_LOG_E("VideoPipelineModule: failed to init decoder");
+            return nullptr;
+        }
+        dec->setKeyFrameRequestFn([]() {
+            media::VideoSurfaceRegistry::instance().requestKeyFrame();
+        });
+        return dec;
+    };
+
+    decodeThread_.start(&frameQueue_, std::move(factory));
     MEDIA_LOG_I("VideoPipelineModule: started");
     return jsi::Value(true);
 }

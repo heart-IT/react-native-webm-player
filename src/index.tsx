@@ -26,6 +26,7 @@ export interface PlayerMetrics {
     gapsOver50ms: number
     gapsOver100ms: number
     gapsOver500ms: number
+    plcFrames: number
   }
   video: {
     avSyncOffsetUs: number
@@ -111,6 +112,7 @@ export interface PlayerMetrics {
     audioPacketsEmitted: number
     videoPacketsEmitted: number
     overflowCount: number
+    blockStallCount: number
     parseState: number
   }
 }

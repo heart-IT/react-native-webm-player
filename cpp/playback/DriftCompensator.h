@@ -197,6 +197,10 @@ class SpeexDriftResampler {
     // A prime denominator guarantees GCD(num, den)=1 for all num values
     // not divisible by den (impossible in our ratio range), so den_rate
     // stays constant and update_filter() never reallocates.
+    // INVARIANT: kRateDenom MUST be prime. A composite value would cause GCD(num,den)
+    // to vary across ratio updates, triggering sinc table reallocation (malloc) on the
+    // audio callback thread. Verified prime: 99991 = prime (not divisible by any
+    // integer up to sqrt(99991) ≈ 316). If changing, verify primality explicitly.
     static constexpr spx_uint32_t kRateDenom = 99991;  // prime, ~0.001% precision
 
     // Verify kRateDenom is not divisible by small primes — a composite denominator

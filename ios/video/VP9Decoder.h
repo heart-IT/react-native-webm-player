@@ -5,15 +5,16 @@
 #include <cstdint>
 #include <functional>
 #include <atomic>
+#include "../../cpp/video/VideoDecoder.h"
 #include "../../cpp/video/VideoTypes.h"
 #include "../../cpp/common/MediaTime.h"
 
 namespace videomodule {
 
-class VP9Decoder {
+class VP9Decoder : public media::VideoDecoder {
 public:
-    VP9Decoder() = default;
-    ~VP9Decoder() { shutdown(); }
+    VP9Decoder();
+    ~VP9Decoder() override { shutdown(); }
 
     VP9Decoder(const VP9Decoder&) = delete;
     VP9Decoder& operator=(const VP9Decoder&) = delete;
@@ -22,24 +23,15 @@ public:
     void setFps(int fps) { fps_ = fps > 0 ? fps : 30; }
     void setKeyFrameRequestFn(std::function<void()> fn) { keyFrameRequestFn_ = std::move(fn); }
     void setVideoMetrics(media::VideoStreamMetrics* m) noexcept { videoMetrics_ = m; }
-    void shutdown();
-    bool isInitialized() const noexcept { return layer_ != nil; }
+    void shutdown() override;
+    bool isInitialized() const noexcept { return layer_.load(std::memory_order_acquire) != nil; }
 
-    bool submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bool isKeyFrame);
+    bool submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bool isKeyFrame) override;
 
-    int decodedWidth() const noexcept { return decodedWidth_.load(std::memory_order_relaxed); }
-    int decodedHeight() const noexcept { return decodedHeight_.load(std::memory_order_relaxed); }
+    int decodedWidth() const override { return decodedWidth_.load(std::memory_order_relaxed); }
+    int decodedHeight() const override { return decodedHeight_.load(std::memory_order_relaxed); }
 
 private:
-    struct VP9FrameInfo {
-        int width = 0;
-        int height = 0;
-        int profile = 0;
-        bool isKeyFrame = false;
-        bool valid = false;
-    };
-
-    VP9FrameInfo parseVP9Header(const uint8_t* data, size_t size);
     bool createDecompressionSession(int width, int height);
     void destroyDecompressionSession();
     void outputCallback(CVImageBufferRef imageBuffer, int64_t ptsUs);
@@ -52,7 +44,7 @@ private:
                                          CMTime presentationTimeStamp,
                                          CMTime presentationDuration);
 
-    AVSampleBufferDisplayLayer* layer_ = nil;
+    std::atomic<AVSampleBufferDisplayLayer*> layer_{nil};
     VTDecompressionSessionRef session_ = nullptr;
     CMVideoFormatDescriptionRef formatDesc_ = nullptr;
 

@@ -65,6 +65,7 @@ struct SessionMetrics {
     uint64_t decoderResets = 0;
     uint64_t underruns = 0;
     uint64_t ptsDiscontinuities = 0;
+    uint64_t plcFrames = 0;
     bool muted = false;
 
     // Clock drift compensation metrics
@@ -386,6 +387,7 @@ public:
             m.decoderResets = sm.decoderResets.load(std::memory_order_relaxed);
             m.underruns = sm.underruns.load(std::memory_order_relaxed);
             m.ptsDiscontinuities = sm.ptsDiscontinuities.load(std::memory_order_relaxed);
+            m.plcFrames = sm.plcFrames.load(std::memory_order_relaxed);
             m.muted = muted_;
 
             // Bluetooth crackling diagnostics

@@ -93,7 +93,6 @@ set(PLAYBACK_SOURCES
 set(VIDEO_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/video/VideoPipelineModule.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/video/MediaCodecDecoder.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/video/VideoDecodeThread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/video/videopipeline_jni.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/video/videoview_jni.cpp
 )

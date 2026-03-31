@@ -3,7 +3,6 @@
 #include "../../cpp/common/MediaLog.h"
 #include "../../cpp/common/JsiUtils.h"
 #include "../../cpp/common/MediaTime.h"
-#include "../../cpp/common/ThreadAffinity.h"
 #include "../../cpp/video/VideoSurfaceRegistry.h"
 #import <AVFoundation/AVFoundation.h>
 
@@ -54,8 +53,6 @@ void VideoPipelineModule::uninstall(jsi::Runtime& rt) {
 
     MEDIA_LOG_I("VideoPipelineModule: uninstalled");
 }
-
-VideoPipelineModule::~VideoPipelineModule() { stopDecodeThread(); }
 
 namespace {
 
@@ -118,7 +115,22 @@ jsi::Value VideoPipelineModule::start(jsi::Runtime&) {
     if (running_.load(std::memory_order_acquire)) return jsi::Value(true);
     running_.store(true, std::memory_order_release);
     frameQueue_.reset();
-    startDecodeThread();
+
+    // Platform decoder factory: creates VP9Decoder with acquired surface
+    auto factory = []() -> std::unique_ptr<media::VideoDecoder> {
+        auto surface = media::VideoSurfaceRegistry::instance().acquireSurface();
+        if (!surface) return nullptr;
+
+        auto d = std::make_unique<VP9Decoder>();
+        d->setOutputLayer((__bridge AVSampleBufferDisplayLayer*)surface);
+        CFRelease(surface);
+        d->setKeyFrameRequestFn([]() {
+            media::VideoSurfaceRegistry::instance().requestKeyFrame();
+        });
+        return d;
+    };
+
+    decodeThread_.start(&frameQueue_, std::move(factory));
     MEDIA_LOG_I("VideoPipelineModule: started");
     return jsi::Value(true);
 }
@@ -127,9 +139,8 @@ jsi::Value VideoPipelineModule::stop(jsi::Runtime&) {
     std::lock_guard<std::mutex> lk(lifecycleMtx_);
     if (!running_.load(std::memory_order_acquire)) return jsi::Value(true);
     running_.store(false, std::memory_order_release);
-    stopDecodeThread();
+    decodeThread_.stop();
     frameQueue_.reset();
-    syncCoordinator_.reset();
     MEDIA_LOG_I("VideoPipelineModule: stopped");
     return jsi::Value(true);
 }
@@ -140,7 +151,7 @@ jsi::Value VideoPipelineModule::isRunning(jsi::Runtime&) {
 
 jsi::Value VideoPipelineModule::getMetrics(jsi::Runtime& rt) {
     jsi::Object result(rt);
-    result.setProperty(rt, "avSyncOffsetUs", static_cast<double>(syncCoordinator_.currentOffsetUs()));
+    result.setProperty(rt, "avSyncOffsetUs", static_cast<double>(syncCoordinator().currentOffsetUs()));
 
     const auto& m = frameQueue_.metrics();
     result.setProperty(rt, "framesReceived", static_cast<double>(m.framesReceived.load(std::memory_order_relaxed)));
@@ -164,165 +175,6 @@ jsi::Value VideoPipelineModule::getMetrics(jsi::Runtime& rt) {
     result.setProperty(rt, "queueDepth", static_cast<int>(frameQueue_.pendingFrames()));
     result.setProperty(rt, "needsKeyFrame", frameQueue_.isAwaitingKeyFrame());
     return result;
-}
-
-void VideoPipelineModule::startDecodeThread() {
-    if (decodeRunning_.load(std::memory_order_acquire)) return;
-    decodeThreadExited_.store(false, std::memory_order_relaxed);
-    wakeVersion_.store(0, std::memory_order_relaxed);
-    frameQueue_.setWakeCallback([this]() { wakeDecodeThread(); });
-    frameQueue_.setResetCallback([this]() {
-        pendingClockReset_.store(true, std::memory_order_release);
-        wakeDecodeThread();
-    });
-    decodeRunning_.store(true, std::memory_order_release);
-    decodeThread_ = std::thread(&VideoPipelineModule::decodeLoop, this);
-}
-
-void VideoPipelineModule::stopDecodeThread() {
-    decodeRunning_.store(false, std::memory_order_release);
-    wakeDecodeThread();
-    frameQueue_.setWakeCallback(nullptr);
-    frameQueue_.setResetCallback(nullptr);
-    media::timedJoin(decodeThread_, decodeThreadExited_, media::config::thread::kThreadJoinTimeoutMs, "VideoDecodeThread");
-
-    if (!decodeThreadExited_.load(std::memory_order_acquire)) {
-        MEDIA_LOG_E("VideoPipelineModule: decode thread detached, skipping resource destruction");
-        return;
-    }
-
-    std::lock_guard<std::mutex> lk(decoderMtx_);
-    decoder_.reset();
-    fpsCounter_.reset();
-    renderClock_.reset();
-    lastAnchorTimeUs_ = 0;
-    consecutiveErrors_ = 0;
-    pendingClockReset_.store(false, std::memory_order_relaxed);
-}
-
-void VideoPipelineModule::decodeLoop() {
-    media::thread_affinity::setThreadName("VP9Decode");
-    media::thread_affinity::configureCurrentThreadForDecode();
-
-    media::EncodedVideoFrame frame;
-    int consecutiveIdleCycles = 0;
-    uint32_t lastWakeVersion = 0;
-
-    while (decodeRunning_.load(std::memory_order_acquire)) {
-        bool didWork = false;
-
-        if (pendingClockReset_.exchange(false, std::memory_order_acquire)) {
-            renderClock_.reset();
-            lastAnchorTimeUs_ = 0;
-            syncCoordinator_.reset();
-        }
-
-        if (!media::VideoSurfaceRegistry::instance().hasSurface()) {
-            std::lock_guard<std::mutex> lk(decoderMtx_);
-            decoder_.reset();
-            renderClock_.reset();
-            lastAnchorTimeUs_ = 0;
-        } else {
-            int64_t now = media::nowUs();
-
-            // Anchor render clock on first frame
-            if (!renderClock_.isAnchored()) {
-                int64_t nextPts;
-                if (frameQueue_.peekNextPts(nextPts)) {
-                    int64_t adjustedTarget = frameQueue_.bufferTargetUs() + syncCoordinator_.videoBufferAdjustmentUs();
-                    adjustedTarget = std::clamp(adjustedTarget,
-                                                media::video_config::jitter::kMinBufferUs,
-                                                media::video_config::jitter::kMaxBufferUs);
-                    renderClock_.anchor(nextPts, now, adjustedTarget);
-                    lastAnchorTimeUs_ = now;
-                }
-            } else if (lastAnchorTimeUs_ > 0 &&
-                       (now - lastAnchorTimeUs_) >= media::video_config::kReanchorIntervalUs) {
-                renderClock_.reset();
-                lastAnchorTimeUs_ = 0;
-            }
-
-            // Update buffer target with A/V sync correction
-            int64_t adjustedTarget = frameQueue_.bufferTargetUs() + syncCoordinator_.videoBufferAdjustmentUs();
-            adjustedTarget = std::clamp(adjustedTarget,
-                                        media::video_config::jitter::kMinBufferUs,
-                                        media::video_config::jitter::kMaxBufferUs);
-            renderClock_.updateBufferTarget(adjustedTarget);
-            renderClock_.setPlaybackRate(frameQueue_.playbackRate());
-
-            // Update jitter metrics
-            frameQueue_.metrics().jitterUs.store(frameQueue_.jitterUs(), std::memory_order_relaxed);
-            frameQueue_.metrics().bufferTargetUs.store(frameQueue_.bufferTargetUs(), std::memory_order_relaxed);
-
-            // Pop and decode
-            auto popResult = frameQueue_.tryPopReadyFrame(frame, renderClock_, now);
-            if (popResult != media::PopResult::Nothing) {
-                @autoreleasepool {
-                    std::lock_guard<std::mutex> lk(decoderMtx_);
-                    if (!decoder_) {
-                        auto surface = media::VideoSurfaceRegistry::instance().acquireSurface();
-                        if (surface) {
-                            auto d = std::make_unique<VP9Decoder>();
-                            d->setOutputLayer((__bridge AVSampleBufferDisplayLayer*)surface);
-                            CFRelease(surface);
-                            d->setKeyFrameRequestFn([]() {
-                                media::VideoSurfaceRegistry::instance().requestKeyFrame();
-                            });
-                            decoder_ = std::move(d);
-                        }
-                    }
-
-                    if (decoder_) {
-                        if (decoder_->submitFrame(frame.data.data(), frame.data.size(),
-                                                  frame.ptsUs, frame.isKeyFrame)) {
-                            consecutiveErrors_ = 0;
-                            frameQueue_.metrics().framesDecoded.fetch_add(1, std::memory_order_relaxed);
-                            frameQueue_.metrics().currentFps.store(
-                                fpsCounter_.tick(media::nowUs()), std::memory_order_relaxed);
-                            if (decoder_->decodedWidth() > 0) {
-                                frameQueue_.metrics().width.store(decoder_->decodedWidth(), std::memory_order_relaxed);
-                                frameQueue_.metrics().height.store(decoder_->decodedHeight(), std::memory_order_relaxed);
-                                media::VideoSurfaceRegistry::instance().setDecodedResolution(
-                                    decoder_->decodedWidth(), decoder_->decodedHeight());
-                            }
-                            syncCoordinator_.onVideoRender(frame.ptsUs, media::nowUs());
-                        } else {
-                            frameQueue_.metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
-                            if (++consecutiveErrors_ >= kMaxConsecutiveErrors) {
-                                MEDIA_LOG_E("VideoPipelineModule: %d consecutive errors, resetting decoder", consecutiveErrors_);
-                                decoder_.reset();
-                                renderClock_.reset();
-                                lastAnchorTimeUs_ = 0;
-                                frameQueue_.requestKeyFrame();
-                                frameQueue_.metrics().decoderResets.fetch_add(1, std::memory_order_relaxed);
-                                consecutiveErrors_ = 0;
-                            }
-                        }
-                    }
-                }
-                didWork = true;
-            }
-        }
-
-        if (!didWork) {
-            consecutiveIdleCycles++;
-            int64_t sleepUs;
-            if (consecutiveIdleCycles < 4) {
-                sleepUs = media::video_config::kDecodeIdleSleepUs;
-            } else {
-                // Cap at shift 3 (max 16ms) to maintain 2:1 margin over 30fps frame interval
-                int backoffShift = std::min(consecutiveIdleCycles - 4, 3);
-                sleepUs = media::video_config::kDecodeIdleSleepUs << backoffShift;
-            }
-            waitForWakeOrTimeout(lastWakeVersion, sleepUs);
-            lastWakeVersion = wakeVersion_.load(std::memory_order_relaxed);
-        } else {
-            consecutiveIdleCycles = 0;
-            lastWakeVersion = wakeVersion_.load(std::memory_order_relaxed);
-        }
-    }
-
-    decodeThreadExited_.store(true, std::memory_order_release);
 }
 
 }  // namespace videomodule

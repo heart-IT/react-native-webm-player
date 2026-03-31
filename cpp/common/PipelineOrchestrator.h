@@ -85,6 +85,8 @@ class PipelineOrchestrator {
 public:
     using WeakOwner = std::weak_ptr<void>;
 
+    ~PipelineOrchestrator() { joinClipThread(); }
+
     void init(std::shared_ptr<facebook::react::CallInvoker> invoker,
               jsi::Runtime* rt, WeakOwner owner) noexcept {
         callInvoker_ = std::move(invoker);
@@ -109,6 +111,7 @@ public:
 
     void teardown() noexcept {
         session_.stop();
+        joinClipThread();
         media::AudioSessionManager::instance().setRouteCallback(nullptr);
         routeCallback_.reset();
         healthCallback_.reset();
@@ -126,38 +129,44 @@ public:
         switch (lookupMethod(n)) {
         case MethodId::FeedData:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1) throw jsi::JSError(rt, "feedData requires (buffer)");
                     return feedData(rt, args[0]);
                 });
         case MethodId::SetMuted:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1 || !args[0].isBool()) throw jsi::JSError(rt, "setMuted requires (muted: boolean)");
                     session_.setMuted(args[0].getBool());
                     return jsi::Value(true);
                 });
         case MethodId::SetGain:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1 || !args[0].isNumber()) throw jsi::JSError(rt, "setGain requires (gain: number)");
                     session_.setGain(jsiutil::safeFloatArg(rt, args[0], "gain"));
                     return jsi::Value(true);
                 });
         case MethodId::GetMetrics:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value::undefined();
                     return getMetrics(rt);
                 });
         case MethodId::Start:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     std::lock_guard<std::mutex> lk(lifecycleMtx_);
                     return jsi::Value(ensureRunning());
                 });
         case MethodId::Stop:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     std::lock_guard<std::mutex> lk(lifecycleMtx_);
                     session_.stop();
                     demuxer_.reset();
@@ -165,7 +174,8 @@ public:
                 });
         case MethodId::IsRunning:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     return jsi::Value(session_.isRunning());
                 });
         case MethodId::SetAudioRoute:
@@ -211,76 +221,92 @@ public:
                 });
         case MethodId::SetAudioRouteCallback:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1) throw jsi::JSError(rt, "setAudioRouteCallback requires a callback function or null");
                     return setAudioRouteCallback(rt, args[0]);
                 });
         case MethodId::SetHealthCallback:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1) throw jsi::JSError(rt, "setHealthCallback requires a callback function or null");
                     return setHealthCallback(rt, args[0]);
                 });
         case MethodId::GetTrackInfo:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value::null();
                     return getTrackInfo(rt);
                 });
         case MethodId::ResetStream:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     return resetStream(rt);
                 });
         case MethodId::RequestKeyFrame:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (videoQueue_) { videoQueue_->requestKeyFrame(); return jsi::Value(true); }
                     return jsi::Value(false);
                 });
         case MethodId::WarmUp:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     std::lock_guard<std::mutex> lk(lifecycleMtx_);
                     return jsi::Value(session_.warmUp());
                 });
         case MethodId::SetKeyFrameNeededCallback:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1) throw jsi::JSError(rt, "setKeyFrameNeededCallback requires a callback function or null");
                     return setKeyFrameNeededCallback(rt, args[0]);
                 });
         case MethodId::Pause:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     return jsi::Value(session_.pause());
                 });
         case MethodId::Resume:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     return jsi::Value(session_.resume());
                 });
         case MethodId::IsPaused:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(false);
                     return jsi::Value(session_.isPaused());
                 });
         case MethodId::GetCurrentTimeUs:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(0.0);
                     return jsi::Value(static_cast<double>(session_.currentTimeUs()));
                 });
         case MethodId::GetPlaybackState:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
-                    if (!session_.isRunning()) return jsi::Value(0);
-                    if (session_.isPaused()) return jsi::Value(3);
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(0);
+                    if (!session_.isRunning()) return jsi::Value(0);   // Idle
+                    if (session_.isPaused()) return jsi::Value(3);     // Paused
+                    auto stallState = stallRecovery_.state();
+                    if (stallState == media::StallState::Failed) return jsi::Value(5);  // Failed
+                    if (stallState == media::StallState::Stalled || stallState == media::StallState::Recovering) return jsi::Value(4);  // Stalled
                     auto s = session_.audioState();
-                    if (s == media::StreamState::Buffering || s == media::StreamState::Underrun) return jsi::Value(1);
-                    return jsi::Value(2);
+                    if (s == media::StreamState::Buffering || s == media::StreamState::Underrun) return jsi::Value(1);  // Buffering
+                    return jsi::Value(2);  // Playing
                 });
         case MethodId::SetBufferTarget:
             return jsi::Function::createFromHostFunction(rt, name, 2,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 2 || !args[0].isNumber() || !args[1].isNumber())
                         throw jsi::JSError(rt, "setBufferTarget requires (audioMs: number, videoMs: number)");
                     double audioMs = args[0].asNumber(), videoMs = args[1].asNumber();
@@ -292,13 +318,15 @@ public:
                 });
         case MethodId::SetAudioFocusCallback:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1) throw jsi::JSError(rt, "setAudioFocusCallback requires a callback function or null");
                     return setAudioFocusCallback(rt, args[0]);
                 });
         case MethodId::SetCatchupPolicy:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1 || !args[0].isNumber()) throw jsi::JSError(rt, "setCatchupPolicy requires (policy: number)");
                     int val = jsiutil::safeIntArg(rt, args[0], "policy");
                     if (val < 0 || val > 2) throw jsi::JSError(rt, "setCatchupPolicy: policy out of range (0-2)");
@@ -309,7 +337,8 @@ public:
                 });
         case MethodId::SetStreamStatus:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1 || !args[0].isNumber()) throw jsi::JSError(rt, "setStreamStatus requires (status: number)");
                     int val = jsiutil::safeIntArg(rt, args[0], "status");
                     if (val < 0 || val > 3) throw jsi::JSError(rt, "setStreamStatus: status out of range (0-3)");
@@ -318,7 +347,8 @@ public:
                 });
         case MethodId::SetPlaybackRate:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1 || !args[0].isNumber()) throw jsi::JSError(rt, "setPlaybackRate requires (rate: number)");
                     float rate = jsiutil::safeFloatArg(rt, args[0], "rate");
                     rate = std::clamp(rate, media::config::playbackrate::kMinRate, media::config::playbackrate::kMaxRate);
@@ -328,7 +358,8 @@ public:
                 });
         case MethodId::SetClipBufferDuration:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1 || !args[0].isNumber()) throw jsi::JSError(rt, "setClipBufferDuration requires (seconds: number)");
                     float seconds = static_cast<float>(args[0].asNumber());
                     if (seconds < 0 || seconds > media::config::clip::kMaxDurationSeconds)
@@ -364,7 +395,10 @@ public:
                                     return jsi::Value::undefined();
                                 }
                                 auto clipData = std::make_shared<std::vector<uint8_t>>(std::move(clipResult.data));
-                                std::thread([clipData, resolve, reject, callInvoker, weakOwner, orch]() {
+                                // Hold strong ref to keep module (and thus orch) alive until async callback completes
+                                auto owner = weakOwner.lock();
+                                orch->joinClipThread();
+                                orch->clipThread_ = std::thread([clipData, resolve, reject, callInvoker, owner, orch]() {
                                     std::string filePath = media::ClipBuffer::generateFilePath();
                                     std::string error;
                                     FILE* f = fopen(filePath.c_str(), "wb");
@@ -374,25 +408,28 @@ public:
                                         fclose(f);
                                         if (written != clipData->size()) error = "incomplete write";
                                     }
-                                    callInvoker->invokeAsync([resolve, reject, filePath, error, weakOwner, orch]() {
-                                        if (!weakOwner.lock() || !orch->runtime_) return;
+                                    if (!owner || !orch->runtime_) return;
+                                    callInvoker->invokeAsync([resolve, reject, filePath, error, owner, orch]() {
+                                        if (!owner || !orch->runtime_) return;
                                         auto& rt = *orch->runtime_;
                                         if (error.empty()) resolve->call(rt, jsi::String::createFromUtf8(rt, filePath));
                                         else reject->call(rt, jsi::String::createFromUtf8(rt, error));
                                     });
-                                }).detach();
+                                });
                                 return jsi::Value::undefined();
                             }));
                 });
         case MethodId::SeekTo:
             return jsi::Function::createFromHostFunction(rt, name, 1,
-                [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock()) return jsi::Value(false);
                     if (count < 1 || !args[0].isNumber()) throw jsi::JSError(rt, "seekTo requires (offsetSeconds: number)");
                     return seekTo(args[0].asNumber());
                 });
         case MethodId::GetBufferRangeSeconds:
             return jsi::Function::createFromHostFunction(rt, name, 0,
-                [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) {
+                    if (!weak.lock()) return jsi::Value(0.0);
                     return jsi::Value(static_cast<double>(clipBuffer_.availableRangeSeconds()));
                 });
         case MethodId::Unknown:
@@ -435,11 +472,23 @@ private:
         stallRecovery_.onDataReceived();
 
         if (timeshifting_) {
-            livePendingBuffer_.insert(livePendingBuffer_.end(), buffer.data, buffer.data + buffer.size);
+            size_t incoming = buffer.size;
+            if (incoming > kMaxLivePendingBytes) {
+                // Single chunk exceeds cap — keep only the tail
+                livePendingBuffer_.assign(buffer.data + incoming - kMaxLivePendingBytes,
+                                           buffer.data + incoming);
+            } else {
+                livePendingBuffer_.insert(livePendingBuffer_.end(), buffer.data, buffer.data + incoming);
+                if (livePendingBuffer_.size() > kMaxLivePendingBytes) {
+                    size_t excess = livePendingBuffer_.size() - kMaxLivePendingBytes;
+                    livePendingBuffer_.erase(livePendingBuffer_.begin(),
+                                              livePendingBuffer_.begin() + static_cast<ptrdiff_t>(excess));
+                }
+            }
             return jsi::Value(true);
         }
 
-        auto result = demuxer_.feedData(buffer.data, buffer.size);
+        const auto& result = demuxer_.feedData(buffer.data, buffer.size);
 
         if (demuxer_.hasStreamHeader() && !clipBuffer_.hasStreamHeader()) {
             const auto& hdr = demuxer_.streamHeader();
@@ -507,6 +556,7 @@ private:
         quality.setProperty(rt, "gapsOver50ms", static_cast<double>(metrics.gapsOver50ms));
         quality.setProperty(rt, "gapsOver100ms", static_cast<double>(metrics.gapsOver100ms));
         quality.setProperty(rt, "gapsOver500ms", static_cast<double>(metrics.gapsOver500ms));
+        quality.setProperty(rt, "plcFrames", static_cast<double>(metrics.plcFrames));
         result.setProperty(rt, "quality", std::move(quality));
 
         jsi::Object session(rt);
@@ -582,6 +632,8 @@ private:
         demux.setProperty(rt, "audioPacketsEmitted", static_cast<double>(dm.audioPacketsEmitted));
         demux.setProperty(rt, "videoPacketsEmitted", static_cast<double>(dm.videoPacketsEmitted));
         demux.setProperty(rt, "overflowCount", static_cast<double>(dm.overflowCount));
+        demux.setProperty(rt, "blockStallCount", static_cast<double>(dm.blockStallCount));
+        demux.setProperty(rt, "bufferBytes", static_cast<double>(dm.bufferBytes));
         demux.setProperty(rt, "parseState", static_cast<int>(dm.parseState));
         result.setProperty(rt, "demux", std::move(demux));
 
@@ -606,6 +658,8 @@ private:
             video.setProperty(rt, "gapsOver100ms", static_cast<double>(vm.gapsOver100ms.load(std::memory_order_relaxed)));
             video.setProperty(rt, "gapsOver500ms", static_cast<double>(vm.gapsOver500ms.load(std::memory_order_relaxed)));
             video.setProperty(rt, "driftPpm", static_cast<double>(vm.driftPpm.load(std::memory_order_relaxed)));
+            video.setProperty(rt, "decodeLatencyUs", static_cast<double>(vm.decodeLatencyUs.load(std::memory_order_relaxed)));
+            video.setProperty(rt, "lastDecodeTimeUs", static_cast<double>(vm.lastDecodeTimeUs.load(std::memory_order_relaxed)));
             video.setProperty(rt, "queueDepth", static_cast<int>(videoQueue_->pendingFrames()));
             video.setProperty(rt, "needsKeyFrame", videoQueue_->isAwaitingKeyFrame());
         } else {
@@ -618,6 +672,7 @@ private:
             video.setProperty(rt, "surfaceLostCount", 0.0); video.setProperty(rt, "maxInterFrameGapMs", 0.0);
             video.setProperty(rt, "gapsOver50ms", 0.0); video.setProperty(rt, "gapsOver100ms", 0.0);
             video.setProperty(rt, "gapsOver500ms", 0.0); video.setProperty(rt, "driftPpm", 0.0);
+            video.setProperty(rt, "decodeLatencyUs", 0.0); video.setProperty(rt, "lastDecodeTimeUs", 0.0);
             video.setProperty(rt, "queueDepth", 0); video.setProperty(rt, "needsKeyFrame", false);
         }
         video.setProperty(rt, "avSyncOffsetUs", syncCoordinator_
@@ -823,6 +878,7 @@ private:
         stallRecovery_.reset();
         session_.resetStreamState();
         if (videoQueue_) videoQueue_->reset();
+        if (syncCoordinator_) syncCoordinator_->reset();
         return jsi::Value(true);
     }
 
@@ -897,7 +953,7 @@ private:
             session_.resetStreamState();
             if (videoQueue_) videoQueue_->reset();
             if (!livePendingBuffer_.empty()) {
-                auto result = demuxer_.feedData(livePendingBuffer_.data(), livePendingBuffer_.size());
+                const auto& result = demuxer_.feedData(livePendingBuffer_.data(), livePendingBuffer_.size());
                 dispatchPackets(result);
                 livePendingBuffer_.clear();
             }
@@ -934,7 +990,7 @@ private:
         constexpr size_t kChunkSize = 65536;
         while (len > 0) {
             size_t chunk = std::min(len, kChunkSize);
-            auto result = demuxer_.feedData(data, chunk);
+            const auto& result = demuxer_.feedData(data, chunk);
             if (demuxer_.hasStreamHeader() && !clipBuffer_.hasStreamHeader()) {
                 const auto& hdr = demuxer_.streamHeader();
                 clipBuffer_.setStreamHeader(hdr.data(), hdr.size());
@@ -960,9 +1016,15 @@ private:
     std::shared_ptr<jsi::Function> audioFocusCallback_;
     bool autoPausedByFocus_{false};
     bool timeshifting_{false};
+    static constexpr size_t kMaxLivePendingBytes = 4 * 1024 * 1024;  // 4MB cap
     std::vector<uint8_t> livePendingBuffer_;
     jsi::Runtime* runtime_{nullptr};
     WeakOwner weakOwner_;
+    std::thread clipThread_;
+
+    void joinClipThread() noexcept {
+        if (clipThread_.joinable()) clipThread_.join();
+    }
 };
 
 }  // namespace mediamodule

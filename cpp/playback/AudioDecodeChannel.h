@@ -357,6 +357,7 @@ public:
         if (decoded <= 0) return false;
 
         ++consecutivePLCFrames_;
+        metrics_.plcFrames.fetch_add(1, std::memory_order_relaxed);
 
         frame->sampleCount = static_cast<uint32_t>(decoded) * static_cast<uint32_t>(config::audio::kChannels);
         frame->ptsUs = lastDecodedPtsUs_.load(std::memory_order_relaxed) +
