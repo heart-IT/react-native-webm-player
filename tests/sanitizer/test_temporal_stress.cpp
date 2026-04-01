@@ -972,6 +972,46 @@ TEST(V07_video_gap_recovery) {
 }
 
 // ============================================================
+// Memory Ordering Contract Tests
+// ============================================================
+// These verify that critical cross-thread atomic stores use the correct
+// memory ordering. On x86 (TSO), release→relaxed is a no-op and cannot
+// be detected at runtime. Source-level verification is the only way to
+// kill these mutations.
+
+#include <fstream>
+#include <string>
+
+static int countOccurrences(const char* path, const char* needle) {
+    std::ifstream f(path);
+    if (!f.is_open()) return -1;
+    int count = 0;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.find(needle) != std::string::npos) ++count;
+    }
+    return count;
+}
+
+TEST(M01_activate_state_uses_release) {
+    // Both activate() and resume() store Buffering with memory_order_release
+    // so the decode thread and audio callback see state transitions on ARM.
+    // Exactly 2 sites must use release ordering.
+    const char* path = PROJECT_ROOT "/cpp/playback/AudioDecodeChannel.h";
+    ASSERT_EQ(countOccurrences(path,
+        "state_.store(StreamState::Buffering, std::memory_order_release)"), 2);
+}
+
+TEST(M05_encodedClearRequested_uses_release) {
+    // encodedClearRequested_ must store with memory_order_release at all 3
+    // sites (activate, deactivate, resetStream) so the decode thread's
+    // acquire load sees the flag and all preceding writes on ARM.
+    const char* path = PROJECT_ROOT "/cpp/playback/AudioDecodeChannel.h";
+    ASSERT_EQ(countOccurrences(path,
+        "encodedClearRequested_.store(true, std::memory_order_release)"), 3);
+}
+
+// ============================================================
 // Main
 // ============================================================
 

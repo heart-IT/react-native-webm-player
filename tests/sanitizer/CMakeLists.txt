@@ -144,6 +144,7 @@ target_link_libraries(test_e2e_demux PRIVATE ${OPUS_LIBRARY})
 add_executable(test_temporal_stress
     test_temporal_stress.cpp
 )
+target_compile_definitions(test_temporal_stress PRIVATE PROJECT_ROOT="${PROJECT_ROOT}")
 target_link_libraries(test_temporal_stress PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 
 # ---- HealthWatchdog state machine test ----
