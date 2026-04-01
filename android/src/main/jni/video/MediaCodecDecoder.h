@@ -37,6 +37,7 @@ public:
 
     int decodedWidth() const override { return decodedWidth_.load(std::memory_order_relaxed); }
     int decodedHeight() const override { return decodedHeight_.load(std::memory_order_relaxed); }
+    int lastError() const override { return lastError_.load(std::memory_order_relaxed); }
 
 private:
     bool configureCodec(int width, int height);
@@ -51,6 +52,7 @@ private:
     std::atomic<int> decodedWidth_{0};
     std::atomic<int> decodedHeight_{0};
     int consecutiveErrors_ = 0;
+    std::atomic<int> lastError_{0};
     int64_t lastResetTimeUs_ = 0;
     int64_t resetBackoffUs_ = 100000;  // 100ms initial backoff
     std::function<void()> keyFrameRequestFn_;

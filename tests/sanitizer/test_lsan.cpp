@@ -285,7 +285,7 @@ TEST(jitter_estimator_lifecycle) {
     for (int i = 0; i < 100; i++) {
         pts += 20000;       // 20ms
         arrival += 20000 + (i % 3 == 0 ? 500 : -200); // jitter
-        jitter.onPacket(pts, arrival);
+        jitter.onSample(pts, arrival);
     }
 
     int64_t target = jitter.bufferTargetUs();
@@ -298,7 +298,7 @@ TEST(jitter_estimator_reset_no_leak) {
 
     // Feed packets then reset — no leak
     for (int i = 0; i < 50; i++) {
-        jitter.onPacket(i * 20000, i * 20000 + 100);
+        jitter.onSample(i * 20000, i * 20000 + 100);
     }
 
     jitter.reset();

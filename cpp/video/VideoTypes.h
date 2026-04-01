@@ -40,6 +40,7 @@ struct VideoStreamMetrics {
     // Decode performance
     std::atomic<int64_t> decodeLatencyUs{0};       // EWMA of submitFrame() duration
     std::atomic<int64_t> lastDecodeTimeUs{0};       // wall-clock time of last successful decode
+    std::atomic<int32_t> lastDecodeError{0};        // last platform decode error code (media_status_t / OSStatus)
 
     // Keyframe recovery state
     std::atomic<bool> needsKeyFrame{true};
@@ -65,6 +66,7 @@ struct VideoStreamMetrics {
         driftPpm.store(0, std::memory_order_relaxed);
         decodeLatencyUs.store(0, std::memory_order_relaxed);
         lastDecodeTimeUs.store(0, std::memory_order_relaxed);
+        lastDecodeError.store(0, std::memory_order_relaxed);
         needsKeyFrame.store(true, std::memory_order_relaxed);
     }
 };

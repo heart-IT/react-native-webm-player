@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include "common/MediaLog.h"
 #include "common/MediaTime.h"
 
 namespace media::demux {
@@ -178,16 +179,24 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     size_t accepted = reader_->append(data, len);
     totalAccepted += accepted;
 
-    if (totalAccepted < len && state_ == ParseState::Streaming) {
-        // Buffer full or partially full — parse existing data to advance
-        // compaction, then retry remaining bytes.
-        parseBlocks(cachedResult_);
+    if (totalAccepted < len) {
+        if (state_ == ParseState::Streaming) {
+            // Parse existing data to advance compaction, then retry.
+            parseBlocks(cachedResult_);
+        }
         if (pendingCompactPos_ > 0) {
             reader_->compact(pendingCompactPos_);
             pendingCompactPos_ = 0;
         }
         accepted = reader_->append(data + totalAccepted, len - totalAccepted);
         totalAccepted += accepted;
+
+        if (totalAccepted < len) {
+            ++partialDropCount_;
+            MEDIA_LOG_W("WebmDemuxer: partial drop %zu/%zu bytes (count=%llu)",
+                        len - totalAccepted, len,
+                        static_cast<unsigned long long>(partialDropCount_));
+        }
     }
 
     if (totalAccepted == 0) {
@@ -528,6 +537,7 @@ void WebmDemuxer::reset() {
     compactOffset_ = 0;
     pendingCompactPos_ = 0;
     overflowCount_ = 0;
+    partialDropCount_ = 0;
     totalBytesFed_ = 0;
     feedDataCalls_ = 0;
     audioPacketsEmitted_ = 0;

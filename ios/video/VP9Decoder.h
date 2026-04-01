@@ -13,7 +13,13 @@ namespace videomodule {
 class VP9Decoder : public media::VideoDecoder {
 public:
     VP9Decoder();
-    ~VP9Decoder() override { shutdown(); }
+    ~VP9Decoder() override {
+        shutdown();
+        if (renderQueue_) {
+            dispatch_release(renderQueue_);
+            renderQueue_ = nullptr;
+        }
+    }
 
     VP9Decoder(const VP9Decoder&) = delete;
     VP9Decoder& operator=(const VP9Decoder&) = delete;
@@ -28,6 +34,7 @@ public:
 
     int decodedWidth() const override { return decodedWidth_.load(std::memory_order_relaxed); }
     int decodedHeight() const override { return decodedHeight_.load(std::memory_order_relaxed); }
+    int lastError() const override { return lastError_.load(std::memory_order_relaxed); }
 
 private:
     bool createDecompressionSession(int width, int height);
@@ -55,9 +62,9 @@ private:
     std::atomic<int> decodedHeight_{0};
     bool hwSupported_ = false;
     int consecutiveErrors_ = 0;
+    std::atomic<int> lastError_{0};
     int64_t lastResetTimeUs_ = 0;
     int64_t resetBackoffUs_ = 100000;
-    int resetsSinceSuccess_ = 0;
     std::function<void()> keyFrameRequestFn_;
     dispatch_queue_t renderQueue_ = nullptr;
 };

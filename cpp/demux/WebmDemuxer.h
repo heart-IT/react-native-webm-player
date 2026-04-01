@@ -66,8 +66,9 @@ struct DemuxerMetrics {
     uint64_t audioPacketsEmitted = 0;
     uint64_t videoPacketsEmitted = 0;
     uint64_t overflowCount = 0;
-    uint64_t blockStallCount = 0;  // consecutive block parse failures triggering stall error
-    size_t bufferBytes = 0;        // current StreamReader buffer size
+    uint64_t partialDropCount = 0;  // partial accepts where trailing bytes were lost
+    uint64_t blockStallCount = 0;   // consecutive block parse failures triggering stall error
+    size_t bufferBytes = 0;         // current StreamReader buffer size
     ParseState parseState = ParseState::WaitingForEBML;
 };
 
@@ -109,6 +110,7 @@ public:
         m.audioPacketsEmitted = audioPacketsEmitted_;
         m.videoPacketsEmitted = videoPacketsEmitted_;
         m.overflowCount = overflowCount_;
+        m.partialDropCount = partialDropCount_;
         m.blockStallCount = blockStallCount_;
         m.bufferBytes = bufferBytes();
         m.parseState = state_;
@@ -141,6 +143,7 @@ private:
     long long compactOffset_ = 0;
     long long pendingCompactPos_ = 0;  // Deferred compaction target (applied at next feedData)
     uint64_t overflowCount_ = 0;
+    uint64_t partialDropCount_ = 0;
 
     // Metrics counters
     uint64_t totalBytesFed_ = 0;

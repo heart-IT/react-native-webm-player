@@ -46,7 +46,7 @@ namespace audio {
     static_assert((kDecodeQueueDepth & (kDecodeQueueDepth - 1)) == 0);
     static_assert((kPendingFrameCapacity & (kPendingFrameCapacity - 1)) == 0);
 
-    constexpr int64_t kPLCThresholdUs = 40000;  // 2 frames proactive — generate PLC while 1 real frame remains
+    constexpr int64_t kPLCThresholdUs = 60000;  // 3 frames proactive — generate PLC while 2 real frames remain
     // Burst absorption ceiling: upper bound on buffered audio duration.
     // Fast-drain in readSamples() discards excess decoded frames to keep
     // actual latency near jitter target.

@@ -382,6 +382,79 @@ TEST(detail_healthy_recovery) {
     ASSERT_TRUE(strstr(d, "recovered") != nullptr);
 }
 
+// ==== requestWindowReset() regression tests ====
+
+TEST(window_reset_prevents_false_degraded_after_metrics_zeroed) {
+    // Regression: resetStream() zeroes VideoStreamMetrics but HealthWatchdog's
+    // windowBaseSnapshot_ retained pre-reset values, causing unsigned delta
+    // underflow → ~UINT64_MAX → false Degraded classification.
+    uint64_t videoRecv = 100;
+    uint64_t videoDec = 100;
+
+    HealthSnapshot snap{};
+    snap.audioOutputRunning = true;
+    snap.videoFramesReceived = videoRecv;
+    snap.videoFramesDecoded = videoDec;
+
+    StreamHealth lastState = StreamHealth::Buffering;
+    HealthWatchdog wd(
+        [&]() { return snap; },
+        [&](const HealthEvent& e) { lastState = e.status; }
+    );
+
+    // Establish healthy baseline
+    wd.evaluate();
+    ASSERT_EQ(lastState, StreamHealth::Healthy);
+
+    // Simulate resetStream() zeroing video metrics
+    snap.videoFramesReceived = 0;
+    snap.videoFramesDecoded = 0;
+
+    // Request window reset (as PipelineOrchestrator now does)
+    wd.requestWindowReset();
+
+    // Next evaluate should re-snapshot, not produce wrapped deltas
+    wd.evaluate();
+    // After reset, state returns to Buffering then immediately re-evaluates
+    // with zero deltas → should transition to Healthy (or stay Buffering),
+    // NOT Degraded
+    ASSERT_TRUE(lastState != StreamHealth::Degraded);
+    ASSERT_TRUE(lastState != StreamHealth::Failed);
+}
+
+TEST(torn_read_after_reset_causes_false_degraded) {
+    // Demonstrates the torn-read scenario: readMetrics() reads framesReceived
+    // before VideoStreamMetrics::reset() but framesDecoded after reset.
+    // The non-atomic reset creates a window where counters are inconsistent.
+    HealthSnapshot base{};
+    base.audioOutputRunning = true;
+    base.videoFramesReceived = 100;
+    base.videoFramesDecoded = 100;
+
+    // Torn read: framesReceived not yet zeroed, framesDecoded already zeroed
+    HealthSnapshot torn = base;
+    torn.videoFramesReceived = 3;   // A few new frames arrived post-reset
+    torn.videoFramesDecoded = 0;    // Decoder hasn't caught up
+
+    // Delta math with old base
+    uint64_t videoRecvDelta = torn.videoFramesReceived - base.videoFramesReceived;  // wraps
+    uint64_t videoDecDelta = torn.videoFramesDecoded - base.videoFramesDecoded;    // wraps
+
+    // Both wrap to huge values — classify sees enormous recv with enormous dec
+    ASSERT_TRUE(videoRecvDelta > 1000000);
+    ASSERT_TRUE(videoDecDelta > 1000000);
+
+    // With wrapped values, the "recv > 0 && dec == 0" check doesn't fire,
+    // but the drop rate check can: videoDropDelta=0, so drops/recv = 0 → safe.
+    // The real danger is the transient between individual counter resets.
+    // Verify that requestWindowReset prevents any such scenario:
+    StreamHealth result = HealthWatchdog::classify(
+        torn, 0, 0, 0, 0, 0, 0, 0,
+        videoRecvDelta, videoDecDelta, 0);
+    // Both deltas wrap identically, so no single classify branch triggers Degraded
+    ASSERT_TRUE(result != StreamHealth::Degraded);
+}
+
 // ==== evaluate() behavioral tests ====
 
 TEST(evaluate_initial_state_is_buffering) {

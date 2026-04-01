@@ -41,9 +41,6 @@ private:
     media::VideoFrameQueue frameQueue_;
     media::VideoDecodeThread decodeThread_;
 
-    std::shared_ptr<facebook::react::CallInvoker> callInvoker_;
-    facebook::jsi::Runtime* runtime_{nullptr};
-
 public:
     media::AVSyncCoordinator& syncCoordinator() noexcept { return decodeThread_.syncCoordinator(); }
     media::VideoFrameQueue& frameQueue() noexcept { return frameQueue_; }

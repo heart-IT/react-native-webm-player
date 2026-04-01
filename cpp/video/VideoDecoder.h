@@ -23,6 +23,9 @@ public:
     virtual int decodedWidth() const = 0;
     virtual int decodedHeight() const = 0;
 
+    // Last platform error code (media_status_t on Android, OSStatus on iOS).
+    virtual int lastError() const { return 0; }
+
     // Clean shutdown.
     virtual void shutdown() = 0;
 };

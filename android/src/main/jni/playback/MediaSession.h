@@ -48,6 +48,8 @@ struct SessionMetrics {
     int32_t actualSampleRate = 0;
     bool sampleRateValid = true;
     int64_t audioOutputLatencyUs = 0;
+    bool audioOutputRunning = false;
+    bool interrupted = false;
 
     // Pool pressure indicators
     bool decodedPoolUnderPressure = false;
@@ -328,7 +330,7 @@ public:
             decodeThread_.notifyActive();
         }
 
-        jitter_.onPacket(timestampUs, nowUs());
+        jitter_.onSample(timestampUs, nowUs());
         audio_.setBufferTarget(jitter_.bufferTargetUs());
 
         // Update clock drift compensation if we have enough measurement data
@@ -446,7 +448,9 @@ public:
             m.actualSampleRate = audio->actualSampleRate();
             m.sampleRateValid = audio->isSampleRateValid();
             m.audioOutputLatencyUs = audio->totalLatencyUs();
+            m.audioOutputRunning = audio->isRunning();
         }
+        m.interrupted = !AudioSessionManager::instance().canPlayAudio();
 
         // Bluetooth route tracking
         m.currentRoute = AudioSessionManager::instance().currentRoute();
@@ -507,6 +511,8 @@ public:
     void setHealthWatchdog(std::unique_ptr<HealthWatchdog> wd) noexcept {
         decodeThread_.setHealthWatchdog(std::move(wd));
     }
+
+    void resetHealthWindow() noexcept { decodeThread_.resetHealthWindow(); }
 
     // Lock-free accessors for health watchdog (called from decode thread)
     [[nodiscard]] const auto& audioMetrics() const noexcept { return audio_.metrics(); }

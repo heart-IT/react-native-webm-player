@@ -386,7 +386,8 @@ public:
                                                                      const jsi::Value* pArgs, size_t) -> jsi::Value {
                                 auto resolve = std::make_shared<jsi::Function>(pArgs[0].getObject(rt).getFunction(rt));
                                 auto reject = std::make_shared<jsi::Function>(pArgs[1].getObject(rt).getFunction(rt));
-                                if (!weakOwner.lock()) {
+                                auto owner = weakOwner.lock();
+                                if (!owner) {
                                     reject->call(rt, jsi::String::createFromUtf8(rt, "module destroyed"));
                                     return jsi::Value::undefined();
                                 }
@@ -397,12 +398,12 @@ public:
                                 }
                                 auto clipData = std::make_shared<std::vector<uint8_t>>(std::move(clipResult.data));
                                 // Hold strong ref to keep module (and thus orch) alive until async callback completes
-                                auto owner = weakOwner.lock();
+                                auto threadOwner = weakOwner.lock();
                                 // Detach previous clip thread if still running — it holds
                                 // a strong owner ref so the module stays alive. Blocking
                                 // join here would stall the JS thread for the full I/O.
                                 if (orch->clipThread_.joinable()) orch->clipThread_.detach();
-                                orch->clipThread_ = std::thread([clipData, resolve, reject, callInvoker, owner, orch]() {
+                                orch->clipThread_ = std::thread([clipData, resolve, reject, callInvoker, threadOwner, orch]() {
                                     std::string filePath = media::ClipBuffer::generateFilePath();
                                     std::string error;
                                     FILE* f = fopen(filePath.c_str(), "wb");
@@ -412,9 +413,9 @@ public:
                                         fclose(f);
                                         if (written != clipData->size()) error = "incomplete write";
                                     }
-                                    if (!owner || !orch->runtime_) return;
-                                    callInvoker->invokeAsync([resolve, reject, filePath, error, owner, orch]() {
-                                        if (!owner || !orch->runtime_) return;
+                                    if (!threadOwner || !orch->runtime_) return;
+                                    callInvoker->invokeAsync([resolve, reject, filePath, error, threadOwner, orch]() {
+                                        if (!threadOwner || !orch->runtime_) return;
                                         auto& rt = *orch->runtime_;
                                         if (error.empty()) resolve->call(rt, jsi::String::createFromUtf8(rt, filePath));
                                         else reject->call(rt, jsi::String::createFromUtf8(rt, error));
@@ -595,6 +596,9 @@ private:
         audioOutput.setProperty(rt, "lastError", metrics.audioLastError);
         audioOutput.setProperty(rt, "actualSampleRate", metrics.actualSampleRate);
         audioOutput.setProperty(rt, "latencyUs", static_cast<double>(metrics.audioOutputLatencyUs));
+        audioOutput.setProperty(rt, "running", metrics.audioOutputRunning);
+        audioOutput.setProperty(rt, "interrupted", metrics.interrupted);
+        audioOutput.setProperty(rt, "sampleRateValid", metrics.sampleRateValid);
         result.setProperty(rt, "audioOutput", std::move(audioOutput));
 
         jsi::Object bluetooth(rt);
@@ -647,6 +651,7 @@ private:
         demux.setProperty(rt, "audioPacketsEmitted", static_cast<double>(dm.audioPacketsEmitted));
         demux.setProperty(rt, "videoPacketsEmitted", static_cast<double>(dm.videoPacketsEmitted));
         demux.setProperty(rt, "overflowCount", static_cast<double>(dm.overflowCount));
+        demux.setProperty(rt, "partialDropCount", static_cast<double>(dm.partialDropCount));
         demux.setProperty(rt, "blockStallCount", static_cast<double>(dm.blockStallCount));
         demux.setProperty(rt, "bufferBytes", static_cast<double>(dm.bufferBytes));
         demux.setProperty(rt, "parseState", static_cast<int>(dm.parseState));
@@ -675,6 +680,7 @@ private:
             video.setProperty(rt, "driftPpm", static_cast<double>(vm.driftPpm.load(std::memory_order_relaxed)));
             video.setProperty(rt, "decodeLatencyUs", static_cast<double>(vm.decodeLatencyUs.load(std::memory_order_relaxed)));
             video.setProperty(rt, "lastDecodeTimeUs", static_cast<double>(vm.lastDecodeTimeUs.load(std::memory_order_relaxed)));
+            video.setProperty(rt, "lastDecodeError", static_cast<int>(vm.lastDecodeError.load(std::memory_order_relaxed)));
             video.setProperty(rt, "queueDepth", static_cast<int>(videoQueue_->pendingFrames()));
             video.setProperty(rt, "needsKeyFrame", videoQueue_->isAwaitingKeyFrame());
         } else {
@@ -688,7 +694,7 @@ private:
             video.setProperty(rt, "gapsOver50ms", 0.0); video.setProperty(rt, "gapsOver100ms", 0.0);
             video.setProperty(rt, "gapsOver500ms", 0.0); video.setProperty(rt, "driftPpm", 0.0);
             video.setProperty(rt, "decodeLatencyUs", 0.0); video.setProperty(rt, "lastDecodeTimeUs", 0.0);
-            video.setProperty(rt, "queueDepth", 0); video.setProperty(rt, "needsKeyFrame", false);
+            video.setProperty(rt, "lastDecodeError", 0); video.setProperty(rt, "queueDepth", 0); video.setProperty(rt, "needsKeyFrame", false);
         }
         video.setProperty(rt, "avSyncOffsetUs", syncCoordinator_
             ? static_cast<double>(syncCoordinator_->currentOffsetUs()) : 0.0);
@@ -748,7 +754,8 @@ private:
 
         auto readMetrics = [weakOwner, orch]() -> media::HealthSnapshot {
             media::HealthSnapshot snap{};
-            if (!weakOwner.lock()) return snap;
+            auto owner = weakOwner.lock();
+            if (!owner) return snap;
             if (orch->session_.isRunning()) {
                 const auto& m = orch->session_.audioMetrics();
                 snap.underruns = m.underruns.load(std::memory_order_relaxed);
@@ -792,13 +799,15 @@ private:
         };
 
         auto onHealthChange = [weakOwner, orch](const media::HealthEvent& event) {
-            if (!weakOwner.lock() || !orch->healthCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
+            auto owner = weakOwner.lock();
+            if (!owner || !orch->healthCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
             int statusInt = static_cast<int>(event.status);
             std::string detail(event.detail);
             auto snapshot = event.metrics;
             int streamStatusInt = static_cast<int>(snapshot.streamStatus);
             orch->callInvoker_->invokeAsync([weakOwner, orch, statusInt, detail, snapshot, streamStatusInt]() {
-                if (!weakOwner.lock() || !orch->runtime_ || !orch->healthCallback_) return;
+                auto owner = weakOwner.lock();
+                if (!owner || !orch->runtime_ || !orch->healthCallback_) return;
                 try {
                     auto& rt = *orch->runtime_;
                     jsi::Object ev(rt);
@@ -828,7 +837,8 @@ private:
 
         // Wire stall recovery into health evaluation cycle
         stallRecovery_.setVideoKeyFrameRequestFn([weakOwner, orch]() {
-            if (!weakOwner.lock()) return;
+            auto owner = weakOwner.lock();
+            if (!owner) return;
             if (orch->videoQueue_) orch->videoQueue_->requestKeyFrame();
             media::VideoSurfaceRegistry::instance().requestKeyFrame();
         });
@@ -844,16 +854,19 @@ private:
         auto& mgr = media::AudioSessionManager::instance();
 
         mgr.setDriftResetCallback([weakOwner, orch]() {
-            if (!weakOwner.lock()) return;
+            auto owner = weakOwner.lock();
+            if (!owner) return;
             if (orch->session_.isRunning()) orch->session_.requestDriftReset();
         });
 
         mgr.setRouteCallback([weakOwner, orch](media::AudioRoute route) {
-            if (!weakOwner.lock() || !orch->routeCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
+            auto owner = weakOwner.lock();
+            if (!owner || !orch->routeCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
             int routeInt = static_cast<int>(route);
             auto availableDevices = media::AudioSessionManager::instance().getAvailableAudioDevices();
             orch->callInvoker_->invokeAsync([weakOwner, orch, routeInt, availableDevices]() {
-                if (!weakOwner.lock() || !orch->runtime_ || !orch->routeCallback_) return;
+                auto owner = weakOwner.lock();
+                if (!owner || !orch->runtime_ || !orch->routeCallback_) return;
                 try {
                     auto& rt = *orch->runtime_;
                     jsi::Object event(rt);
@@ -892,6 +905,7 @@ private:
         clipBuffer_.reset();
         stallRecovery_.reset();
         session_.resetStreamState();
+        session_.resetHealthWindow();
         if (videoQueue_) videoQueue_->reset();
         if (syncCoordinator_) syncCoordinator_->reset();
         return jsi::Value(true);
@@ -916,9 +930,11 @@ private:
         auto* orch = this;
 
         auto jsKeyFrameNotifier = [weakOwner, orch]() {
-            if (!weakOwner.lock() || !orch->keyFrameNeededCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
+            auto owner = weakOwner.lock();
+            if (!owner || !orch->keyFrameNeededCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
             orch->callInvoker_->invokeAsync([weakOwner, orch]() {
-                if (!weakOwner.lock() || !orch->runtime_ || !orch->keyFrameNeededCallback_) return;
+                auto owner2 = weakOwner.lock();
+                if (!owner2 || !orch->runtime_ || !orch->keyFrameNeededCallback_) return;
                 try { orch->keyFrameNeededCallback_->call(*orch->runtime_); }
                 catch (const std::exception& e) { MEDIA_LOG_E("PipelineOrchestrator: keyframe callback error: %s", e.what()); }
             });
@@ -928,6 +944,9 @@ private:
 
         // Stall recovery also fires keyframe requests via the same JS callback
         stallRecovery_.setKeyFrameRequestFn(jsKeyFrameNotifier);
+
+        // Video queue overflow fires keyframe request when dropping invalidates P-frames
+        if (videoQueue_) videoQueue_->setKeyFrameRequestCallback(jsKeyFrameNotifier);
     }
 
     jsi::Value setAudioFocusCallback(jsi::Runtime& rt, const jsi::Value& callback) {
@@ -944,10 +963,12 @@ private:
         auto* orch = this;
         media::AudioSessionManager::instance().setAudioFocusCallback(
             [weakOwner, orch](media::AudioFocusState state) {
-                if (!weakOwner.lock() || !orch->audioFocusCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
+                auto owner = weakOwner.lock();
+                if (!owner || !orch->audioFocusCallback_ || !orch->callInvoker_ || !orch->runtime_) return;
                 int stateInt = static_cast<int>(state);
                 orch->callInvoker_->invokeAsync([weakOwner, orch, stateInt]() {
-                    if (!weakOwner.lock() || !orch->runtime_ || !orch->audioFocusCallback_) return;
+                    auto owner2 = weakOwner.lock();
+                    if (!owner2 || !orch->runtime_ || !orch->audioFocusCallback_) return;
                     try {
                         orch->audioFocusCallback_->call(*orch->runtime_, jsi::Value(stateInt));
                     } catch (const std::exception& e) {
@@ -966,7 +987,9 @@ private:
         if (offsetSeconds >= 0) {
             demuxer_.reset();
             session_.resetStreamState();
+            session_.resetHealthWindow();
             if (videoQueue_) videoQueue_->reset();
+            media::VideoSurfaceRegistry::instance().requestKeyFrame();
             if (!livePendingBuffer_.empty()) {
                 const auto& result = demuxer_.feedData(livePendingBuffer_.data(), livePendingBuffer_.size());
                 dispatchPackets(result);
@@ -986,6 +1009,7 @@ private:
         livePendingBuffer_.clear();
         demuxer_.reset();
         session_.resetStreamState();
+        session_.resetHealthWindow();
         if (videoQueue_) videoQueue_->reset();
         if (syncCoordinator_) syncCoordinator_->reset();
 

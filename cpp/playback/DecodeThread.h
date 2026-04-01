@@ -92,6 +92,10 @@ public:
         healthWatchdog_ = std::move(wd);
     }
 
+    void resetHealthWindow() noexcept {
+        if (healthWatchdog_) healthWatchdog_->requestWindowReset();
+    }
+
     [[nodiscard]] bool isResponsive() const noexcept {
         if (!running_.load(std::memory_order_acquire)) return false;
         int64_t heartbeat = lastHeartbeatUs_.load(std::memory_order_relaxed);

@@ -225,6 +225,7 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
 
     if (status != noErr) {
         ++consecutiveErrors_;
+        lastError_.store(static_cast<int>(status), std::memory_order_relaxed);
         MEDIA_LOG_E("VP9Decoder: VTDecompressionSessionDecodeFrame failed: %d (consecutive=%d)",
                     (int)status, consecutiveErrors_);
         if (status == kVTInvalidSessionErr || consecutiveErrors_ >= kMaxConsecutiveErrors) {
@@ -238,7 +239,6 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
             consecutiveErrors_ = 0;
             lastResetTimeUs_ = now;
             resetBackoffUs_ = std::min(resetBackoffUs_ * 2, int64_t{2000000});
-            ++resetsSinceSuccess_;
             if (keyFrameRequestFn_) keyFrameRequestFn_();
         }
         return false;
@@ -246,7 +246,6 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
 
     consecutiveErrors_ = 0;
     resetBackoffUs_ = 100000;
-    resetsSinceSuccess_ = 0;
     return true;
 
     }  // @autoreleasepool

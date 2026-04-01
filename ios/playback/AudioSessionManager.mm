@@ -269,10 +269,14 @@ void AudioSessionManager::registerNotifications() noexcept {
                             static_cast<AVAudioSessionInterruptionType>([typeNumber integerValue]);
 
                         bool began = (type == AVAudioSessionInterruptionTypeBegan);
-                        this->interrupted_.store(began, std::memory_order_release);
                         bool shouldResume = false;
 
-                        if (!began) {
+                        if (began) {
+                            this->interrupted_.store(true, std::memory_order_release);
+                        } else {
+                            // Interruption ended — clear flag regardless of shouldResume.
+                            // shouldResume controls auto-restart, not whether audio hardware is available.
+                            this->interrupted_.store(false, std::memory_order_release);
                             NSNumber* optionsNumber = userInfo[AVAudioSessionInterruptionOptionKey];
                             AVAudioSessionInterruptionOptions options =
                                 static_cast<AVAudioSessionInterruptionOptions>([optionsNumber integerValue]);

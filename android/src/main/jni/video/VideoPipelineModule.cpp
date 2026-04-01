@@ -164,6 +164,7 @@ jsi::Value VideoPipelineModule::getMetrics(jsi::Runtime& rt) {
     result.setProperty(rt, "gapsOver100ms", static_cast<double>(m.gapsOver100ms.load(std::memory_order_relaxed)));
     result.setProperty(rt, "gapsOver500ms", static_cast<double>(m.gapsOver500ms.load(std::memory_order_relaxed)));
     result.setProperty(rt, "driftPpm", static_cast<double>(m.driftPpm.load(std::memory_order_relaxed)));
+    result.setProperty(rt, "lastDecodeError", static_cast<int>(m.lastDecodeError.load(std::memory_order_relaxed)));
     result.setProperty(rt, "queueDepth", static_cast<int>(frameQueue_.pendingFrames()));
     result.setProperty(rt, "needsKeyFrame", frameQueue_.isAwaitingKeyFrame());
     return result;
