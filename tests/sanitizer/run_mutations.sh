@@ -194,6 +194,31 @@ run_mutation "M20" "cpp/playback/DriftCompensator.h" \
     "kRateDenom = 99990" \
     "prime denominator → composite"
 
+# --- Category 6: Video Pipeline ---
+printf "\nCategory 6: Video Pipeline\n"
+
+run_mutation "V-M01" "cpp/video/VideoFrameQueue.h" \
+    "if (needsKeyFrame_ && !isKeyFrame) {" \
+    "if (false && needsKeyFrame_ && !isKeyFrame) {" \
+    "disable keyframe gating"
+
+run_mutation "V-M02" "cpp/video/VideoFrameQueue.h" \
+    "if (encodedQueue_.size() >= video_config::kDecodeQueueDepth) {" \
+    "if (false) {" \
+    "disable queue depth cap"
+
+run_mutation "V-M03" "cpp/video/VideoConfig.h" \
+    "kLateFrameThresholdUs = 16667" \
+    "kLateFrameThresholdUs = 0" \
+    "late-frame threshold → 0 (everything is late)"
+
+run_mutation "V-M04" "cpp/video/VideoFrameQueue.h" \
+    "encodedQueue_.clear();
+    }" \
+    "// encodedQueue_.clear();
+    }" \
+    "requestKeyFrame() skips queue clear"
+
 # --- Summary ---
 printf "\n====================\n"
 printf "Mutations tested: %d\n" "$TOTAL"

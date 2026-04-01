@@ -795,46 +795,78 @@ TEST(V03_render_clock_timing) {
 
 // ============================================================
 // V04: Late Frame Detection + Skip
-// Anchor clock, push frames, let time advance past several frames' deadlines.
-// Pop with tryPopReadyFrame — should skip stale frames and track late/skipped.
-// Validates: tryPopReadyFrame skip logic, lateFrames/skippedFrames metrics
+// Phase 1: Pop frames at correct render times — zero late frames.
+// Phase 2: Let time advance past deadlines — late frames detected, stale skipped.
+// Validates: tryPopReadyFrame timing, lateFrames/skippedFrames metrics
+// Kills mutation V-M03 (kLateFrameThresholdUs = 0)
 // ============================================================
 TEST(V04_late_frame_skip) {
-    VideoFrameQueue queue;
-    VideoRenderClock clock;
+    // --- Phase 1: Normal pacing (no late frames) ---
+    {
+        VideoFrameQueue queue;
+        VideoRenderClock clock;
 
-    // Push keyframe + 7 delta frames at 30fps
-    int64_t pts = 0;
-    ASSERT_TRUE(pushVideoFrame(queue, pts, true));
-    pts += 33333;
-    for (int i = 1; i < 8; i++) {
-        ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+        // Push keyframe + 3 delta frames at 30fps
+        int64_t pts = 0;
+        ASSERT_TRUE(pushVideoFrame(queue, pts, true));
         pts += 33333;
+        for (int i = 1; i < 4; i++) {
+            ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+            pts += 33333;
+        }
+
+        // Anchor clock: PTS=0 at time=0, buffer=66ms
+        clock.anchor(0, 0, 66000);
+
+        // Pop each frame slightly after its scheduled render time (1ms late).
+        // With the real kLateFrameThresholdUs (16667us = half a frame), 1ms of
+        // lateness is well within tolerance → zero late frames.
+        // With V-M03 (threshold = 0), 1ms > 0 → every frame is late → assertion fails.
+        EncodedVideoFrame out;
+        for (int i = 0; i < 4; i++) {
+            int64_t renderTime = clock.scheduledRenderTime(i * 33333);
+            PopResult r = queue.tryPopReadyFrame(out, clock, renderTime + 1000);
+            ASSERT_TRUE(r != PopResult::Nothing);
+        }
+
+        // Under normal pacing with real threshold, ZERO late frames
+        uint64_t late = queue.metrics().lateFrames.load(std::memory_order_relaxed);
+        ASSERT_EQ(static_cast<long long>(late), 0LL);
     }
 
-    // Anchor clock: PTS=0 at time=0, buffer=66ms
-    clock.anchor(0, 0, 66000);
+    // --- Phase 2: Stale frames (time jumps ahead) ---
+    {
+        VideoFrameQueue queue;
+        VideoRenderClock clock;
 
-    // Advance time to 300ms — frames 0-6 are past deadline, frame 7 is current
-    // Frame 0 scheduled at 66000, frame 7 at 66000 + 7*33333 = 299331
-    int64_t now = 300'000;
-    EncodedVideoFrame out;
-    PopResult result = queue.tryPopReadyFrame(out, clock, now);
+        // Push keyframe + 7 delta frames at 30fps
+        int64_t pts = 0;
+        ASSERT_TRUE(pushVideoFrame(queue, pts, true));
+        pts += 33333;
+        for (int i = 1; i < 8; i++) {
+            ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+            pts += 33333;
+        }
 
-    // Should have popped (with skips)
-    ASSERT_TRUE(result != PopResult::Nothing);
+        // Anchor clock: PTS=0 at time=0, buffer=66ms
+        clock.anchor(0, 0, 66000);
 
-    // The popped frame should be a late one that was skipped-to
-    uint64_t skipped = queue.metrics().skippedFrames.load(std::memory_order_relaxed);
-    uint64_t late = queue.metrics().lateFrames.load(std::memory_order_relaxed);
+        // Advance time to 300ms — frames 0-6 are past deadline
+        int64_t now = 300'000;
+        EncodedVideoFrame out;
+        PopResult result = queue.tryPopReadyFrame(out, clock, now);
 
-    // At least some frames should have been skipped
-    ASSERT_GE(static_cast<long long>(skipped), 1LL);
+        ASSERT_TRUE(result != PopResult::Nothing);
 
-    printf("[late=%llu skipped=%llu popped_pts=%lld] ",
-           static_cast<unsigned long long>(late),
-           static_cast<unsigned long long>(skipped),
-           static_cast<long long>(out.ptsUs));
+        uint64_t skipped = queue.metrics().skippedFrames.load(std::memory_order_relaxed);
+        uint64_t late = queue.metrics().lateFrames.load(std::memory_order_relaxed);
+
+        ASSERT_GE(static_cast<long long>(skipped), 1LL);
+
+        printf("[on_time_late=0 stale_late=%llu skipped=%llu] ",
+               static_cast<unsigned long long>(late),
+               static_cast<unsigned long long>(skipped));
+    }
 }
 
 // ============================================================
