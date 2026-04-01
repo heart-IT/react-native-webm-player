@@ -174,7 +174,7 @@ public:
         return lastPublishedHealth_.load(std::memory_order_relaxed);
     }
 
-private:
+    // Pure classification functions — public for testability, no state dependency.
     static StreamHealth classify(const HealthSnapshot& snap,
                                   uint64_t underrunDelta,
                                   uint64_t errorDelta,
@@ -261,6 +261,7 @@ private:
         return "unknown transition";
     }
 
+private:
     HealthMetricsReader readMetrics_;
     HealthCallback callback_;
 

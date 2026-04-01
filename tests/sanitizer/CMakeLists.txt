@@ -135,3 +135,8 @@ add_executable(test_e2e_demux
 )
 target_include_directories(test_e2e_demux PRIVATE ${LIBWEBM_ROOT})
 target_link_libraries(test_e2e_demux PRIVATE ${OPUS_LIBRARY})
+
+# ---- HealthWatchdog state machine test ----
+add_executable(test_health_watchdog
+    test_health_watchdog.cpp
+)
