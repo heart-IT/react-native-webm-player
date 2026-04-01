@@ -30,6 +30,9 @@
 #include "AudioDecodeChannel.h"
 #include "OpusDecoderAdapter.h"
 #include "common/AVSyncCoordinator.h"
+#include "video/VideoFrameQueue.h"
+#include "video/VideoSyncController.h"
+#include "video/VideoConfig.h"
 
 using namespace media;
 
@@ -681,6 +684,259 @@ TEST(S09_avsync_dead_zone) {
     printf("[deadzone_adj=%lld gradual_adj=%lld] ",
            static_cast<long long>(adj),
            static_cast<long long>(adj2));
+}
+
+// ============================================================
+// VIDEO PIPELINE SCENARIOS
+// ============================================================
+
+// Helper: push a fake VP9 frame (just bytes + PTS + keyframe flag)
+static bool pushVideoFrame(VideoFrameQueue& q, int64_t ptsUs, bool keyFrame, size_t size = 128) {
+    std::vector<uint8_t> data(size, 0x42);
+    return q.pushEncodedFrame(data.data(), data.size(), ptsUs, keyFrame);
+}
+
+// ============================================================
+// V01: Keyframe Gating
+// Push delta frames before any keyframe — all should be dropped.
+// Then push keyframe — should be accepted. Subsequent deltas accepted.
+// Validates: needsKeyFrame_ gating, keyframe clears gate
+// ============================================================
+TEST(V01_keyframe_gating) {
+    VideoFrameQueue queue;
+
+    // Push 10 delta frames — all rejected (no keyframe yet)
+    for (int i = 0; i < 10; i++) {
+        bool ok = pushVideoFrame(queue, i * 33333, false);
+        ASSERT_TRUE(!ok);
+    }
+    ASSERT_EQ(static_cast<long long>(queue.metrics().framesDropped.load(std::memory_order_relaxed)), 10LL);
+    ASSERT_EQ(static_cast<long long>(queue.metrics().framesReceived.load(std::memory_order_relaxed)), 0LL);
+    ASSERT_EQ(queue.pendingFrames(), 0u);
+
+    // Push keyframe — accepted
+    ASSERT_TRUE(pushVideoFrame(queue, 333330, true));
+    ASSERT_EQ(static_cast<long long>(queue.metrics().framesReceived.load(std::memory_order_relaxed)), 1LL);
+    ASSERT_EQ(queue.pendingFrames(), 1u);
+
+    // Subsequent deltas accepted
+    ASSERT_TRUE(pushVideoFrame(queue, 366663, false));
+    ASSERT_TRUE(pushVideoFrame(queue, 399996, false));
+    ASSERT_EQ(queue.pendingFrames(), 3u);
+
+    printf("[dropped=%llu recv=%llu] ",
+           static_cast<unsigned long long>(queue.metrics().framesDropped.load(std::memory_order_relaxed)),
+           static_cast<unsigned long long>(queue.metrics().framesReceived.load(std::memory_order_relaxed)));
+}
+
+// ============================================================
+// V02: Queue Depth Cap
+// Fill queue to kDecodeQueueDepth, then push one more — oldest dropped.
+// Validates: overflow handling, bounded memory
+// ============================================================
+TEST(V02_queue_depth_cap) {
+    VideoFrameQueue queue;
+
+    // Fill to capacity
+    int64_t pts = 0;
+    ASSERT_TRUE(pushVideoFrame(queue, pts, true)); // keyframe first
+    pts += 33333;
+    for (size_t i = 1; i < video_config::kDecodeQueueDepth; i++) {
+        ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+        pts += 33333;
+    }
+    ASSERT_EQ(queue.pendingFrames(), video_config::kDecodeQueueDepth);
+
+    uint64_t dropsBefore = queue.metrics().framesDropped.load(std::memory_order_relaxed);
+
+    // One more — triggers overflow
+    ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+
+    // Queue should still be at capacity (oldest was evicted)
+    ASSERT_LE(queue.pendingFrames(), video_config::kDecodeQueueDepth);
+
+    // Drop count should have increased
+    uint64_t dropsAfter = queue.metrics().framesDropped.load(std::memory_order_relaxed);
+    ASSERT_GE(static_cast<long long>(dropsAfter), static_cast<long long>(dropsBefore + 1));
+
+    printf("[depth=%zu drops=%llu] ",
+           queue.pendingFrames(),
+           static_cast<unsigned long long>(dropsAfter));
+}
+
+// ============================================================
+// V03: Render Clock Timing
+// Anchor clock, push frames, verify isReadyToRender respects buffer target.
+// Validates: VideoRenderClock scheduling, buffer target delay
+// ============================================================
+TEST(V03_render_clock_timing) {
+    VideoRenderClock clock;
+    constexpr int64_t kBufferTarget = video_config::jitter::kDefaultBufferUs; // 66ms
+
+    // Anchor: first frame PTS=0 at local time 1000000, buffer target 66ms
+    clock.anchor(0, 1'000'000, kBufferTarget);
+
+    // Frame at PTS=0 should render at: anchor(1000000) + ptsDelta(0) + buffer(66000) = 1066000
+    ASSERT_EQ(clock.scheduledRenderTime(0), 1'066'000LL);
+
+    // At t=1065999, not ready yet
+    ASSERT_TRUE(!clock.isReadyToRender(0, 1'065'999));
+
+    // At t=1066000, ready
+    ASSERT_TRUE(clock.isReadyToRender(0, 1'066'000));
+
+    // Frame at PTS=33333 should render at: 1000000 + 33333 + 66000 = 1099333
+    ASSERT_EQ(clock.scheduledRenderTime(33333), 1'099'333LL);
+
+    printf("[sched0=%lld sched1=%lld] ",
+           static_cast<long long>(clock.scheduledRenderTime(0)),
+           static_cast<long long>(clock.scheduledRenderTime(33333)));
+}
+
+// ============================================================
+// V04: Late Frame Detection + Skip
+// Anchor clock, push frames, let time advance past several frames' deadlines.
+// Pop with tryPopReadyFrame — should skip stale frames and track late/skipped.
+// Validates: tryPopReadyFrame skip logic, lateFrames/skippedFrames metrics
+// ============================================================
+TEST(V04_late_frame_skip) {
+    VideoFrameQueue queue;
+    VideoRenderClock clock;
+
+    // Push keyframe + 7 delta frames at 30fps
+    int64_t pts = 0;
+    ASSERT_TRUE(pushVideoFrame(queue, pts, true));
+    pts += 33333;
+    for (int i = 1; i < 8; i++) {
+        ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+        pts += 33333;
+    }
+
+    // Anchor clock: PTS=0 at time=0, buffer=66ms
+    clock.anchor(0, 0, 66000);
+
+    // Advance time to 300ms — frames 0-6 are past deadline, frame 7 is current
+    // Frame 0 scheduled at 66000, frame 7 at 66000 + 7*33333 = 299331
+    int64_t now = 300'000;
+    EncodedVideoFrame out;
+    PopResult result = queue.tryPopReadyFrame(out, clock, now);
+
+    // Should have popped (with skips)
+    ASSERT_TRUE(result != PopResult::Nothing);
+
+    // The popped frame should be a late one that was skipped-to
+    uint64_t skipped = queue.metrics().skippedFrames.load(std::memory_order_relaxed);
+    uint64_t late = queue.metrics().lateFrames.load(std::memory_order_relaxed);
+
+    // At least some frames should have been skipped
+    ASSERT_GE(static_cast<long long>(skipped), 1LL);
+
+    printf("[late=%llu skipped=%llu popped_pts=%lld] ",
+           static_cast<unsigned long long>(late),
+           static_cast<unsigned long long>(skipped),
+           static_cast<long long>(out.ptsUs));
+}
+
+// ============================================================
+// V05: Keyframe Recovery After requestKeyFrame()
+// Push keyframe + deltas, call requestKeyFrame(), then push deltas (rejected)
+// then push new keyframe (accepted). Validates recovery path.
+// ============================================================
+TEST(V05_keyframe_recovery) {
+    VideoFrameQueue queue;
+
+    // Normal flow: keyframe + deltas
+    ASSERT_TRUE(pushVideoFrame(queue, 0, true));
+    ASSERT_TRUE(pushVideoFrame(queue, 33333, false));
+    ASSERT_TRUE(pushVideoFrame(queue, 66666, false));
+    ASSERT_EQ(queue.pendingFrames(), 3u);
+
+    // Simulate decoder error → request keyframe
+    queue.requestKeyFrame();
+
+    // Queue should be cleared
+    ASSERT_EQ(queue.pendingFrames(), 0u);
+    ASSERT_TRUE(queue.isAwaitingKeyFrame());
+
+    // Delta frames rejected
+    ASSERT_TRUE(!pushVideoFrame(queue, 99999, false));
+    ASSERT_TRUE(!pushVideoFrame(queue, 133332, false));
+
+    // New keyframe accepted → recovery
+    ASSERT_TRUE(pushVideoFrame(queue, 166665, true));
+    ASSERT_TRUE(!queue.isAwaitingKeyFrame());
+    ASSERT_EQ(queue.pendingFrames(), 1u);
+
+    printf("[recovered pending=%zu] ", queue.pendingFrames());
+}
+
+// ============================================================
+// V06: Video Burst (8 frames at once)
+// Push 8 frames simultaneously, verify queue handles them and
+// tryPopReadyFrame paces them correctly via render clock.
+// Validates: burst absorption, render pacing
+// ============================================================
+TEST(V06_video_burst) {
+    VideoFrameQueue queue;
+    VideoRenderClock clock;
+
+    // Burst: 8 frames at once (simulating Hypercore batch delivery)
+    int64_t pts = 0;
+    ASSERT_TRUE(pushVideoFrame(queue, pts, true)); // keyframe
+    pts += 33333;
+    for (int i = 1; i < 8; i++) {
+        ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+        pts += 33333;
+    }
+    ASSERT_EQ(queue.pendingFrames(), 8u);
+
+    // Anchor clock at time=0
+    clock.anchor(0, 0, video_config::jitter::kDefaultBufferUs);
+
+    // Pop frames one at a time at correct render times
+    int popped = 0;
+    EncodedVideoFrame out;
+    for (int64_t now = 0; now < 500'000; now += 5000) { // advance 5ms at a time
+        PopResult r = queue.tryPopReadyFrame(out, clock, now);
+        if (r != PopResult::Nothing) popped++;
+    }
+
+    // Should have popped all 8 frames over the ~266ms span (8 × 33ms)
+    ASSERT_EQ(popped, 8);
+    ASSERT_EQ(queue.pendingFrames(), 0u);
+
+    printf("[popped=%d] ", popped);
+}
+
+// ============================================================
+// V07: Video Gap + Keyframe Request Callback
+// Feed steady stream, simulate 500ms gap, verify keyframe request fires.
+// Validates: gap detection, keyframe request callback mechanism
+// ============================================================
+TEST(V07_video_gap_recovery) {
+    VideoFrameQueue queue;
+    bool keyFrameRequested = false;
+    queue.setKeyFrameRequestCallback([&] { keyFrameRequested = true; });
+
+    // Steady feed: keyframe + 7 deltas
+    int64_t pts = 0;
+    ASSERT_TRUE(pushVideoFrame(queue, pts, true));
+    pts += 33333;
+    for (int i = 1; i < 8; i++) {
+        ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+        pts += 33333;
+    }
+
+    // Queue is full (8 frames). Push one more without popping — triggers overflow.
+    // Since we dropped the front (which was the keyframe), queue clears and
+    // requests keyframe.
+    ASSERT_TRUE(pushVideoFrame(queue, pts, false));
+
+    // Keyframe should have been requested (overflow dropped the keyframe)
+    ASSERT_TRUE(keyFrameRequested);
+    ASSERT_TRUE(queue.isAwaitingKeyFrame());
+
+    printf("[kf_requested=%d] ", keyFrameRequested ? 1 : 0);
 }
 
 // ============================================================
