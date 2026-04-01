@@ -47,6 +47,7 @@ public:
         burstFloorUs_.store(0, std::memory_order_relaxed);
         spikeHistoryCount_.store(0, std::memory_order_relaxed);
         overrideTargetUs_.store(0, std::memory_order_relaxed);
+        networkFloorUs_.store(0, std::memory_order_relaxed);
         for (auto& rec : spikeHistory_) { rec = {}; }
 
         driftEstimateUs_.store(0, std::memory_order_relaxed);
@@ -146,6 +147,10 @@ public:
         overrideTargetUs_.store(us, std::memory_order_relaxed);
     }
 
+    void setNetworkJitterFloorUs(int64_t us) noexcept {
+        networkFloorUs_.store(us, std::memory_order_relaxed);
+    }
+
     [[nodiscard]] int64_t bufferTargetUs() const noexcept {
         int64_t override = overrideTargetUs_.load(std::memory_order_relaxed);
         if (override > 0) {
@@ -160,6 +165,10 @@ public:
             int64_t jitter = jitterUs_.load(std::memory_order_relaxed);
             baseTarget = (jitter * 5) >> 1;
         }
+
+        int64_t netFloor = networkFloorUs_.load(std::memory_order_relaxed);
+        if (netFloor > baseTarget) baseTarget = netFloor;
+
         return std::clamp(baseTarget, video_config::jitter::kMinBufferUs,
                           video_config::jitter::kMaxBufferUs);
     }
@@ -275,6 +284,7 @@ private:
     std::atomic<uint32_t> spikeHistoryCount_{0};
     std::atomic<int64_t> burstFloorUs_{0};
     std::atomic<int64_t> overrideTargetUs_{0};
+    std::atomic<int64_t> networkFloorUs_{0};
 
     // Long-term drift tracking
     std::atomic<int64_t> cumulativeDriftUs_{0};

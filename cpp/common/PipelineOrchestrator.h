@@ -511,6 +511,17 @@ private:
 
         dispatchPackets(result);
 
+        // Propagate network-layer jitter as a buffer floor to both pipelines.
+        // The demuxer sees feed irregularity before packet-level jitter manifests,
+        // giving both buffers time to expand preemptively.
+        int64_t feedJitter = demuxer_.feedJitterUs();
+        if (feedJitter > 0) {
+            // Scale to buffer target: 2.5× jitter (same as packet-level formula)
+            int64_t floor = (feedJitter * 5) >> 1;
+            session_.setNetworkJitterFloorUs(floor);
+            if (videoQueue_) videoQueue_->setNetworkJitterFloorUs(floor);
+        }
+
         if (!result.error.empty()) {
             MEDIA_LOG_W("feedData: demux error: %s", result.error.c_str());
             if (videoQueue_) videoQueue_->requestKeyFrame();

@@ -300,6 +300,10 @@ public:
         (void)videoUs;  // forwarded by caller to VideoFrameQueue
     }
 
+    void setNetworkJitterFloorUs(int64_t us) noexcept {
+        jitter_.setNetworkJitterFloorUs(us);
+    }
+
     // Reset jitter/drift state and flush stale audio for a new stream.
     // Called by resetStream() so stale estimates and frames don't carry over.
     void resetStreamState() noexcept {

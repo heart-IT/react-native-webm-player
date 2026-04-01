@@ -205,6 +205,10 @@ public:
         jitter_.setBufferTargetOverride(us);
     }
 
+    void setNetworkJitterFloorUs(int64_t us) noexcept {
+        jitter_.setNetworkJitterFloorUs(us);
+    }
+
     void setCatchupPolicy(CatchupPolicy p) noexcept {
         catchupPolicy_.store(p, std::memory_order_relaxed);
     }

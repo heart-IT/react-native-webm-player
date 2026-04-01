@@ -97,6 +97,11 @@ public:
 
     size_t bufferBytes() const noexcept;
 
+    // Network-layer feed jitter in microseconds (EWMA of inter-feedData arrival deviation).
+    // Updates on every feedData() call. Provides a leading indicator of network
+    // instability before packet-level jitter estimators detect it.
+    [[nodiscard]] int64_t feedJitterUs() const noexcept { return feedJitterUs_; }
+
     DemuxerMetrics demuxerMetrics() const noexcept {
         DemuxerMetrics m{};
         m.totalBytesFed = totalBytesFed_;
@@ -143,6 +148,11 @@ private:
     uint64_t audioPacketsEmitted_ = 0;
     uint64_t videoPacketsEmitted_ = 0;
     uint64_t blockStallCount_ = 0;
+
+    // Feed arrival jitter tracking (network-layer signal)
+    int64_t lastFeedTimeUs_ = 0;
+    int64_t lastFeedIntervalUs_ = 0;
+    int64_t feedJitterUs_ = 0;
 };
 
 }  // namespace media::demux

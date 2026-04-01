@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include "common/MediaTime.h"
 
 namespace media::demux {
 
@@ -152,6 +153,24 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
 
     if (!data || len == 0) {
         return cachedResult_;
+    }
+
+    // Track inter-feedData arrival jitter (network-layer signal).
+    // Uses the same EWMA approach as JitterEstimator but at the byte-feed level.
+    // This detects network instability before packet-level jitter manifests.
+    {
+        int64_t now = nowUs();
+        if (lastFeedTimeUs_ > 0) {
+            int64_t interval = now - lastFeedTimeUs_;
+            if (lastFeedIntervalUs_ > 0 && interval > 0) {
+                int64_t deviation = interval - lastFeedIntervalUs_;
+                int64_t absDeviation = deviation < 0 ? -deviation : deviation;
+                // EWMA alpha = 0.125 (matches JitterEstimator)
+                feedJitterUs_ += (absDeviation - feedJitterUs_) / 8;
+            }
+            lastFeedIntervalUs_ = interval;
+        }
+        lastFeedTimeUs_ = now;
     }
 
     totalBytesFed_ += len;
@@ -514,6 +533,9 @@ void WebmDemuxer::reset() {
     audioPacketsEmitted_ = 0;
     videoPacketsEmitted_ = 0;
     blockStallCount_ = 0;
+    lastFeedTimeUs_ = 0;
+    lastFeedIntervalUs_ = 0;
+    feedJitterUs_ = 0;
     cachedResult_.audioPackets.clear();
     cachedResult_.videoPackets.clear();
     cachedResult_.error.clear();
