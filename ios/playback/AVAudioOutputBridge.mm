@@ -181,6 +181,25 @@ size_t AVAudioOutputBridge::renderAudio(float* output, size_t frameCount) noexce
         return 0;
     }
 
+    // Callback jitter: measure deviation from expected interval
+    {
+        int64_t now = nowUs();
+        int64_t prev = lastCallbackTimeUs_.load(std::memory_order_relaxed);
+        if (prev > 0) {
+            int64_t expectedIntervalUs = static_cast<int64_t>(frameCount) * 1000000LL
+                / config_.sampleRate;
+            int64_t actualInterval = now - prev;
+            int64_t deviation = actualInterval > expectedIntervalUs
+                ? actualInterval - expectedIntervalUs
+                : expectedIntervalUs - actualInterval;
+            int64_t curPeak = callbackJitterUs_.load(std::memory_order_relaxed);
+            if (deviation > curPeak) {
+                callbackJitterUs_.store(deviation, std::memory_order_relaxed);
+            }
+        }
+        lastCallbackTimeUs_.store(now, std::memory_order_relaxed);
+    }
+
     size_t written = 0;
     if (LIKELY(static_cast<bool>(callback_))) {
         if (LIKELY(playbackResampler_.isPassthrough())) {

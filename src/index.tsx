@@ -27,6 +27,7 @@ export interface PlayerMetrics {
     gapsOver100ms: number
     gapsOver500ms: number
     plcFrames: number
+    peakConsecutivePLC: number
   }
   video: {
     avSyncOffsetUs: number
@@ -50,8 +51,11 @@ export interface PlayerMetrics {
     driftPpm: number
     decodeLatencyUs: number
     lastDecodeTimeUs: number
+    lastDecodeError: number
     queueDepth: number
     needsKeyFrame: boolean
+    keyFrameRequests: number
+    decoderState: number
   }
   pipeline: {
     audioStreamState: number
@@ -77,6 +81,10 @@ export interface PlayerMetrics {
     lastError: number
     actualSampleRate: number
     latencyUs: number
+    callbackJitterUs: number
+    running: boolean
+    interrupted: boolean
+    sampleRateValid: boolean
   }
   bluetooth: {
     route: string
@@ -117,6 +125,7 @@ export interface PlayerMetrics {
     blockStallCount: number
     bufferBytes: number
     parseState: number
+    partialDropCount: number
   }
 }
 
@@ -173,6 +182,18 @@ export interface AudioRouteChangeEvent {
 }
 
 export type AudioRouteCallback = (event: AudioRouteChangeEvent) => void
+
+/**
+ * Video decoder lifecycle state for triage diagnostics.
+ * Values must match native VideoDecoderState enum.
+ */
+export enum VideoDecoderState {
+  NotCreated = 0,
+  WaitingSurface = 1,
+  BackingOff = 2,
+  Active = 3,
+  Failed = 4
+}
 
 /**
  * Stream health states reported by the health watchdog callback.

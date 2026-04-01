@@ -11,6 +11,7 @@
 #include <functional>
 #include <cstring>
 #include "common/MediaConfig.h"
+#include "common/MediaTime.h"
 #include "common/TimedJoin.h"
 #include "MediaTypes.h"
 
@@ -228,6 +229,10 @@ public:
 
     [[nodiscard]] uint32_t restartCount() const noexcept {
         return restartCount_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] int64_t callbackJitterUs() const noexcept {
+        return callbackJitterUs_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] bool isSampleRateValid() const noexcept {
@@ -511,6 +516,25 @@ private:
             return AAUDIO_CALLBACK_RESULT_STOP;
         }
 
+        // Callback jitter: measure deviation from expected interval
+        {
+            int64_t now = nowUs();
+            int64_t prev = self->lastCallbackTimeUs_.load(std::memory_order_relaxed);
+            if (prev > 0) {
+                int64_t expectedIntervalUs = static_cast<int64_t>(numFrames) * 1000000LL
+                    / self->config_.sampleRate;
+                int64_t actualInterval = now - prev;
+                int64_t deviation = actualInterval > expectedIntervalUs
+                    ? actualInterval - expectedIntervalUs
+                    : expectedIntervalUs - actualInterval;
+                int64_t curPeak = self->callbackJitterUs_.load(std::memory_order_relaxed);
+                if (deviation > curPeak) {
+                    self->callbackJitterUs_.store(deviation, std::memory_order_relaxed);
+                }
+            }
+            self->lastCallbackTimeUs_.store(now, std::memory_order_relaxed);
+        }
+
         size_t written = 0;
         const size_t requestedFrames = static_cast<size_t>(numFrames);
 
@@ -614,6 +638,10 @@ private:
     std::atomic<int32_t> grantedSampleRate_{0};
 
     std::atomic<bool>* interruptedFlag_{nullptr};
+
+    // Callback jitter tracking (RT-safe: atomics + clock_gettime only)
+    std::atomic<int64_t> lastCallbackTimeUs_{0};
+    std::atomic<int64_t> callbackJitterUs_{0};      // peak abs deviation from expected interval
 
     AudioResamplerFloat playbackResampler_;
     // Buffer for mixer output before downsampling.

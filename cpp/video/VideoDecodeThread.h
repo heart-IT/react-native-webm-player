@@ -93,20 +93,32 @@ private:
     VideoDecoder* getOrCreateDecoderLocked() {
         if (decoder_) return decoder_.get();
 
+        auto& metrics = frameQueue_->metrics();
+
         // Backoff after error-driven decoder reset to prevent HAL thrashing
         if (decoderResetTimeUs_ > 0) {
             int64_t elapsed = nowUs() - decoderResetTimeUs_;
-            if (elapsed < decoderResetBackoffUs_) return nullptr;
+            if (elapsed < decoderResetBackoffUs_) {
+                metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::BackingOff), std::memory_order_relaxed);
+                return nullptr;
+            }
             decoderResetTimeUs_ = 0;
         }
 
-        if (!VideoSurfaceRegistry::instance().hasSurface()) return nullptr;
+        if (!VideoSurfaceRegistry::instance().hasSurface()) {
+            metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::WaitingSurface), std::memory_order_relaxed);
+            return nullptr;
+        }
         if (!decoderFactory_) return nullptr;
 
         auto dec = decoderFactory_();
-        if (!dec) return nullptr;
+        if (!dec) {
+            metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::Failed), std::memory_order_relaxed);
+            return nullptr;
+        }
 
         decoder_ = std::move(dec);
+        metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::Active), std::memory_order_relaxed);
         return decoder_.get();
     }
 

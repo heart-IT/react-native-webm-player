@@ -573,6 +573,7 @@ private:
         quality.setProperty(rt, "gapsOver100ms", static_cast<double>(metrics.gapsOver100ms));
         quality.setProperty(rt, "gapsOver500ms", static_cast<double>(metrics.gapsOver500ms));
         quality.setProperty(rt, "plcFrames", static_cast<double>(metrics.plcFrames));
+        quality.setProperty(rt, "peakConsecutivePLC", static_cast<int>(metrics.peakConsecutivePLC));
         result.setProperty(rt, "quality", std::move(quality));
 
         jsi::Object session(rt);
@@ -596,6 +597,7 @@ private:
         audioOutput.setProperty(rt, "lastError", metrics.audioLastError);
         audioOutput.setProperty(rt, "actualSampleRate", metrics.actualSampleRate);
         audioOutput.setProperty(rt, "latencyUs", static_cast<double>(metrics.audioOutputLatencyUs));
+        audioOutput.setProperty(rt, "callbackJitterUs", static_cast<double>(metrics.callbackJitterUs));
         audioOutput.setProperty(rt, "running", metrics.audioOutputRunning);
         audioOutput.setProperty(rt, "interrupted", metrics.interrupted);
         audioOutput.setProperty(rt, "sampleRateValid", metrics.sampleRateValid);
@@ -683,6 +685,8 @@ private:
             video.setProperty(rt, "lastDecodeError", static_cast<int>(vm.lastDecodeError.load(std::memory_order_relaxed)));
             video.setProperty(rt, "queueDepth", static_cast<int>(videoQueue_->pendingFrames()));
             video.setProperty(rt, "needsKeyFrame", videoQueue_->isAwaitingKeyFrame());
+            video.setProperty(rt, "keyFrameRequests", static_cast<double>(vm.keyFrameRequests.load(std::memory_order_relaxed)));
+            video.setProperty(rt, "decoderState", static_cast<int>(vm.decoderState.load(std::memory_order_relaxed)));
         } else {
             video.setProperty(rt, "framesReceived", 0.0); video.setProperty(rt, "framesDecoded", 0.0);
             video.setProperty(rt, "framesDropped", 0.0); video.setProperty(rt, "decodeErrors", 0.0);
@@ -694,7 +698,7 @@ private:
             video.setProperty(rt, "gapsOver50ms", 0.0); video.setProperty(rt, "gapsOver100ms", 0.0);
             video.setProperty(rt, "gapsOver500ms", 0.0); video.setProperty(rt, "driftPpm", 0.0);
             video.setProperty(rt, "decodeLatencyUs", 0.0); video.setProperty(rt, "lastDecodeTimeUs", 0.0);
-            video.setProperty(rt, "lastDecodeError", 0); video.setProperty(rt, "queueDepth", 0); video.setProperty(rt, "needsKeyFrame", false);
+            video.setProperty(rt, "lastDecodeError", 0); video.setProperty(rt, "queueDepth", 0); video.setProperty(rt, "needsKeyFrame", false); video.setProperty(rt, "keyFrameRequests", 0.0); video.setProperty(rt, "decoderState", 0);
         }
         video.setProperty(rt, "avSyncOffsetUs", syncCoordinator_
             ? static_cast<double>(syncCoordinator_->currentOffsetUs()) : 0.0);

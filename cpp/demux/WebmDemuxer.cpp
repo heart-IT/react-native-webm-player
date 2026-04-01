@@ -438,6 +438,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 }
 
                 if (trackNum == trackInfo_.audioTrackNum) {
+                    if (ptsUs == lastEmittedAudioPtsUs_) continue;
                     AudioPacket pkt;
                     pkt.data = frameData;
                     pkt.size = static_cast<size_t>(frame.len);
@@ -445,11 +446,13 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.durationUs = kDefaultAudioDurationUs;
                     result.audioPackets.push_back(pkt);
                     ++audioPacketsEmitted_;
+                    lastEmittedAudioPtsUs_ = ptsUs;
                 } else if (trackNum == trackInfo_.videoTrackNum) {
                     auto frameSize = static_cast<size_t>(frame.len);
                     if (frameSize > kMaxVideoFrameSize) {
                         continue;  // Reject oversized frames
                     }
+                    if (ptsUs == lastEmittedVideoPtsUs_) continue;
                     VideoPacket pkt;
                     pkt.data = frameData;
                     pkt.size = frameSize;
@@ -457,6 +460,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.isKeyFrame = block->IsKey();
                     result.videoPackets.push_back(pkt);
                     ++videoPacketsEmitted_;
+                    lastEmittedVideoPtsUs_ = ptsUs;
                 }
 
                 // Track the end of this frame for compaction
@@ -543,6 +547,8 @@ void WebmDemuxer::reset() {
     audioPacketsEmitted_ = 0;
     videoPacketsEmitted_ = 0;
     blockStallCount_ = 0;
+    lastEmittedAudioPtsUs_ = -1;
+    lastEmittedVideoPtsUs_ = -1;
     lastFeedTimeUs_ = 0;
     lastFeedIntervalUs_ = 0;
     feedJitterUs_ = 0;

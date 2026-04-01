@@ -152,6 +152,10 @@ private:
     uint64_t videoPacketsEmitted_ = 0;
     uint64_t blockStallCount_ = 0;
 
+    // PTS dedup: skip duplicate blocks from Hypercore retries
+    int64_t lastEmittedAudioPtsUs_ = -1;
+    int64_t lastEmittedVideoPtsUs_ = -1;
+
     // Feed arrival jitter tracking (network-layer signal)
     int64_t lastFeedTimeUs_ = 0;
     int64_t lastFeedIntervalUs_ = 0;

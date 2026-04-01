@@ -84,7 +84,10 @@ public:
 
             if (encodedQueue_.size() >= video_config::kDecodeQueueDepth) {
                 if (catchupPolicy_.load(std::memory_order_relaxed) == CatchupPolicy::DropToLive) {
-                    if (skipToLive()) deferredKeyFrameCb = keyFrameRequestCallback_;
+                    if (skipToLive()) {
+                        metrics_.keyFrameRequests.fetch_add(1, std::memory_order_relaxed);
+                        deferredKeyFrameCb = keyFrameRequestCallback_;
+                    }
                 } else {
                     bool droppedKeyFrame = encodedQueue_.front().isKeyFrame;
                     encodedQueue_.pop_front();
@@ -93,6 +96,7 @@ public:
                         encodedQueue_.clear();
                         needsKeyFrame_ = true;
                         metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
+                        metrics_.keyFrameRequests.fetch_add(1, std::memory_order_relaxed);
                         deferredKeyFrameCb = keyFrameRequestCallback_;
                     }
                 }
@@ -210,6 +214,7 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         needsKeyFrame_ = true;
         metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
+        metrics_.keyFrameRequests.fetch_add(1, std::memory_order_relaxed);
         encodedQueue_.clear();
     }
 

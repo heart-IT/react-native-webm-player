@@ -358,6 +358,10 @@ public:
 
         ++consecutivePLCFrames_;
         metrics_.plcFrames.fetch_add(1, std::memory_order_relaxed);
+        uint32_t prev = metrics_.peakConsecutivePLC.load(std::memory_order_relaxed);
+        if (consecutivePLCFrames_ > prev) {
+            metrics_.peakConsecutivePLC.store(consecutivePLCFrames_, std::memory_order_relaxed);
+        }
 
         frame->sampleCount = static_cast<uint32_t>(decoded) * static_cast<uint32_t>(config::audio::kChannels);
         frame->ptsUs = lastDecodedPtsUs_.load(std::memory_order_relaxed) +

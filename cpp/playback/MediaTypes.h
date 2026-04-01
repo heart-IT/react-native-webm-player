@@ -65,6 +65,9 @@ struct StreamMetrics {
     std::atomic<uint64_t> fastPathSwitches{0};       // fast-path ↔ resampler mode transitions
     std::atomic<uint64_t> catchupDeadZoneSnaps{0};   // catchup ratio snapped to unity
 
+    // PLC quality tracking
+    std::atomic<uint32_t> peakConsecutivePLC{0};      // high-water mark of consecutive PLC frames
+
     // Inter-frame delivery gap tracking (pushEncodedFrame timing)
     std::atomic<int64_t> maxInterFrameGapUs{0};      // largest gap between consecutive pushes
     std::atomic<uint64_t> gapsOver50ms{0};            // delivery gaps > 50ms
@@ -81,6 +84,7 @@ struct StreamMetrics {
         plcFrames.store(0, std::memory_order_relaxed);
         samplesOutput.store(0, std::memory_order_relaxed);
         ptsDiscontinuities.store(0, std::memory_order_relaxed);
+        peakConsecutivePLC.store(0, std::memory_order_relaxed);
         fastPathSwitches.store(0, std::memory_order_relaxed);
         catchupDeadZoneSnaps.store(0, std::memory_order_relaxed);
         maxInterFrameGapUs.store(0, std::memory_order_relaxed);

@@ -7,6 +7,15 @@
 
 namespace media {
 
+// Observable state of the video decoder lifecycle
+enum class VideoDecoderState : uint8_t {
+    NotCreated = 0,      // Decoder not yet created (initial state)
+    WaitingSurface = 1,  // No render surface registered
+    BackingOff = 2,      // Post-error backoff before retry
+    Active = 3,          // Decoder created and decoding
+    Failed = 4           // Factory returned null
+};
+
 struct EncodedVideoFrame {
     std::vector<uint8_t> data;
     int64_t ptsUs = 0;
@@ -44,6 +53,10 @@ struct VideoStreamMetrics {
 
     // Keyframe recovery state
     std::atomic<bool> needsKeyFrame{true};
+    std::atomic<uint64_t> keyFrameRequests{0};
+
+    // Decoder lifecycle state (for triage: why is decode not happening?)
+    std::atomic<uint8_t> decoderState{static_cast<uint8_t>(VideoDecoderState::NotCreated)};
 
     void reset() noexcept {
         framesReceived.store(0, std::memory_order_relaxed);
@@ -68,6 +81,8 @@ struct VideoStreamMetrics {
         lastDecodeTimeUs.store(0, std::memory_order_relaxed);
         lastDecodeError.store(0, std::memory_order_relaxed);
         needsKeyFrame.store(true, std::memory_order_relaxed);
+        keyFrameRequests.store(0, std::memory_order_relaxed);
+        decoderState.store(static_cast<uint8_t>(VideoDecoderState::NotCreated), std::memory_order_relaxed);
     }
 };
 

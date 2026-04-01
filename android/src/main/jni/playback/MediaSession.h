@@ -48,6 +48,7 @@ struct SessionMetrics {
     int32_t actualSampleRate = 0;
     bool sampleRateValid = true;
     int64_t audioOutputLatencyUs = 0;
+    int64_t callbackJitterUs = 0;
     bool audioOutputRunning = false;
     bool interrupted = false;
 
@@ -67,6 +68,7 @@ struct SessionMetrics {
     uint64_t underruns = 0;
     uint64_t ptsDiscontinuities = 0;
     uint64_t plcFrames = 0;
+    uint32_t peakConsecutivePLC = 0;
     bool muted = false;
 
     // Clock drift compensation metrics
@@ -400,6 +402,7 @@ public:
             m.underruns = sm.underruns.load(std::memory_order_relaxed);
             m.ptsDiscontinuities = sm.ptsDiscontinuities.load(std::memory_order_relaxed);
             m.plcFrames = sm.plcFrames.load(std::memory_order_relaxed);
+            m.peakConsecutivePLC = sm.peakConsecutivePLC.load(std::memory_order_relaxed);
             m.muted = muted_;
 
             // Bluetooth crackling diagnostics
@@ -448,6 +451,7 @@ public:
             m.actualSampleRate = audio->actualSampleRate();
             m.sampleRateValid = audio->isSampleRateValid();
             m.audioOutputLatencyUs = audio->totalLatencyUs();
+            m.callbackJitterUs = audio->callbackJitterUs();
             m.audioOutputRunning = audio->isRunning();
         }
         m.interrupted = !AudioSessionManager::instance().canPlayAudio();

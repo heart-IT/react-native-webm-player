@@ -14,6 +14,7 @@
 #include "../../cpp/common/ThreadAffinity.h"
 #include "../../cpp/common/MediaLog.h"
 #include "../../cpp/common/MediaConfig.h"
+#include "../../cpp/common/MediaTime.h"
 #include "../../cpp/common/CompilerHints.h"
 #include "../../cpp/common/TimedJoin.h"
 #include "../../cpp/common/AudioResampler.h"
@@ -118,6 +119,10 @@ public:
         return restartCount_.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] int64_t callbackJitterUs() const noexcept {
+        return callbackJitterUs_.load(std::memory_order_relaxed);
+    }
+
     [[nodiscard]] LatencyMode grantedLatencyMode() const noexcept {
         return grantedLatencyMode_.load(std::memory_order_relaxed);
     }
@@ -193,6 +198,10 @@ private:
 
     // Cached interrupted flag for RT-safe access (avoids singleton on audio callback)
     std::atomic<bool>* interruptedFlag_{nullptr};
+
+    // Callback jitter tracking (RT-safe: atomics + mach_absolute_time only)
+    std::atomic<int64_t> lastCallbackTimeUs_{0};
+    std::atomic<int64_t> callbackJitterUs_{0};
 
 public:
     void setInterruptedFlag(std::atomic<bool>* flag) noexcept { interruptedFlag_ = flag; }
