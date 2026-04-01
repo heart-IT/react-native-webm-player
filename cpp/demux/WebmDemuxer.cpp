@@ -272,21 +272,22 @@ bool WebmDemuxer::parseTracks() {
     }
 
     // Load headers (tracks, seek head, info, etc.)
-    // Returns 0 on success, negative on error/need more data
+    // For streaming WebM (unknown segment size), Load() may return
+    // E_BUFFER_NOT_FULL even after tracks and clusters are parsed.
+    // Check if tracks are available regardless of return value.
     long ret = segment_->Load();
-    if (ret < 0) {
-        if (ret == mkvparser::E_BUFFER_NOT_FULL) {
-            return false;  // Need more data
-        }
-        parseError_ = "segment load failed";
-        if (++parseRetryCount_ >= kMaxParseRetries) {
-            state_ = ParseState::Error;
-        }
-        return false;
-    }
 
     const mkvparser::Tracks* tracks = segment_->GetTracks();
-    if (!tracks) {
+    if (!tracks || tracks->GetTracksCount() == 0) {
+        if (ret < 0) {
+            if (ret == mkvparser::E_BUFFER_NOT_FULL) {
+                return false;  // Need more data
+            }
+            parseError_ = "segment load failed";
+            if (++parseRetryCount_ >= kMaxParseRetries) {
+                state_ = ParseState::Error;
+            }
+        }
         return false;
     }
 

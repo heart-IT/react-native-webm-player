@@ -126,3 +126,12 @@ else()
     )
     target_include_directories(fuzz_demuxer PRIVATE ${LIBWEBM_ROOT})
 endif()
+
+# ---- End-to-end demux test (real WebM stream, validates full pipeline) ----
+add_executable(test_e2e_demux
+    test_e2e_demux.cpp
+    ${CPP_ROOT}/demux/WebmDemuxer.cpp
+    ${LIBWEBM_ROOT}/mkvparser/mkvparser.cc
+)
+target_include_directories(test_e2e_demux PRIVATE ${LIBWEBM_ROOT})
+target_link_libraries(test_e2e_demux PRIVATE ${OPUS_LIBRARY})
