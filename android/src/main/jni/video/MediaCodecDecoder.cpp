@@ -7,25 +7,23 @@ namespace videomodule {
 
 bool MediaCodecDecoder::initialize(ANativeWindow* surface) {
     if (!surface) return false;
+    if (surface_ == surface) return true;
 
     if (surface_) {
         shutdown();
     }
     surface_ = surface;
 
-    // Configure VP9 decoder immediately — no SPS/PPS handshake needed
-    if (!configureCodec(media::video_config::kDefaultWidth, media::video_config::kDefaultHeight)) {
-        ANativeWindow_release(surface_);
-        surface_ = nullptr;
-        return false;
-    }
-
+    // Defer codec configuration until first keyframe provides actual dimensions.
+    // VP9 keyframe headers contain resolution — no benefit to pre-configuring
+    // at a default size that may require an immediate reconfigure.
     initialized_.store(true, std::memory_order_release);
     return true;
 }
 
 void MediaCodecDecoder::shutdown() {
     initialized_.store(false, std::memory_order_release);
+    configured_.store(false, std::memory_order_release);
     if (codec_) {
         AMediaCodec_stop(codec_);
         AMediaCodec_delete(codec_);
@@ -35,7 +33,6 @@ void MediaCodecDecoder::shutdown() {
         ANativeWindow_release(surface_);
         surface_ = nullptr;
     }
-    configured_.store(false, std::memory_order_relaxed);
 }
 
 bool MediaCodecDecoder::configureCodec(int width, int height) {
@@ -93,9 +90,8 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
                                      int64_t ptsUs, bool isKeyFrame) {
     if (!initialized_.load(std::memory_order_acquire)) return false;
     if (!data || size == 0) return false;
-    if (!configured_.load(std::memory_order_acquire) || !codec_) return false;
 
-    // Parse VP9 keyframe header for early dimension detection and validation
+    // Parse VP9 keyframe header for dimension detection and validation
     if (isKeyFrame) {
         auto info = media::vp9::parseHeader(data, size);
         if (!info.valid || info.width <= 0 || info.height <= 0) {
@@ -105,13 +101,15 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
         }
         int curW = decodedWidth_.load(std::memory_order_relaxed);
         int curH = decodedHeight_.load(std::memory_order_relaxed);
-        if (info.width != curW || info.height != curH) {
-            MEDIA_LOG_I("MediaCodecDecoder: VP9 resolution %dx%d -> %dx%d, reconfiguring",
-                        curW, curH, info.width, info.height);
-            if (!configureCodec(info.width, info.height)) {
-                return false;
-            }
+        if (!configured_.load(std::memory_order_acquire) || !codec_ ||
+            info.width != curW || info.height != curH) {
+            MEDIA_LOG_I("MediaCodecDecoder: VP9 %sconfigure %dx%d",
+                        configured_.load(std::memory_order_relaxed) ? "re" : "",
+                        info.width, info.height);
+            if (!configureCodec(info.width, info.height)) return false;
         }
+    } else if (!configured_.load(std::memory_order_acquire) || !codec_) {
+        return false;
     }
 
     ssize_t inputIdx = AMediaCodec_dequeueInputBuffer(codec_, 0);
@@ -131,6 +129,7 @@ bool MediaCodecDecoder::submitFrame(const uint8_t* data, size_t size,
                                                            0, size, static_cast<uint64_t>(ptsUs), flags);
     if (status != AMEDIA_OK) {
         ++consecutiveErrors_;
+        lastError_.store(static_cast<int>(status), std::memory_order_relaxed);
         MEDIA_LOG_E("MediaCodecDecoder: queueInputBuffer failed: %d (consecutive=%d)",
                     static_cast<int>(status), consecutiveErrors_);
         if (consecutiveErrors_ >= kMaxConsecutiveErrors) {

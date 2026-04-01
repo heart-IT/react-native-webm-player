@@ -108,6 +108,10 @@ public:
     HealthWatchdog(const HealthWatchdog&) = delete;
     HealthWatchdog& operator=(const HealthWatchdog&) = delete;
 
+    void requestWindowReset() noexcept {
+        windowResetRequested_.store(true, std::memory_order_release);
+    }
+
     void evaluate() noexcept {
         int64_t now = nowUs();
 
@@ -115,6 +119,15 @@ public:
         if (now - lastEventTimeUs_ < config::health::kMinEventIntervalUs) return;
 
         HealthSnapshot snap = readMetrics_();
+
+        // Service deferred window reset (called from JS thread via resetStream)
+        if (windowResetRequested_.load(std::memory_order_acquire)) {
+            windowResetRequested_.store(false, std::memory_order_relaxed);
+            windowStartUs_ = now;
+            windowBaseSnapshot_ = snap;
+            currentHealth_.store(StreamHealth::Buffering, std::memory_order_relaxed);
+            lastPublishedHealth_.store(StreamHealth::Buffering, std::memory_order_relaxed);
+        }
 
         // When paused, suppress health evaluation — don't fire transitions
         if (snap.paused) return;
@@ -143,17 +156,16 @@ public:
                                            videoRecvDelta, videoDecDelta, videoDropDelta);
 
         // Only fire on transition
-        if (newHealth == currentHealth_) return;
-
-        StreamHealth oldHealth = currentHealth_;
+        StreamHealth oldHealth = currentHealth_.load(std::memory_order_relaxed);
+        if (newHealth == oldHealth) return;
         int64_t absOffset = snap.avSyncOffsetUs >= 0 ? snap.avSyncOffsetUs : -snap.avSyncOffsetUs;
         const char* detail = transitionDetail(oldHealth, newHealth,
                                                underrunDelta, errorDelta, gapDelta,
                                                resetDelta, absOffset, videoDropDelta,
                                                snap.streamStatus);
 
-        currentHealth_ = newHealth;
-        lastPublishedHealth_.store(newHealth, std::memory_order_relaxed);
+        currentHealth_.store(newHealth, std::memory_order_relaxed);
+        lastPublishedHealth_.store(newHealth, std::memory_order_release);
         lastEventTimeUs_ = now;
 
         MEDIA_LOG_I("HealthWatchdog: %s → %s (%s)",
@@ -167,11 +179,11 @@ public:
     }
 
     [[nodiscard]] StreamHealth currentHealth() const noexcept {
-        return currentHealth_;
+        return currentHealth_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] StreamHealth publishedHealth() const noexcept {
-        return lastPublishedHealth_.load(std::memory_order_relaxed);
+        return lastPublishedHealth_.load(std::memory_order_acquire);
     }
 
     // Pure classification functions — public for testability, no state dependency.
@@ -265,11 +277,12 @@ private:
     HealthMetricsReader readMetrics_;
     HealthCallback callback_;
 
-    StreamHealth currentHealth_{StreamHealth::Buffering};
+    std::atomic<StreamHealth> currentHealth_{StreamHealth::Buffering};
     std::atomic<StreamHealth> lastPublishedHealth_{StreamHealth::Buffering};
     int64_t lastEventTimeUs_{0};
     int64_t windowStartUs_{0};
     HealthSnapshot windowBaseSnapshot_{};
+    std::atomic<bool> windowResetRequested_{false};
 };
 
 }  // namespace media

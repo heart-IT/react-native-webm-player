@@ -77,6 +77,9 @@ include_directories(
     ${PROJECT_ROOT}/ios
 )
 
+# libwebm mkvparser source (vendored)
+set(LIBWEBM_ROOT "${CPP_ROOT}/third_party/libwebm")
+
 # ---- LSAN test (leak + memory tests) ----
 add_executable(test_lsan
     test_lsan.cpp
@@ -92,7 +95,10 @@ target_link_libraries(test_tsan PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 # ---- UBSAN test (undefined behavior) ----
 add_executable(test_ubsan
     test_ubsan.cpp
+    ${CPP_ROOT}/demux/WebmDemuxer.cpp
+    ${LIBWEBM_ROOT}/mkvparser/mkvparser.cc
 )
+target_include_directories(test_ubsan PRIVATE ${LIBWEBM_ROOT})
 target_link_libraries(test_ubsan PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 
 # ---- Route handler test (pure C++ reactive routing, no Opus/DSP dependencies) ----
@@ -101,8 +107,6 @@ add_executable(test_route_handler
 )
 
 # ---- Demuxer fuzz test ----
-# libwebm mkvparser source (vendored)
-set(LIBWEBM_ROOT "${CPP_ROOT}/third_party/libwebm")
 
 option(FUZZ "Build with libFuzzer instrumentation (requires clang)" OFF)
 

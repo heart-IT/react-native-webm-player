@@ -83,11 +83,6 @@ public:
 
     AVSyncCoordinator& syncCoordinator() noexcept { return syncCoordinator_; }
 
-    void resetRenderClock() noexcept {
-        renderClock_.reset();
-        lastAnchorTimeUs_ = 0;
-    }
-
     void wake() noexcept {
         wakeVersion_.fetch_add(1, std::memory_order_release);
         wakeVersion_.notify_one();
@@ -200,6 +195,7 @@ private:
                             syncCoordinator_.onVideoRender(frame.ptsUs, nowUs());
                         } else {
                             frameQueue_->metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
+                            frameQueue_->metrics().lastDecodeError.store(dec->lastError(), std::memory_order_relaxed);
                             if (++consecutiveErrors_ >= kMaxConsecutiveErrors) {
                                 MEDIA_LOG_E("VideoDecodeThread: %d consecutive errors, resetting decoder (backoff=%lldms)",
                                             consecutiveErrors_, static_cast<long long>(decoderResetBackoffUs_ / 1000));

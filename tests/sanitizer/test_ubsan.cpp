@@ -115,7 +115,7 @@ TEST(jitter_estimator_zero_interval) {
     jitter.reset();
     // Feed packets with zero interval (degenerate case)
     for (int i = 0; i < 50; i++) {
-        jitter.onPacket(0, 0);
+        jitter.onSample(0, 0);
     }
     int64_t target = jitter.bufferTargetUs();
     ASSERT_TRUE(target >= config::jitter::kMinBufferUs);
@@ -132,7 +132,7 @@ TEST(jitter_estimator_large_deviation) {
         // Extreme jitter: +/-500ms
         int64_t jit = (i % 2 == 0) ? 500000 : -500000;
         arrival += 20000 + jit;
-        jitter.onPacket(pts, arrival);
+        jitter.onSample(pts, arrival);
     }
     int64_t target = jitter.bufferTargetUs();
     ASSERT_TRUE(target >= config::jitter::kMinBufferUs);
@@ -142,9 +142,9 @@ TEST(jitter_estimator_negative_timestamps) {
     JitterEstimator jitter;
     jitter.reset();
     // Negative timestamps (e.g., delta wrapping)
-    jitter.onPacket(-100000, -80000);
-    jitter.onPacket(-80000, -60000);
-    jitter.onPacket(-60000, -40000);
+    jitter.onSample(-100000, -80000);
+    jitter.onSample(-80000, -60000);
+    jitter.onSample(-60000, -40000);
     int64_t target = jitter.bufferTargetUs();
     ASSERT_TRUE(target >= config::jitter::kMinBufferUs);
 }
@@ -157,14 +157,14 @@ TEST(jitter_estimator_spike_detection) {
     for (int i = 0; i < 50; i++) {
         pts += 20000;
         arrival += 20000;  // Perfect timing
-        jitter.onPacket(pts, arrival);
+        jitter.onSample(pts, arrival);
     }
     int64_t baselineTarget = jitter.bufferTargetUs();
     ASSERT_TRUE(baselineTarget >= config::jitter::kMinBufferUs);
     // Now send a spike: one packet 200ms late
     pts += 20000;
     arrival += 220000;  // 200ms late (spike)
-    jitter.onPacket(pts, arrival);
+    jitter.onSample(pts, arrival);
     int64_t spikeTarget = jitter.bufferTargetUs();
     // Spike should immediately raise the target above baseline
     ASSERT_TRUE(spikeTarget >= baselineTarget);
@@ -173,7 +173,7 @@ TEST(jitter_estimator_spike_detection) {
     for (int i = 0; i < 10; i++) {
         pts += 20000;
         arrival += 20000;  // Normal timing
-        jitter.onPacket(pts, arrival);
+        jitter.onSample(pts, arrival);
     }
     int64_t holdTarget = jitter.bufferTargetUs();
     // Should still be elevated (hold period is 2 seconds, we only sent 10 * 20ms = 200ms)
@@ -188,12 +188,12 @@ TEST(jitter_estimator_spike_overflow_guard) {
     for (int i = 0; i < 10; i++) {
         pts += 20000;
         arrival += 20000;
-        jitter.onPacket(pts, arrival);
+        jitter.onSample(pts, arrival);
     }
     // Spike with max reasonable jitter
     pts += 20000;
     arrival += 20000 + 500000;  // 500ms late
-    jitter.onPacket(pts, arrival);
+    jitter.onSample(pts, arrival);
     int64_t target = jitter.bufferTargetUs();
     ASSERT_TRUE(target >= config::jitter::kMinBufferUs);
     ASSERT_TRUE(target <= config::jitter::kMaxBufferUs);
@@ -745,19 +745,19 @@ TEST(video_queue_needs_keyframe_on_bind) {
 TEST(video_jitter_zero_interval) {
     media::VideoJitterEstimator jitter;
     // Two frames at same PTS — should not crash or produce NaN
-    jitter.onFrame(1000000, 1000000, true);
-    jitter.onFrame(1000000, 1000000, false);
+    jitter.onSample(1000000, 1000000, true);
+    jitter.onSample(1000000, 1000000, false);
     ASSERT_TRUE(jitter.jitterUs() >= 0);
     ASSERT_TRUE(std::isfinite(static_cast<double>(jitter.bufferTargetUs())));
 }
 TEST(video_jitter_large_deviation) {
     media::VideoJitterEstimator jitter;
     // Normal frames then a huge gap — should clamp, not overflow
-    jitter.onFrame(0, 1000000, true);
-    jitter.onFrame(33333, 1033333, false);
-    jitter.onFrame(66666, 1066666, false);
+    jitter.onSample(0, 1000000, true);
+    jitter.onSample(33333, 1033333, false);
+    jitter.onSample(66666, 1066666, false);
     // 500ms gap (network stall)
-    jitter.onFrame(100000, 1566666, false);
+    jitter.onSample(100000, 1566666, false);
     ASSERT_TRUE(jitter.jitterUs() >= 0);
     int64_t target = jitter.bufferTargetUs();
     ASSERT_TRUE(target >= media::video_config::jitter::kMinBufferUs);
@@ -766,12 +766,12 @@ TEST(video_jitter_large_deviation) {
 TEST(video_jitter_keyframe_excluded) {
     media::VideoJitterEstimator jitter;
     // Keyframes should not inflate jitter estimate (they're larger, arrive later)
-    jitter.onFrame(0, 1000000, true);
-    jitter.onFrame(33333, 1033333, false);
-    jitter.onFrame(66666, 1066666, false);
+    jitter.onSample(0, 1000000, true);
+    jitter.onSample(33333, 1033333, false);
+    jitter.onSample(66666, 1066666, false);
     int64_t normalJitter = jitter.jitterUs();
     // Large keyframe arrival delay
-    jitter.onFrame(100000, 1200000, true);
+    jitter.onSample(100000, 1200000, true);
     int64_t afterKeyframe = jitter.jitterUs();
     // Jitter should not spike due to keyframe
     ASSERT_TRUE(afterKeyframe <= normalJitter * 3 + 10000);
@@ -976,6 +976,257 @@ TEST(clip_buffer_available_range) {
     float range = buf.availableRangeSeconds();
     // Should be approximately 9 seconds (10 clusters, 1s apart)
     ASSERT_TRUE(range > 7.0f && range < 11.0f);
+}
+
+// ============================================================
+// INT64 PTS boundary: timestamps near overflow
+// ============================================================
+TEST(jitter_estimator_int64_boundary_pts) {
+    JitterEstimator jitter;
+    jitter.reset();
+    // Feed timestamps near INT64_MAX — verify no overflow in delta computation
+    constexpr int64_t kBase = INT64_MAX - 1000000;
+    for (int i = 0; i < 50; i++) {
+        int64_t pts = kBase + static_cast<int64_t>(i) * 20000;
+        int64_t arr = kBase + static_cast<int64_t>(i) * 20000 + 500;
+        // These may be rejected by maxForwardJump guards, which is fine —
+        // the important thing is no UB (signed overflow) in the arithmetic
+        jitter.onSample(pts, arr);
+    }
+    int64_t target = jitter.bufferTargetUs();
+    ASSERT_TRUE(target >= config::jitter::kMinBufferUs);
+    ASSERT_TRUE(target <= config::jitter::kMaxBufferUs);
+    ASSERT_TRUE(jitter.jitterUs() >= 0);
+}
+
+TEST(jitter_estimator_zero_delta_pts) {
+    JitterEstimator jitter;
+    jitter.reset();
+    // Duplicate PTS values — delta=0 should be handled without division by zero
+    for (int i = 0; i < 20; i++) {
+        jitter.onSample(100000, static_cast<int64_t>(i) * 20000 + 1000);
+    }
+    int64_t target = jitter.bufferTargetUs();
+    ASSERT_TRUE(target >= config::jitter::kMinBufferUs);
+    ASSERT_TRUE(target <= config::jitter::kMaxBufferUs);
+}
+
+TEST(video_jitter_int64_boundary_pts) {
+    media::VideoJitterEstimator jitter;
+    jitter.reset();
+    constexpr int64_t kBase = INT64_MAX - 2000000;
+    for (int i = 0; i < 30; i++) {
+        int64_t pts = kBase + static_cast<int64_t>(i) * 33333;
+        int64_t arr = kBase + static_cast<int64_t>(i) * 33333 + 1000;
+        jitter.onSample(pts, arr);
+    }
+    int64_t target = jitter.bufferTargetUs();
+    ASSERT_TRUE(target >= media::video_config::jitter::kMinBufferUs);
+    ASSERT_TRUE(target <= media::video_config::jitter::kMaxBufferUs);
+}
+
+// ============================================================
+// VideoRenderClock: extreme PTS values and anchor arithmetic
+// ============================================================
+TEST(video_render_clock_int64_boundary) {
+    media::VideoRenderClock clock;
+    // Anchor with large PTS values — verify no overflow
+    constexpr int64_t kLargePts = INT64_MAX / 2;
+    constexpr int64_t kLargeLocal = INT64_MAX / 2;
+    clock.anchor(kLargePts, kLargeLocal, 66000);
+    // scheduledRenderTime computes: anchorLocal + (pts - anchorPts) + bufferTarget
+    // With pts == anchorPts, result == anchorLocal + bufferTarget
+    int64_t render = clock.scheduledRenderTime(kLargePts);
+    ASSERT_TRUE(render == kLargeLocal + 66000);
+    // Small delta from anchor — should be well-defined
+    int64_t render2 = clock.scheduledRenderTime(kLargePts + 33333);
+    ASSERT_TRUE(render2 == kLargeLocal + 33333 + 66000);
+}
+
+TEST(video_render_clock_negative_pts_delta) {
+    media::VideoRenderClock clock;
+    clock.anchor(100000, 200000, 50000);
+    // PTS before anchor — negative delta
+    int64_t render = clock.scheduledRenderTime(50000);
+    // (50000 - 100000) + 200000 + 50000 = 200000
+    ASSERT_TRUE(render == 200000);
+}
+
+TEST(video_render_clock_playback_rate_extremes) {
+    media::VideoRenderClock clock;
+    clock.anchor(0, 1000000, 66000);
+    // 2x playback rate — PTS delta is halved in local time
+    clock.setPlaybackRate(2.0f);
+    int64_t render = clock.scheduledRenderTime(100000);
+    // delta=100000, scaled = 100000/2.0 = 50000, result = 1000000 + 50000 + 66000
+    ASSERT_TRUE(render > 1000000);
+    // 0.5x playback rate — PTS delta is doubled
+    clock.setPlaybackRate(0.5f);
+    int64_t render2 = clock.scheduledRenderTime(100000);
+    // delta=100000, scaled = 100000/0.5 = 200000, result = 1000000 + 200000 + 66000
+    ASSERT_TRUE(render2 > render);
+}
+
+// ============================================================
+// DriftCompensator: extreme cumulative drift values
+// ============================================================
+TEST(drift_compensator_int64_boundary) {
+    DriftCompensator comp;
+    // Large drift values — verify no overflow in PPM calculation
+    comp.updateDrift(INT64_MAX / 1000, 30000000, 10000);
+    float ratio = comp.currentRatio();
+    ASSERT_TRUE(std::isfinite(ratio));
+    ASSERT_TRUE(ratio > 0.0f);
+    // Negative extreme
+    comp.updateDrift(INT64_MIN / 1000, 30000000, 10000);
+    ratio = comp.currentRatio();
+    ASSERT_TRUE(std::isfinite(ratio));
+    ASSERT_TRUE(ratio > 0.0f);
+}
+
+// ============================================================
+// CatchupController: extreme buffer values
+// ============================================================
+TEST(catchup_controller_int64_boundary) {
+    CatchupController ctrl;
+    // Massive excess — verify no overflow in gain calculation
+    float ratio = ctrl.update(INT64_MAX / 2, 60000);
+    ASSERT_TRUE(std::isfinite(ratio));
+    ASSERT_TRUE(ratio >= 1.0f);
+    ASSERT_TRUE(ratio <= config::catchup::kMaxSpeedupRatio);
+    // Zero target — avoid division issues
+    ratio = ctrl.update(100000, 0);
+    ASSERT_TRUE(std::isfinite(ratio));
+    // Negative buffered — should clamp
+    ratio = ctrl.update(-100000, 60000);
+    ASSERT_TRUE(std::isfinite(ratio));
+}
+
+// ============================================================
+// WebmDemuxer: incremental parse boundary conditions
+// ============================================================
+#include "demux/WebmDemuxer.h"
+
+TEST(demuxer_empty_feed) {
+    media::demux::WebmDemuxer demuxer;
+    // Null data
+    auto& r1 = demuxer.feedData(nullptr, 0);
+    ASSERT_TRUE(r1.audioPackets.empty());
+    ASSERT_TRUE(r1.videoPackets.empty());
+    ASSERT_TRUE(r1.error.empty());
+    // Zero length
+    uint8_t data[1] = {0};
+    auto& r2 = demuxer.feedData(data, 0);
+    ASSERT_TRUE(r2.audioPackets.empty());
+    ASSERT_TRUE(r2.error.empty());
+}
+
+TEST(demuxer_garbage_bytes) {
+    media::demux::WebmDemuxer demuxer;
+    // Feed random garbage — should not crash, should report error after retries
+    uint8_t garbage[4096];
+    for (size_t i = 0; i < sizeof(garbage); i++) {
+        garbage[i] = static_cast<uint8_t>((i * 7 + 13) % 256);
+    }
+    // Feed in chunks to exercise incremental parse
+    for (int i = 0; i < 10; i++) {
+        auto& result = demuxer.feedData(garbage, sizeof(garbage));
+        (void)result;
+    }
+    // After enough garbage, demuxer should be in error state
+    auto& final_result = demuxer.feedData(garbage, 1);
+    // Either still trying to parse or in error state — both are valid
+    ASSERT_TRUE(final_result.audioPackets.empty());
+    ASSERT_TRUE(final_result.videoPackets.empty());
+}
+
+TEST(demuxer_single_byte_feeds) {
+    media::demux::WebmDemuxer demuxer;
+    // Feed data one byte at a time — exercises incremental parse edge cases
+    uint8_t zeros[256] = {};
+    for (size_t i = 0; i < sizeof(zeros); i++) {
+        auto& result = demuxer.feedData(&zeros[i], 1);
+        ASSERT_TRUE(result.audioPackets.empty());
+        ASSERT_TRUE(result.videoPackets.empty());
+    }
+}
+
+TEST(demuxer_reset_cycle) {
+    media::demux::WebmDemuxer demuxer;
+    // Feed garbage, reset, feed again — verify clean recovery
+    uint8_t data[512];
+    for (size_t i = 0; i < sizeof(data); i++) data[i] = static_cast<uint8_t>(i);
+    for (int cycle = 0; cycle < 5; cycle++) {
+        demuxer.feedData(data, sizeof(data));
+        demuxer.reset();
+    }
+    // After reset, demuxer should accept new data cleanly
+    auto& result = demuxer.feedData(data, sizeof(data));
+    ASSERT_TRUE(result.audioPackets.empty());
+}
+
+// ============================================================
+// VideoFrameQueue: extreme PTS values
+// ============================================================
+TEST(video_queue_extreme_pts) {
+    media::VideoFrameQueue queue;
+    queue.reset();
+    uint8_t data[32] = {};
+    // INT64_MAX PTS — verify no overflow in gap tracking
+    ASSERT_TRUE(queue.pushEncodedFrame(data, sizeof(data), 0, true));
+    ASSERT_TRUE(queue.pushEncodedFrame(data, sizeof(data), INT64_MAX / 2, false));
+    auto& m = queue.metrics();
+    int64_t maxGap = m.maxInterFrameGapUs.load(std::memory_order_relaxed);
+    ASSERT_TRUE(maxGap >= 0);
+}
+
+// ============================================================
+// AudioResampler: extreme rate ratios
+// ============================================================
+TEST(audio_resampler_extreme_rates) {
+    AudioResamplerFloat resampler;
+    // Very low → very high (8kHz → 48kHz = 6x upsample)
+    ASSERT_TRUE(resampler.init(8000, 48000));
+    float input[160] = {};
+    for (int i = 0; i < 160; i++) input[i] = 0.5f;
+    float output[960] = {};
+    size_t written = resampler.process(output, input, 160);
+    ASSERT_TRUE(written > 0);
+    ASSERT_TRUE(written <= 960);
+    for (size_t i = 0; i < written; i++) {
+        ASSERT_TRUE(std::isfinite(output[i]));
+    }
+    resampler.destroy();
+    // High → low (48kHz → 8kHz = 6x downsample)
+    ASSERT_TRUE(resampler.init(48000, 8000));
+    float output2[160] = {};
+    written = resampler.process(output2, input, 160);
+    ASSERT_TRUE(written <= 160);
+    for (size_t i = 0; i < written; i++) {
+        ASSERT_TRUE(std::isfinite(output2[i]));
+    }
+    resampler.destroy();
+}
+
+// ============================================================
+// AudioLevelMeter: extreme sample values
+// ============================================================
+TEST(level_meter_extreme_values) {
+    media::AudioLevelMeter meter;
+    // NaN samples — should not propagate
+    float nan_samples[4] = { 0.5f, NAN, 0.3f, INFINITY };
+    meter.update(nan_samples, 4);
+    // Peak/RMS may be infinite due to INFINITY input, but should not crash
+    float peak = meter.peakLevel();
+    (void)peak;  // value may be inf, but no UB
+    // Very large samples
+    float big_samples[8] = {};
+    for (int i = 0; i < 8; i++) big_samples[i] = 1e30f;
+    meter.silence();
+    meter.update(big_samples, 8);
+    float dbfs = media::AudioLevelMeter::toDbfs(0.0f);
+    ASSERT_TRUE(std::isfinite(dbfs));
+    ASSERT_TRUE(dbfs <= -90.0f);  // 0.0 → -100 dBFS (or similar floor)
 }
 
 // ============================================================

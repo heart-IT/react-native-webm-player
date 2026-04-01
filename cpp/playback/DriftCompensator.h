@@ -45,7 +45,10 @@ public:
             return;
         }
 
-        int64_t driftPpm = (cumulativeDriftUs * 1'000'000) / measurementWindowUs;
+        // Compute PPM as (drift / window) * 1M, avoiding overflow in the multiply.
+        // Division first loses sub-ppm precision, which is fine for drift compensation.
+        int64_t driftPpm = (cumulativeDriftUs / measurementWindowUs) * 1'000'000
+                         + (cumulativeDriftUs % measurementWindowUs) * 1'000'000 / measurementWindowUs;
         driftPpm = std::clamp(driftPpm,
                               static_cast<int64_t>(-drift_config::kMaxDriftPpm),
                               static_cast<int64_t>(drift_config::kMaxDriftPpm));

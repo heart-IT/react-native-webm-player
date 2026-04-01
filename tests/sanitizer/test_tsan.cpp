@@ -192,7 +192,7 @@ TEST(jitter_estimator_concurrent_update_read) {
         for (int i = 0; i < kPackets; i++) {
             pts += 20000;
             arrival += 20000 + ((i * 7) % 5000 - 2000); // jitter
-            jitter.onPacket(pts, arrival);
+            jitter.onSample(pts, arrival);
         }
         done.store(true, std::memory_order_release);
     });
@@ -221,7 +221,7 @@ TEST(jitter_estimator_spike_concurrent) {
             // Every 50th packet is a spike (200ms late)
             int64_t jit = (i % 50 == 0) ? 200000 : ((i * 7) % 5000 - 2000);
             arrival += 20000 + jit;
-            jitter.onPacket(pts, arrival);
+            jitter.onSample(pts, arrival);
         }
         done.store(true, std::memory_order_release);
     });
@@ -683,7 +683,7 @@ TEST(video_jitter_concurrent_update_read) {
         int seq = 0;
         while (!stop.load(std::memory_order_acquire)) {
             bool isKey = (seq % 15 == 0);
-            jitter.onFrame(pts, arrivalUs, isKey);
+            jitter.onSample(pts, arrivalUs, isKey);
             pts += 33333;
             arrivalUs += 33333 + (seq % 5) * 1000;
             ++seq;
@@ -949,6 +949,379 @@ TEST(audio_level_meter_concurrent_update_read) {
 
     ASSERT_TRUE(meter.peakLevel() > 0.0f);
     ASSERT_TRUE(meter.rmsLevel() > 0.0f);
+}
+
+// ============================================================
+// SPSC data integrity: verify frames arrive in order with correct data
+// ============================================================
+TEST(frame_queue_spsc_data_integrity) {
+    DecodedAudioPool pool;
+    DecodedAudioQueue queue;
+    constexpr int kFrames = 500;
+    std::atomic<bool> producer_done{false};
+    std::atomic<int> consumed{0};
+    std::atomic<bool> order_ok{true};
+
+    std::thread producer([&] {
+        for (int i = 0; i < kFrames; i++) {
+            while (true) {
+                auto tok = pool.acquire();
+                if (tok) {
+                    tok->sampleCount = static_cast<uint32_t>(i);
+                    tok->ptsUs = static_cast<int64_t>(i) * 20000;
+                    tok->samples[0] = static_cast<float>(i);
+                    if (queue.push(std::move(tok))) break;
+                }
+                std::this_thread::yield();
+            }
+        }
+        producer_done.store(true, std::memory_order_release);
+    });
+
+    std::thread consumer([&] {
+        int expected = 0;
+        while (expected < kFrames) {
+            auto tok = queue.pop();
+            if (tok) {
+                if (tok->ptsUs != static_cast<int64_t>(expected) * 20000) {
+                    order_ok.store(false, std::memory_order_relaxed);
+                }
+                if (tok->samples[0] != static_cast<float>(expected)) {
+                    order_ok.store(false, std::memory_order_relaxed);
+                }
+                expected++;
+            } else if (producer_done.load(std::memory_order_acquire) && queue.empty()) {
+                break;
+            } else {
+                std::this_thread::yield();
+            }
+        }
+        consumed.store(expected, std::memory_order_relaxed);
+    });
+
+    producer.join();
+    consumer.join();
+    ASSERT_EQ(consumed.load(), kFrames);
+    ASSERT_TRUE(order_ok.load());
+    queue.clear();
+    ASSERT_EQ(pool.available(), config::audio::kDecodePoolSize);
+}
+
+// ============================================================
+// Metrics monotonicity: counters never decrease under concurrent access
+// ============================================================
+TEST(stream_metrics_monotonic) {
+    StreamMetrics metrics;
+    constexpr int kUpdates = 10000;
+    std::atomic<bool> done{false};
+    std::atomic<bool> monotonic{true};
+
+    std::thread writer([&] {
+        for (int i = 0; i < kUpdates; i++) {
+            metrics.framesReceived.fetch_add(1, std::memory_order_relaxed);
+            metrics.samplesOutput.fetch_add(960, std::memory_order_relaxed);
+            if (i % 10 == 0) metrics.framesDropped.fetch_add(1, std::memory_order_relaxed);
+            if (i % 50 == 0) metrics.underruns.fetch_add(1, std::memory_order_relaxed);
+        }
+        done.store(true, std::memory_order_release);
+    });
+
+    std::thread reader([&] {
+        uint64_t prevRecv = 0, prevOut = 0;
+        while (!done.load(std::memory_order_acquire)) {
+            uint64_t recv = metrics.framesReceived.load(std::memory_order_relaxed);
+            uint64_t out = metrics.samplesOutput.load(std::memory_order_relaxed);
+            if (recv < prevRecv || out < prevOut) {
+                monotonic.store(false, std::memory_order_relaxed);
+            }
+            prevRecv = recv;
+            prevOut = out;
+            std::this_thread::yield();
+        }
+    });
+
+    writer.join();
+    reader.join();
+    ASSERT_TRUE(monotonic.load());
+    ASSERT_EQ(metrics.framesReceived.load(), static_cast<uint64_t>(kUpdates));
+    ASSERT_EQ(metrics.samplesOutput.load(), static_cast<uint64_t>(kUpdates) * 960);
+}
+
+// ============================================================
+// JitterEstimator: concurrent reads produce bounded values
+// ============================================================
+TEST(jitter_estimator_bounded_output) {
+    JitterEstimator jitter;
+    jitter.reset();
+    constexpr int kPackets = 3000;
+    std::atomic<bool> done{false};
+    std::atomic<bool> in_bounds{true};
+
+    std::thread arrival([&] {
+        int64_t pts = 0;
+        int64_t arr = 0;
+        for (int i = 0; i < kPackets; i++) {
+            pts += 20000;
+            arr += 20000 + ((i * 13) % 8000 - 3000);
+            jitter.onSample(pts, arr);
+        }
+        done.store(true, std::memory_order_release);
+    });
+
+    std::thread reader([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            int64_t target = jitter.bufferTargetUs();
+            int64_t j = jitter.jitterUs();
+            if (target < config::jitter::kMinBufferUs || target > config::jitter::kMaxBufferUs) {
+                in_bounds.store(false, std::memory_order_relaxed);
+            }
+            if (j < 0) {
+                in_bounds.store(false, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    arrival.join();
+    reader.join();
+    ASSERT_TRUE(in_bounds.load());
+    // After feeding, buffer target should reflect jitter
+    int64_t finalTarget = jitter.bufferTargetUs();
+    ASSERT_TRUE(finalTarget >= config::jitter::kMinBufferUs);
+    ASSERT_TRUE(finalTarget <= config::jitter::kMaxBufferUs);
+}
+
+// ============================================================
+// VideoFrameQueue: FIFO integrity — PTS order preserved
+// ============================================================
+TEST(video_queue_fifo_integrity) {
+    media::VideoFrameQueue queue;
+    queue.reset();
+    constexpr int kFrames = 100;
+    std::atomic<bool> producer_done{false};
+    std::atomic<bool> order_ok{true};
+    std::atomic<int> consumed{0};
+
+    std::thread producer([&]() {
+        for (int i = 0; i < kFrames; ++i) {
+            uint8_t data[32] = {};
+            data[0] = static_cast<uint8_t>(i & 0xFF);
+            data[1] = static_cast<uint8_t>((i >> 8) & 0xFF);
+            bool isKey = (i == 0);
+            int64_t pts = static_cast<int64_t>(i) * 33333;
+            queue.pushEncodedFrame(data, sizeof(data), pts, isKey);
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        producer_done.store(true, std::memory_order_release);
+    });
+
+    std::thread consumer([&]() {
+        media::EncodedVideoFrame frame;
+        int64_t lastPts = -1;
+        int count = 0;
+        while (count < kFrames) {
+            if (queue.popEncodedFrame(frame)) {
+                if (frame.ptsUs <= lastPts) {
+                    order_ok.store(false, std::memory_order_relaxed);
+                }
+                int expected_i = static_cast<int>(frame.ptsUs / 33333);
+                uint8_t expectedByte0 = static_cast<uint8_t>(expected_i & 0xFF);
+                if (frame.data[0] != expectedByte0) {
+                    order_ok.store(false, std::memory_order_relaxed);
+                }
+                lastPts = frame.ptsUs;
+                count++;
+            } else if (producer_done.load(std::memory_order_acquire)) {
+                break;
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+        consumed.store(count, std::memory_order_relaxed);
+    });
+
+    producer.join();
+    consumer.join();
+    ASSERT_TRUE(consumed.load() > 0);
+    ASSERT_TRUE(order_ok.load());
+}
+
+// ============================================================
+// HealthWatchdog: concurrent evaluate + metric updates
+// (production pattern: decode thread evaluates while JS feeds data)
+// ============================================================
+#include "common/HealthWatchdog.h"
+
+TEST(health_watchdog_concurrent_evaluate_metrics) {
+    std::atomic<uint64_t> underruns{0};
+    std::atomic<uint64_t> errors{0};
+    std::atomic<uint64_t> framesRecv{0};
+    std::atomic<uint64_t> samplesOut{0};
+    std::atomic<bool> audioRunning{true};
+    std::atomic<int> transitions{0};
+
+    auto readMetrics = [&]() -> media::HealthSnapshot {
+        media::HealthSnapshot snap;
+        snap.underruns = underruns.load(std::memory_order_relaxed);
+        snap.decodeErrors = errors.load(std::memory_order_relaxed);
+        snap.audioFramesReceived = framesRecv.load(std::memory_order_relaxed);
+        snap.audioSamplesOutput = samplesOut.load(std::memory_order_relaxed);
+        snap.audioOutputRunning = audioRunning.load(std::memory_order_relaxed);
+        return snap;
+    };
+
+    auto onHealth = [&](const media::HealthEvent& event) {
+        transitions.fetch_add(1, std::memory_order_relaxed);
+        (void)event;
+    };
+
+    media::HealthWatchdog watchdog(readMetrics, onHealth);
+    std::atomic<bool> stop{false};
+
+    // Simulate JS thread updating metrics
+    std::thread jsThread([&]() {
+        for (int i = 0; i < 5000; i++) {
+            framesRecv.fetch_add(1, std::memory_order_relaxed);
+            samplesOut.fetch_add(960, std::memory_order_relaxed);
+            if (i % 200 == 0) underruns.fetch_add(1, std::memory_order_relaxed);
+            if (i % 500 == 0) errors.fetch_add(1, std::memory_order_relaxed);
+        }
+        stop.store(true, std::memory_order_release);
+    });
+
+    // Simulate decode thread evaluating health
+    std::thread decodeThread([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            watchdog.evaluate();
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        watchdog.evaluate();
+    });
+
+    jsThread.join();
+    decodeThread.join();
+
+    // Health state should be valid
+    auto health = watchdog.currentHealth();
+    ASSERT_TRUE(health >= media::StreamHealth::Healthy && health <= media::StreamHealth::Failed);
+    auto published = watchdog.publishedHealth();
+    ASSERT_TRUE(published >= media::StreamHealth::Healthy && published <= media::StreamHealth::Failed);
+}
+
+// ============================================================
+// DecodeThread: multi-thread wake (multiple JS sources)
+// ============================================================
+TEST(decode_thread_multi_wake) {
+    DecodedAudioPool pool;
+    AudioDecodeChannel channel(pool);
+    DecodeThread dt(channel);
+    ASSERT_TRUE(dt.start());
+
+    constexpr int kWakersCount = 4;
+    constexpr int kWakesPerThread = 200;
+    std::atomic<bool> go{false};
+    SpinBarrier barrier(kWakersCount + 1);
+
+    std::vector<std::thread> wakers;
+    for (int t = 0; t < kWakersCount; ++t) {
+        wakers.emplace_back([&]() {
+            barrier.wait();
+            for (int i = 0; i < kWakesPerThread; ++i) {
+                dt.wake();
+            }
+        });
+    }
+
+    barrier.wait();  // release all wakers simultaneously
+    for (auto& w : wakers) w.join();
+
+    // Thread should still be responsive after many concurrent wakes
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(dt.isRunning());
+    ASSERT_TRUE(dt.isResponsive());
+    dt.stop();
+}
+
+// ============================================================
+// VideoFrameQueue: concurrent reset + push (stream switch)
+// ============================================================
+TEST(video_queue_reset_push_integrity) {
+    media::VideoFrameQueue queue;
+    std::atomic<bool> stop{false};
+    std::atomic<int> pushCount{0};
+    std::atomic<int> resetCount{0};
+
+    // Simulates JS thread pushing frames
+    std::thread pusher([&]() {
+        uint8_t data[64] = {};
+        int seq = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            bool isKey = (seq % 15 == 0);
+            if (queue.pushEncodedFrame(data, sizeof(data),
+                                        static_cast<int64_t>(seq) * 33333, isKey)) {
+                pushCount.fetch_add(1, std::memory_order_relaxed);
+            }
+            seq++;
+            std::this_thread::yield();
+        }
+    });
+
+    // Simulates stream switch: periodic reset
+    std::thread resetter([&]() {
+        for (int i = 0; i < 50; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            queue.reset();
+            resetCount.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    resetter.join();
+    stop.store(true, std::memory_order_release);
+    pusher.join();
+
+    ASSERT_TRUE(pushCount.load() > 0);
+    ASSERT_EQ(resetCount.load(), 50);
+    // Queue should be in a valid state — pending frames count must be non-negative
+    // (keyframe state depends on timing of last reset vs last push)
+    ASSERT_TRUE(queue.pendingFrames() <= media::video_config::kDecodeQueueDepth);
+}
+
+// ============================================================
+// VideoStreamMetrics: monotonic under concurrent access
+// ============================================================
+TEST(video_metrics_monotonic) {
+    media::VideoStreamMetrics metrics;
+    constexpr int kUpdates = 10000;
+    std::atomic<bool> done{false};
+    std::atomic<bool> monotonic{true};
+
+    std::thread writer([&] {
+        for (int i = 0; i < kUpdates; i++) {
+            metrics.framesReceived.fetch_add(1, std::memory_order_relaxed);
+            metrics.framesDecoded.fetch_add(1, std::memory_order_relaxed);
+            if (i % 20 == 0) metrics.framesDropped.fetch_add(1, std::memory_order_relaxed);
+            if (i % 100 == 0) metrics.decodeErrors.fetch_add(1, std::memory_order_relaxed);
+        }
+        done.store(true, std::memory_order_release);
+    });
+
+    std::thread reader([&] {
+        uint64_t prevRecv = 0, prevDec = 0;
+        while (!done.load(std::memory_order_acquire)) {
+            uint64_t recv = metrics.framesReceived.load(std::memory_order_relaxed);
+            uint64_t dec = metrics.framesDecoded.load(std::memory_order_relaxed);
+            if (recv < prevRecv || dec < prevDec) {
+                monotonic.store(false, std::memory_order_relaxed);
+            }
+            prevRecv = recv;
+            prevDec = dec;
+            std::this_thread::yield();
+        }
+    });
+
+    writer.join();
+    reader.join();
+    ASSERT_TRUE(monotonic.load());
+    ASSERT_EQ(metrics.framesReceived.load(), static_cast<uint64_t>(kUpdates));
 }
 
 // ============================================================

@@ -27,6 +27,7 @@ class VideoFrameQueue {
 public:
     using WakeCallback = std::function<void()>;
     using ResetCallback = std::function<void()>;
+    using KeyFrameRequestCallback = std::function<void()>;
 
     VideoFrameQueue() {
         recycleBuf_.reserve(video_config::kMaxEncodedFrameSize);
@@ -41,6 +42,11 @@ public:
     void setResetCallback(ResetCallback cb) noexcept {
         std::lock_guard<std::mutex> lk(mtx_);
         resetCallback_ = std::move(cb);
+    }
+
+    void setKeyFrameRequestCallback(KeyFrameRequestCallback cb) noexcept {
+        std::lock_guard<std::mutex> lk(mtx_);
+        keyFrameRequestCallback_ = std::move(cb);
     }
 
     void reset() noexcept {
@@ -62,72 +68,78 @@ public:
         if (!data || size == 0) return false;
         if (size > video_config::kMaxEncodedFrameSize) return false;
 
-        std::lock_guard<std::mutex> lk(mtx_);
+        WakeCallback deferredWakeCb;
+        KeyFrameRequestCallback deferredKeyFrameCb;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
 
-        if (needsKeyFrame_ && !isKeyFrame) {
-            metrics_.framesDropped.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        if (isKeyFrame) {
-            needsKeyFrame_ = false;
-            metrics_.needsKeyFrame.store(false, std::memory_order_relaxed);
-        }
-
-        if (encodedQueue_.size() >= video_config::kDecodeQueueDepth) {
-            if (catchupPolicy_.load(std::memory_order_relaxed) == CatchupPolicy::DropToLive) {
-                skipToLive();
-            } else {
-                bool droppedKeyFrame = encodedQueue_.front().isKeyFrame;
-                encodedQueue_.pop_front();
+            if (needsKeyFrame_ && !isKeyFrame) {
                 metrics_.framesDropped.fetch_add(1, std::memory_order_relaxed);
-                // Dropping a keyframe invalidates all subsequent P-frames
-                if (droppedKeyFrame) {
-                    encodedQueue_.clear();
-                    needsKeyFrame_ = true;
-                    metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
+                return false;
+            }
+            if (isKeyFrame) {
+                needsKeyFrame_ = false;
+                metrics_.needsKeyFrame.store(false, std::memory_order_relaxed);
+            }
+
+            if (encodedQueue_.size() >= video_config::kDecodeQueueDepth) {
+                if (catchupPolicy_.load(std::memory_order_relaxed) == CatchupPolicy::DropToLive) {
+                    if (skipToLive()) deferredKeyFrameCb = keyFrameRequestCallback_;
+                } else {
+                    bool droppedKeyFrame = encodedQueue_.front().isKeyFrame;
+                    encodedQueue_.pop_front();
+                    metrics_.framesDropped.fetch_add(1, std::memory_order_relaxed);
+                    if (droppedKeyFrame) {
+                        encodedQueue_.clear();
+                        needsKeyFrame_ = true;
+                        metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
+                        deferredKeyFrameCb = keyFrameRequestCallback_;
+                    }
                 }
             }
-        }
 
-        int64_t arrivalUs = nowUs();
+            int64_t arrivalUs = nowUs();
 
-        // Track inter-frame delivery gap
-        if (lastArrivalUs_ > 0) {
-            int64_t gapUs = arrivalUs - lastArrivalUs_;
-            int64_t curMax = metrics_.maxInterFrameGapUs.load(std::memory_order_relaxed);
-            while (gapUs > curMax &&
-                   !metrics_.maxInterFrameGapUs.compare_exchange_weak(
-                       curMax, gapUs, std::memory_order_relaxed)) {}
-            if (gapUs > 500000) {
-                metrics_.gapsOver500ms.fetch_add(1, std::memory_order_relaxed);
-                metrics_.gapsOver100ms.fetch_add(1, std::memory_order_relaxed);
-                metrics_.gapsOver50ms.fetch_add(1, std::memory_order_relaxed);
-            } else if (gapUs > 100000) {
-                metrics_.gapsOver100ms.fetch_add(1, std::memory_order_relaxed);
-                metrics_.gapsOver50ms.fetch_add(1, std::memory_order_relaxed);
-            } else if (gapUs > 50000) {
-                metrics_.gapsOver50ms.fetch_add(1, std::memory_order_relaxed);
+            // Track inter-frame delivery gap
+            if (lastArrivalUs_ > 0) {
+                int64_t gapUs = arrivalUs - lastArrivalUs_;
+                int64_t curMax = metrics_.maxInterFrameGapUs.load(std::memory_order_relaxed);
+                if (gapUs > curMax) {
+                    metrics_.maxInterFrameGapUs.store(gapUs, std::memory_order_relaxed);
+                }
+                if (gapUs > 500000) {
+                    metrics_.gapsOver500ms.fetch_add(1, std::memory_order_relaxed);
+                    metrics_.gapsOver100ms.fetch_add(1, std::memory_order_relaxed);
+                    metrics_.gapsOver50ms.fetch_add(1, std::memory_order_relaxed);
+                } else if (gapUs > 100000) {
+                    metrics_.gapsOver100ms.fetch_add(1, std::memory_order_relaxed);
+                    metrics_.gapsOver50ms.fetch_add(1, std::memory_order_relaxed);
+                } else if (gapUs > 50000) {
+                    metrics_.gapsOver50ms.fetch_add(1, std::memory_order_relaxed);
+                }
             }
+            lastArrivalUs_ = arrivalUs;
+
+            jitter_.onSample(ptsUs, arrivalUs, isKeyFrame);
+            metrics_.driftPpm.store(jitter_.longTermDriftPpm(), std::memory_order_relaxed);
+
+            EncodedVideoFrame frame;
+            if (!recycleBuf_.empty()) {
+                frame.data = std::move(recycleBuf_);
+                frame.data.clear();
+            }
+            frame.data.assign(data, data + size);
+            frame.ptsUs = ptsUs;
+            frame.isKeyFrame = isKeyFrame;
+            encodedQueue_.push_back(std::move(frame));
+
+            metrics_.framesReceived.fetch_add(1, std::memory_order_relaxed);
+
+            deferredWakeCb = wakeCallback_;
         }
-        lastArrivalUs_ = arrivalUs;
-
-        jitter_.onFrame(ptsUs, arrivalUs, isKeyFrame);
-        metrics_.driftPpm.store(jitter_.longTermDriftPpm(), std::memory_order_relaxed);
-
-        EncodedVideoFrame frame;
-        if (!recycleBuf_.empty()) {
-            frame.data = std::move(recycleBuf_);
-            frame.data.clear();
-        }
-        frame.data.assign(data, data + size);
-        frame.ptsUs = ptsUs;
-        frame.isKeyFrame = isKeyFrame;
-        encodedQueue_.push_back(std::move(frame));
-
-        metrics_.framesReceived.fetch_add(1, std::memory_order_relaxed);
-
-        // Wake decode thread for immediate processing (avoid backoff latency)
-        if (wakeCallback_) wakeCallback_();
+        // Fire callbacks outside the lock to prevent deadlock if they re-enter
+        if (deferredWakeCb) deferredWakeCb();
+        if (deferredKeyFrameCb) deferredKeyFrameCb();
         return true;
     }
 
@@ -234,14 +246,17 @@ public:
 private:
     // Clear queue for DropToLive policy. Remaining non-keyframes would bypass
     // keyframe gating in pop paths, causing video corruption. Caller must hold mtx_.
-    void skipToLive() noexcept {
+    // Returns true if a keyframe request callback should be fired (outside the lock).
+    bool skipToLive() noexcept {
         size_t dropped = encodedQueue_.size();
         encodedQueue_.clear();
         if (dropped > 0) {
             metrics_.framesDropped.fetch_add(dropped, std::memory_order_relaxed);
             needsKeyFrame_ = true;
             metrics_.needsKeyFrame.store(true, std::memory_order_relaxed);
+            return true;
         }
+        return false;
     }
 
     mutable std::mutex mtx_;
@@ -249,6 +264,7 @@ private:
     bool needsKeyFrame_ = true;
     WakeCallback wakeCallback_;
     ResetCallback resetCallback_;
+    KeyFrameRequestCallback keyFrameRequestCallback_;
     int64_t lastArrivalUs_ = 0;
     VideoStreamMetrics metrics_;
     VideoJitterEstimator jitter_;
