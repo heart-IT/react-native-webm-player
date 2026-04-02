@@ -712,7 +712,7 @@ private:
         clip.setProperty(rt, "bufferCapacity", static_cast<double>(cm.bufferCapacity));
         clip.setProperty(rt, "bytesUsed", static_cast<double>(cm.bytesUsed));
         clip.setProperty(rt, "clusterCount", static_cast<double>(cm.clusterCount));
-        clip.setProperty(rt, "availableSeconds", static_cast<double>(clipBuffer_.availableRangeSeconds()));
+        clip.setProperty(rt, "availableSeconds", static_cast<double>(cm.availableSeconds));
         result.setProperty(rt, "clip", std::move(clip));
 
         return result;

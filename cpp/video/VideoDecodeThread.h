@@ -76,6 +76,9 @@ public:
         decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
         syncCoordinator_.reset();
         pendingClockReset_.store(false, std::memory_order_relaxed);
+        lastHeartbeatUs_.store(0, std::memory_order_relaxed);
+        watchdogTripped_.store(false, std::memory_order_relaxed);
+        watchdogTripCount_.store(0, std::memory_order_relaxed);
         frameQueue_ = nullptr;
         decoderFactory_ = nullptr;
     }
@@ -86,7 +89,20 @@ public:
         if (!running_.load(std::memory_order_acquire)) return false;
         int64_t heartbeat = lastHeartbeatUs_.load(std::memory_order_relaxed);
         if (heartbeat == 0) return true;
-        return (nowUs() - heartbeat) < config::thread::kHealthLogIntervalUs * 3;
+        bool responsive = (nowUs() - heartbeat) < config::thread::kHealthLogIntervalUs * 3;
+        if (!responsive && !watchdogTripped_.load(std::memory_order_relaxed)) {
+            watchdogTripped_.store(true, std::memory_order_relaxed);
+            watchdogTripCount_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return responsive;
+    }
+
+    [[nodiscard]] bool wasWatchdogTripped() const noexcept {
+        return watchdogTripped_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] uint32_t watchdogTripCount() const noexcept {
+        return watchdogTripCount_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] int64_t timeSinceLastHeartbeatUs() const noexcept {
@@ -243,6 +259,7 @@ private:
             }
 
             lastHeartbeatUs_.store(nowUs(), std::memory_order_relaxed);
+            watchdogTripped_.store(false, std::memory_order_relaxed);
 
             if (!didWork) {
                 consecutiveIdleCycles++;
@@ -280,6 +297,8 @@ private:
     std::atomic<bool> threadExited_{false};
     std::atomic<uint32_t> wakeVersion_{0};
     std::atomic<int64_t> lastHeartbeatUs_{0};
+    mutable std::atomic<bool> watchdogTripped_{false};
+    std::atomic<uint32_t> watchdogTripCount_{0};
     VideoFrameQueue* frameQueue_ = nullptr;
     DecoderFactory decoderFactory_;
 

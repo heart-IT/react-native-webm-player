@@ -140,6 +140,7 @@ public:
             ? static_cast<size_t>(totalBytesWritten_)
             : ringBuffer_.size();
         m.clusterCount = std::min(clusterCount_, config::clip::kMaxClusters);
+        m.availableSeconds = availableRangeSecondsLocked();
         return m;
     }
 
@@ -283,22 +284,7 @@ public:
     // How far back (in seconds) the buffer extends from the newest data.
     [[nodiscard]] float availableRangeSeconds() const noexcept {
         std::lock_guard<std::mutex> lk(mutex_);
-        if (clusterCount_ < 2) return 0.0f;
-
-        size_t count = std::min(clusterCount_, config::clip::kMaxClusters);
-        size_t newestIdx = (clusterWriteIdx_ + config::clip::kMaxClusters - 1) % config::clip::kMaxClusters;
-        int64_t newestPts = clusters_[newestIdx].firstPtsUs;
-
-        // Walk backward to find oldest valid cluster
-        int64_t oldestPts = newestPts;
-        for (size_t i = count; i > 0; --i) {
-            size_t idx = (clusterWriteIdx_ + config::clip::kMaxClusters - i) % config::clip::kMaxClusters;
-            const auto& c = clusters_[idx];
-            if (totalBytesWritten_ - c.byteCounter > ringBuffer_.size()) continue;
-            oldestPts = c.firstPtsUs;
-            break;
-        }
-        return static_cast<float>(newestPts - oldestPts) / 1'000'000.0f;
+        return availableRangeSecondsLocked();
     }
 
     void reset() noexcept {
@@ -327,6 +313,25 @@ public:
     }
 
 private:
+    // Caller must hold mutex_.
+    [[nodiscard]] float availableRangeSecondsLocked() const noexcept {
+        if (clusterCount_ < 2) return 0.0f;
+
+        size_t count = std::min(clusterCount_, config::clip::kMaxClusters);
+        size_t newestIdx = (clusterWriteIdx_ + config::clip::kMaxClusters - 1) % config::clip::kMaxClusters;
+        int64_t newestPts = clusters_[newestIdx].firstPtsUs;
+
+        int64_t oldestPts = newestPts;
+        for (size_t i = count; i > 0; --i) {
+            size_t idx = (clusterWriteIdx_ + config::clip::kMaxClusters - i) % config::clip::kMaxClusters;
+            const auto& c = clusters_[idx];
+            if (totalBytesWritten_ - c.byteCounter > ringBuffer_.size()) continue;
+            oldestPts = c.firstPtsUs;
+            break;
+        }
+        return static_cast<float>(newestPts - oldestPts) / 1'000'000.0f;
+    }
+
     struct ClusterRecord {
         size_t ringOffset = 0;
         size_t size = 0;

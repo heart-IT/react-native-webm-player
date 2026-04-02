@@ -240,37 +240,40 @@ public:
     [[nodiscard]] bool push(Token token) noexcept {
         if (UNLIKELY(!token)) return false;
 
-        // Relaxed for own variable (head_), acquire for other thread's variable (tail_).
-        // Ensures we see consumer's most recent tail update.
         size_t head = head_.load(std::memory_order_relaxed);
-        size_t tail = tail_.load(std::memory_order_acquire);
 
-        if (UNLIKELY(head - tail >= QueueSize)) {
-            return false;
+        // Fast path: check cached tail first to avoid cross-core atomic load.
+        // Only reload the real tail_ when the cached value says the queue is full.
+        if (UNLIKELY(head - tailCached_ >= QueueSize)) {
+            tailCached_ = tail_.load(std::memory_order_acquire);
+            if (head - tailCached_ >= QueueSize) {
+                return false;
+            }
         }
 
         slots_[head & kMask] = std::move(token);
-        // Release ensures slot write is visible before head increment
         head_.store(head + 1, std::memory_order_release);
         return true;
     }
 
     [[nodiscard]] Token pop() noexcept {
-        // Relaxed for own variable (tail_), acquire for other thread's variable (head_).
-        // Ensures we see producer's most recent head update and the slot contents.
         size_t tail = tail_.load(std::memory_order_relaxed);
-        size_t head = head_.load(std::memory_order_acquire);
-        if (tail >= head) return {};
+
+        // Fast path: check cached head first to avoid cross-core atomic load.
+        // Only reload the real head_ when the cached value says the queue is empty.
+        if (tail >= headCached_) {
+            headCached_ = head_.load(std::memory_order_acquire);
+            if (tail >= headCached_) return {};
+        }
 
         Token result = std::move(slots_[tail & kMask]);
-        // Release ensures slot read completes before tail increment
         tail_.store(tail + 1, std::memory_order_release);
         return result;
     }
 
     // Approximate count — may transiently over- or under-estimate by one frame.
-    // Relaxed loads mean a concurrent push/pop between the two reads can skew
-    // the result in either direction. Callers must tolerate this:
+    // Uses cached indices on fast path, falls back to atomic load.
+    // Callers must tolerate approximation:
     //   - workRemains check: false positive just retries next cycle (~500us)
     //   - needsPLC(): approximate is fine for threshold comparison
     [[nodiscard]] size_t count() const noexcept {
@@ -286,8 +289,14 @@ public:
 
 private:
     std::array<Token, QueueSize> slots_;
+    // Producer cache line: head_ (written by producer) + tailCached_ (producer-local).
+    // Colocated so producer only touches this one cache line on the fast path.
     alignas(config::kCacheLineSize) std::atomic<size_t> head_{0};
+    size_t tailCached_{0};
+    // Consumer cache line: tail_ (written by consumer) + headCached_ (consumer-local).
+    // Colocated so consumer only touches this one cache line on the fast path.
     alignas(config::kCacheLineSize) std::atomic<size_t> tail_{0};
+    size_t headCached_{0};
 };
 
 using DecodedAudioPool = FramePool<DecodedAudioFrame, config::audio::kDecodePoolSize>;
