@@ -227,6 +227,19 @@ export interface PlayerMetrics {
     /** Longest single stall in milliseconds. */
     longestStallMs: number
   }
+  /** Clip buffer / DVR state. */
+  clip: {
+    /** Clip ring buffer is active (setClipBufferDuration > 0). */
+    enabled: boolean
+    /** Total ring buffer capacity in bytes. */
+    bufferCapacity: number
+    /** Bytes currently stored in the ring buffer. */
+    bytesUsed: number
+    /** Number of WebM clusters retained in the buffer. */
+    clusterCount: number
+    /** Duration of buffered content in seconds (rewind range). */
+    availableSeconds: number
+  }
   /** WebM demuxer state. */
   demux: {
     /** Total bytes passed to the demuxer via feedData(). */
@@ -241,6 +254,10 @@ export interface PlayerMetrics {
     overflowCount: number
     /** Consecutive block parse failures triggering a stall error. */
     blockStallCount: number
+    /** Total transient parse errors (header, segment, tracks, blocks). */
+    parseErrorCount: number
+    /** Network-layer feed arrival jitter in microseconds (EWMA). */
+    feedJitterUs: number
     /** Current demuxer internal buffer size in bytes. */
     bufferBytes: number
     /** Demuxer parse state (0=WaitingForEBML, 1=WaitingForSegment, 2=ParsingTracks, 3=Streaming). */

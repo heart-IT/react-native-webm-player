@@ -17,6 +17,7 @@
 #include "common/MediaLog.h"
 #include "common/MediaTime.h"
 #include "common/ThreadAffinity.h"
+#include "common/MediaConfig.h"
 
 namespace media {
 
@@ -80,6 +81,19 @@ public:
     }
 
     bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
+
+    [[nodiscard]] bool isResponsive() const noexcept {
+        if (!running_.load(std::memory_order_acquire)) return false;
+        int64_t heartbeat = lastHeartbeatUs_.load(std::memory_order_relaxed);
+        if (heartbeat == 0) return true;
+        return (nowUs() - heartbeat) < config::thread::kHealthLogIntervalUs * 3;
+    }
+
+    [[nodiscard]] int64_t timeSinceLastHeartbeatUs() const noexcept {
+        int64_t heartbeat = lastHeartbeatUs_.load(std::memory_order_relaxed);
+        if (heartbeat == 0) return 0;
+        return nowUs() - heartbeat;
+    }
 
     AVSyncCoordinator& syncCoordinator() noexcept { return syncCoordinator_; }
 
@@ -228,14 +242,16 @@ private:
                 }
             }
 
+            lastHeartbeatUs_.store(nowUs(), std::memory_order_relaxed);
+
             if (!didWork) {
                 consecutiveIdleCycles++;
                 int64_t sleepUs;
-                if (consecutiveIdleCycles < 4) {
+                if (consecutiveIdleCycles < config::thread::kIdleCycleThreshold) {
                     sleepUs = video_config::kDecodeIdleSleepUs;
                 } else {
                     // Cap at shift 3 (max 16ms) to maintain 2:1 margin over 30fps frame interval
-                    int backoffShift = std::min(consecutiveIdleCycles - 4, 3);
+                    int backoffShift = std::min(consecutiveIdleCycles - config::thread::kIdleCycleThreshold, 3);
                     sleepUs = video_config::kDecodeIdleSleepUs << backoffShift;
                 }
                 waitForWakeOrTimeout(lastWakeVersion, sleepUs);
@@ -263,6 +279,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> threadExited_{false};
     std::atomic<uint32_t> wakeVersion_{0};
+    std::atomic<int64_t> lastHeartbeatUs_{0};
     VideoFrameQueue* frameQueue_ = nullptr;
     DecoderFactory decoderFactory_;
 

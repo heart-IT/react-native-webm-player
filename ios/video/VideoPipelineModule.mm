@@ -172,6 +172,8 @@ jsi::Value VideoPipelineModule::getMetrics(jsi::Runtime& rt) {
     result.setProperty(rt, "lastDecodeError", static_cast<int>(m.lastDecodeError.load(std::memory_order_relaxed)));
     result.setProperty(rt, "queueDepth", static_cast<int>(frameQueue_.pendingFrames()));
     result.setProperty(rt, "needsKeyFrame", frameQueue_.isAwaitingKeyFrame());
+    result.setProperty(rt, "decodeThreadResponsive", decodeThread_.isResponsive());
+    result.setProperty(rt, "timeSinceVideoHeartbeatMs", static_cast<double>(decodeThread_.timeSinceLastHeartbeatUs()) / 1000.0);
     return result;
 }
 

@@ -73,6 +73,10 @@ struct HealthSnapshot {
     uint64_t videoFramesDecoded = 0;
     uint64_t videoFramesDropped = 0;
 
+    // Pool pressure (< 25% available)
+    bool decodedPoolUnderPressure = false;
+    bool encodedPoolUnderPressure = false;
+
     // Stream context from integrator
     StreamStatus streamStatus = StreamStatus::Live;
 };
@@ -159,10 +163,11 @@ public:
         StreamHealth oldHealth = currentHealth_.load(std::memory_order_relaxed);
         if (newHealth == oldHealth) return;
         int64_t absOffset = snap.avSyncOffsetUs >= 0 ? snap.avSyncOffsetUs : -snap.avSyncOffsetUs;
+        bool poolPressure = snap.decodedPoolUnderPressure && snap.encodedPoolUnderPressure;
         const char* detail = transitionDetail(oldHealth, newHealth,
                                                underrunDelta, errorDelta, gapDelta,
                                                resetDelta, absOffset, videoDropDelta,
-                                               snap.streamStatus);
+                                               snap.streamStatus, poolPressure);
 
         currentHealth_.store(newHealth, std::memory_order_relaxed);
         lastPublishedHealth_.store(newHealth, std::memory_order_release);
@@ -229,6 +234,9 @@ public:
         // Video dropping > 10% of received frames
         if (videoRecvDelta > 0 && videoDropDelta * config::health::kVideoDropRateDenom > videoRecvDelta)
             return StreamHealth::Degraded;
+        // Both frame pools under pressure — capacity limit, degradation imminent
+        if (snap.decodedPoolUnderPressure && snap.encodedPoolUnderPressure)
+            return StreamHealth::Degraded;
 
         // Buffering: occasional issues, recovering
         if (underrunDelta > 0) return StreamHealth::Buffering;
@@ -243,7 +251,8 @@ public:
                                          uint64_t resetDelta,
                                          int64_t absAvSyncOffset,
                                          uint64_t videoDropDelta,
-                                         StreamStatus streamStatus = StreamStatus::Live) noexcept {
+                                         StreamStatus streamStatus = StreamStatus::Live,
+                                         bool poolPressure = false) noexcept {
         if (to == StreamHealth::Failed) {
             if (resetDelta >= config::health::kFailedResetThreshold)
                 return "failed: excessive decoder resets";
@@ -266,6 +275,8 @@ public:
                 return "degraded: A/V sync drift > 45ms";
             if (videoDropDelta > 0)
                 return "degraded: high video frame drop rate";
+            if (poolPressure)
+                return "degraded: frame pool pressure";
             return "degraded: video decode stalled";
         }
         if (to == StreamHealth::Buffering) return "rebuffering: audio underrun";

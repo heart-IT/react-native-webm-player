@@ -270,6 +270,7 @@ bool WebmDemuxer::parseEBMLHeader() {
         // Distinguish "need more data" from "bad stream"
         if (reader_->bufferSize() >= kMinBytesForEBML) {
             parseError_ = "invalid EBML header";
+            ++parseErrorCount_;
         }
         return false;
     }
@@ -286,6 +287,7 @@ bool WebmDemuxer::parseSegment() {
     if (ret != 0 || !rawSegment) {
         if (reader_->bufferSize() >= kMinBytesForSegment) {
             parseError_ = "invalid WebM segment";
+            ++parseErrorCount_;
         }
         return false;
     }
@@ -312,6 +314,7 @@ bool WebmDemuxer::parseTracks() {
                 return false;  // Need more data
             }
             parseError_ = "segment load failed";
+            ++parseErrorCount_;
             if (++parseRetryCount_ >= kMaxParseRetries) {
                 state_ = ParseState::Error;
             }
@@ -360,6 +363,7 @@ bool WebmDemuxer::parseTracks() {
 
     if (trackInfo_.audioTrackNum < 0 && trackInfo_.videoTrackNum < 0) {
         parseError_ = "no supported tracks (need A_OPUS or V_VP9)";
+        ++parseErrorCount_;
         state_ = ParseState::Error;
         return false;
     }
@@ -547,6 +551,7 @@ void WebmDemuxer::reset() {
     audioPacketsEmitted_ = 0;
     videoPacketsEmitted_ = 0;
     blockStallCount_ = 0;
+    parseErrorCount_ = 0;
     lastEmittedAudioPtsUs_ = -1;
     lastEmittedVideoPtsUs_ = -1;
     lastFeedTimeUs_ = 0;

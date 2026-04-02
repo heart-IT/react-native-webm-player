@@ -71,6 +71,8 @@ struct DemuxerMetrics {
     uint64_t overflowCount = 0;
     uint64_t partialDropCount = 0;  // partial accepts where trailing bytes were lost
     uint64_t blockStallCount = 0;   // consecutive block parse failures triggering stall error
+    uint64_t parseErrorCount = 0;   // total transient parse errors (header, segment, tracks, blocks)
+    int64_t feedJitterUs = 0;       // network-layer feed arrival jitter (EWMA)
     size_t bufferBytes = 0;         // current StreamReader buffer size
     ParseState parseState = ParseState::WaitingForEBML;
 };
@@ -115,6 +117,8 @@ public:
         m.overflowCount = overflowCount_;
         m.partialDropCount = partialDropCount_;
         m.blockStallCount = blockStallCount_;
+        m.parseErrorCount = parseErrorCount_;
+        m.feedJitterUs = feedJitterUs_;
         m.bufferBytes = bufferBytes();
         m.parseState = state_;
         return m;
@@ -154,6 +158,7 @@ private:
     uint64_t audioPacketsEmitted_ = 0;
     uint64_t videoPacketsEmitted_ = 0;
     uint64_t blockStallCount_ = 0;
+    uint64_t parseErrorCount_ = 0;
 
     // PTS dedup: skip duplicate blocks from Hypercore retries
     int64_t lastEmittedAudioPtsUs_ = -1;

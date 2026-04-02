@@ -147,6 +147,12 @@ add_executable(test_temporal_stress
 target_compile_definitions(test_temporal_stress PRIVATE PROJECT_ROOT="${PROJECT_ROOT}")
 target_link_libraries(test_temporal_stress PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 
+# ---- Audit proof tests (P1/P2 finding verification) ----
+add_executable(test_audit_proof
+    test_audit_proof.cpp
+)
+target_link_libraries(test_audit_proof PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
+
 # ---- HealthWatchdog state machine test ----
 add_executable(test_health_watchdog
     test_health_watchdog.cpp

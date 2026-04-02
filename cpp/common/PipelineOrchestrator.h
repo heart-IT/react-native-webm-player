@@ -655,6 +655,8 @@ private:
         demux.setProperty(rt, "overflowCount", static_cast<double>(dm.overflowCount));
         demux.setProperty(rt, "partialDropCount", static_cast<double>(dm.partialDropCount));
         demux.setProperty(rt, "blockStallCount", static_cast<double>(dm.blockStallCount));
+        demux.setProperty(rt, "parseErrorCount", static_cast<double>(dm.parseErrorCount));
+        demux.setProperty(rt, "feedJitterUs", static_cast<double>(dm.feedJitterUs));
         demux.setProperty(rt, "bufferBytes", static_cast<double>(dm.bufferBytes));
         demux.setProperty(rt, "parseState", static_cast<int>(dm.parseState));
         result.setProperty(rt, "demux", std::move(demux));
@@ -703,6 +705,15 @@ private:
         video.setProperty(rt, "avSyncOffsetUs", syncCoordinator_
             ? static_cast<double>(syncCoordinator_->currentOffsetUs()) : 0.0);
         result.setProperty(rt, "video", std::move(video));
+
+        jsi::Object clip(rt);
+        auto cm = clipBuffer_.clipMetrics();
+        clip.setProperty(rt, "enabled", cm.enabled);
+        clip.setProperty(rt, "bufferCapacity", static_cast<double>(cm.bufferCapacity));
+        clip.setProperty(rt, "bytesUsed", static_cast<double>(cm.bytesUsed));
+        clip.setProperty(rt, "clusterCount", static_cast<double>(cm.clusterCount));
+        clip.setProperty(rt, "availableSeconds", static_cast<double>(clipBuffer_.availableRangeSeconds()));
+        result.setProperty(rt, "clip", std::move(clip));
 
         return result;
     }
@@ -772,6 +783,8 @@ private:
                 snap.audioFramesReceived = m.framesReceived.load(std::memory_order_relaxed);
                 snap.audioSamplesOutput = m.samplesOutput.load(std::memory_order_relaxed);
             }
+            snap.decodedPoolUnderPressure = orch->session_.isDecodedPoolUnderPressure();
+            snap.encodedPoolUnderPressure = orch->session_.isEncodedPoolUnderPressure();
             snap.paused = orch->session_.isPaused();
             snap.bufferedDurationUs = orch->session_.bufferedDurationUs();
             snap.decodedDurationUs = orch->session_.decodedDurationUs();

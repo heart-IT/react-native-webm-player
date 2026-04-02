@@ -524,6 +524,8 @@ public:
     [[nodiscard]] const auto& audioMetrics() const noexcept { return audio_.metrics(); }
     [[nodiscard]] bool wasDecodeThreadDetached() const noexcept { return decodeThread_.wasDetached(); }
     [[nodiscard]] bool isAudioOutputRunning() const noexcept { return audioOutput_ && audioOutput_->isRunning(); }
+    [[nodiscard]] bool isDecodedPoolUnderPressure() const noexcept { return audio_.isDecodedPoolUnderPressure(); }
+    [[nodiscard]] bool isEncodedPoolUnderPressure() const noexcept { return audio_.isEncodedPoolUnderPressure(); }
     [[nodiscard]] int64_t bufferTargetUs() const noexcept { return audio_.bufferTarget(); }
     [[nodiscard]] int64_t bufferedDurationUs() const noexcept { return audio_.bufferedDurationUs(); }
     [[nodiscard]] int64_t decodedDurationUs() const noexcept { return audio_.decodedDurationUs(); }

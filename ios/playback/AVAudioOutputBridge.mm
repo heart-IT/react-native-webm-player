@@ -150,15 +150,13 @@ void AVAudioOutputBridge::scheduleRestart() noexcept {
 
 size_t AVAudioOutputBridge::renderAudio(float* output, size_t frameCount) noexcept {
     // Track in-flight callbacks for safe shutdown.
-    // notify_one on decrement-to-zero wakes waitForCallbackDrain() without
-    // adding a syscall in the common case (counter > 1 after subtract).
+    // Decrement is the only RT-path operation; waitForCallbackDrain() spin-polls
+    // to avoid any syscall (notify_one) on the audio callback thread.
     callbackInflight_.fetch_add(1, std::memory_order_relaxed);
     struct CallbackGuard {
         std::atomic<int32_t>& counter;
         ~CallbackGuard() {
-            if (counter.fetch_sub(1, std::memory_order_release) == 1) {
-                counter.notify_one();
-            }
+            counter.fetch_sub(1, std::memory_order_release);
         }
     } guard{callbackInflight_};
 
@@ -484,9 +482,10 @@ bool AVAudioOutputBridge::startAudioUnit() noexcept {
 }
 
 void AVAudioOutputBridge::waitForCallbackDrain() noexcept {
-    // Wait for all in-flight audio callbacks to complete before releasing resources.
-    // Uses C++20 atomic::wait() instead of sleep-polling: the CallbackGuard destructor
-    // calls notify_one() on decrement-to-zero, waking this waiter efficiently.
+    // Spin-poll for in-flight callbacks to complete before releasing resources.
+    // Pure user-space polling avoids any syscall on the RT audio callback thread
+    // (the previous notify_one() implementation required __ulock_wake on iOS).
+    // Drain completes within one audio callback period (~20ms) so spin is brief.
     auto deadline = std::chrono::steady_clock::now()
                   + std::chrono::microseconds(ios_audio::kCallbackDrainTimeoutUs);
     while (callbackInflight_.load(std::memory_order_acquire) > 0) {
@@ -495,8 +494,7 @@ void AVAudioOutputBridge::waitForCallbackDrain() noexcept {
                         callbackInflight_.load(std::memory_order_relaxed));
             break;
         }
-        callbackInflight_.wait(callbackInflight_.load(std::memory_order_relaxed),
-                               std::memory_order_acquire);
+        std::this_thread::yield();
     }
 }
 

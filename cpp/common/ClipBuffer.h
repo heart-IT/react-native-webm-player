@@ -123,6 +123,26 @@ public:
         }
     }
 
+    struct ClipMetrics {
+        bool enabled = false;
+        size_t bufferCapacity = 0;
+        size_t bytesUsed = 0;
+        size_t clusterCount = 0;
+        float availableSeconds = 0.0f;
+    };
+
+    [[nodiscard]] ClipMetrics clipMetrics() const noexcept {
+        std::lock_guard<std::mutex> lk(mutex_);
+        ClipMetrics m;
+        m.enabled = enabled_.load(std::memory_order_relaxed);
+        m.bufferCapacity = ringBuffer_.size();
+        m.bytesUsed = (totalBytesWritten_ < ringBuffer_.size())
+            ? static_cast<size_t>(totalBytesWritten_)
+            : ringBuffer_.size();
+        m.clusterCount = std::min(clusterCount_, config::clip::kMaxClusters);
+        return m;
+    }
+
     struct ClipResult {
         std::vector<uint8_t> data;
         std::string error;
