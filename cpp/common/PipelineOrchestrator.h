@@ -525,6 +525,10 @@ public:
                                 obj.setProperty(rt, "startUs", static_cast<double>(segCopy->startUs));
                                 obj.setProperty(rt, "endUs", static_cast<double>(segCopy->endUs));
                                 obj.setProperty(rt, "isFinal", segCopy->isFinal);
+                                double durSec = static_cast<double>(segCopy->endUs - segCopy->startUs) / 1'000'000.0;
+                                double agoSec = static_cast<double>(orch->session_.currentTimeUs() - segCopy->startUs) / 1'000'000.0;
+                                obj.setProperty(rt, "durationSeconds", durSec);
+                                obj.setProperty(rt, "agoSeconds", agoSec);
                                 cb->call(rt, std::move(obj));
                             });
                         });
