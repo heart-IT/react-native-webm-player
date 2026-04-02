@@ -400,15 +400,13 @@ public:
                                 auto clipData = std::make_shared<std::vector<uint8_t>>(std::move(clipResult.data));
                                 // Hold strong ref to keep module (and thus orch) alive until async callback completes
                                 auto threadOwner = weakOwner.lock();
-                                // Join previous clip thread with a short timeout to avoid
-                                // accumulating detached threads on rapid clip requests.
-                                // Fall back to detach if still running — it holds a strong
-                                // owner ref so the module stays alive.
+                                // Join completed clip thread, or reject if still running
                                 if (orch->clipThread_.joinable()) {
                                     if (orch->clipThreadDone_.load(std::memory_order_acquire)) {
                                         orch->clipThread_.join();
                                     } else {
-                                        orch->clipThread_.detach();
+                                        reject->call(rt, jsi::String::createFromUtf8(rt, "clip capture already in progress"));
+                                        return jsi::Value::undefined();
                                     }
                                 }
                                 orch->clipThreadDone_.store(false, std::memory_order_relaxed);
@@ -1029,6 +1027,7 @@ private:
                 const auto& result = demuxer_.feedData(livePendingBuffer_.data(), livePendingBuffer_.size());
                 dispatchPackets(result);
                 livePendingBuffer_.clear();
+                livePendingBuffer_.shrink_to_fit();
             }
             return jsi::Value(true);
         }

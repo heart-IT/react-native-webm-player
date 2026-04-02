@@ -28,7 +28,7 @@ public:
     // Factory creates a platform-specific decoder when a surface is available.
     using DecoderFactory = std::function<std::unique_ptr<VideoDecoder>()>;
 
-    VideoDecodeThread() = default;
+    VideoDecodeThread() : state_(std::make_unique<DecoderState>()) {}
     ~VideoDecodeThread() { stop(); }
 
     VideoDecodeThread(const VideoDecodeThread&) = delete;
@@ -39,7 +39,7 @@ public:
         if (!queue || !factory) return false;
 
         frameQueue_.store(queue, std::memory_order_relaxed);
-        decoderFactory_ = std::move(factory);
+        state_->decoderFactory = std::move(factory);
         queue->setWakeCallback([this]() { wake(); });
         queue->setResetCallback([this]() {
             pendingClockReset_.store(true, std::memory_order_release);
@@ -63,29 +63,33 @@ public:
         timedJoin(thread_, threadExited_, config::thread::kThreadJoinTimeoutMs, "VideoDecodeThread");
 
         if (!threadExited_.load(std::memory_order_acquire)) {
-            // Null out frameQueue_ so the detached thread stops accessing it
-            // on its next loop iteration (every access loads this atomic).
             frameQueue_.store(nullptr, std::memory_order_release);
-            MEDIA_LOG_E("VideoDecodeThread: thread detached, skipping resource destruction");
+            // Release decoder state ownership — the detached thread may still be
+            // mid-iteration accessing the mutex, decoder, render clock, etc.
+            // Leaking is intentional: use-after-free is worse than a small leak
+            // in this already-degraded state (thread refused to exit).
+            (void)state_.release();
+            state_ = std::make_unique<DecoderState>();
+            MEDIA_LOG_E("VideoDecodeThread: thread detached, decoder state leaked to prevent UAF");
             return;
         }
 
-        std::lock_guard<std::mutex> lk(decoderMtx_);
-        decoder_.reset();
-        renderClock_.reset();
-        fpsCounter_.reset();
-        lastAnchorTimeUs_ = 0;
-        consecutiveErrors_ = 0;
-        decoderResetTimeUs_ = 0;
-        decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
-        surfaceLostKeyFrameRequested_ = false;
+        std::lock_guard<std::mutex> lk(state_->mtx);
+        state_->decoder.reset();
+        state_->renderClock.reset();
+        state_->fpsCounter.reset();
+        state_->lastAnchorTimeUs = 0;
+        state_->consecutiveErrors = 0;
+        state_->decoderResetTimeUs = 0;
+        state_->decoderResetBackoffUs = kInitialDecoderResetBackoffUs;
+        state_->surfaceLostKeyFrameRequested = false;
         syncCoordinator_.reset();
         pendingClockReset_.store(false, std::memory_order_relaxed);
         lastHeartbeatUs_.store(0, std::memory_order_relaxed);
         watchdogTripped_.store(false, std::memory_order_relaxed);
         watchdogTripCount_.store(0, std::memory_order_relaxed);
         frameQueue_.store(nullptr, std::memory_order_relaxed);
-        decoderFactory_ = nullptr;
+        state_->decoderFactory = nullptr;
     }
 
     bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
@@ -124,42 +128,63 @@ public:
     }
 
 private:
-    // Caller must hold decoderMtx_. fq must be non-null.
-    VideoDecoder* getOrCreateDecoderLocked(VideoFrameQueue* fq) {
-        if (decoder_) return decoder_.get();
+    // Heap-allocated state that the decode thread accesses under decoderMtx_.
+    // On the detach path, this struct is leaked (released) so the detached
+    // thread can safely finish its current iteration without use-after-free.
+    struct DecoderState {
+        std::mutex mtx;
+        std::unique_ptr<VideoDecoder> decoder;
+        DecoderFactory decoderFactory;
+        VideoRenderClock renderClock;
+        FpsCounter fpsCounter;
+        int64_t lastAnchorTimeUs = 0;
+        int consecutiveErrors = 0;
+        int64_t decoderResetTimeUs = 0;
+        int64_t decoderResetBackoffUs = kInitialDecoderResetBackoffUs;
+        bool surfaceLostKeyFrameRequested = false;
+    };
+
+    // Caller must hold state->mtx. fq must be non-null.
+    VideoDecoder* getOrCreateDecoderLocked(DecoderState* s, VideoFrameQueue* fq) {
+        if (s->decoder) return s->decoder.get();
 
         auto& metrics = fq->metrics();
 
         // Backoff after error-driven decoder reset to prevent HAL thrashing
-        if (decoderResetTimeUs_ > 0) {
-            int64_t elapsed = nowUs() - decoderResetTimeUs_;
-            if (elapsed < decoderResetBackoffUs_) {
+        if (s->decoderResetTimeUs > 0) {
+            int64_t elapsed = nowUs() - s->decoderResetTimeUs;
+            if (elapsed < s->decoderResetBackoffUs) {
                 metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::BackingOff), std::memory_order_relaxed);
                 return nullptr;
             }
-            decoderResetTimeUs_ = 0;
+            s->decoderResetTimeUs = 0;
         }
 
         if (!VideoSurfaceRegistry::instance().hasSurface()) {
             metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::WaitingSurface), std::memory_order_relaxed);
             return nullptr;
         }
-        if (!decoderFactory_) return nullptr;
+        if (!s->decoderFactory) return nullptr;
 
-        auto dec = decoderFactory_();
+        auto dec = s->decoderFactory();
         if (!dec) {
             metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::Failed), std::memory_order_relaxed);
             return nullptr;
         }
 
-        decoder_ = std::move(dec);
+        s->decoder = std::move(dec);
         metrics.decoderState.store(static_cast<uint8_t>(VideoDecoderState::Active), std::memory_order_relaxed);
-        return decoder_.get();
+        return s->decoder.get();
     }
 
     void run() {
         thread_affinity::setThreadName("VP9Decode");
         thread_affinity::configureCurrentThreadForDecode();
+
+        // Capture raw pointer — valid for the lifetime of this thread because:
+        // - Normal path: stop() joins, then resets state_ after thread exits
+        // - Detach path: state_ is released (leaked), so pointer remains valid
+        auto* s = state_.get();
 
         EncodedVideoFrame frame;
         int consecutiveIdleCycles = 0;
@@ -172,39 +197,39 @@ private:
             bool didWork = false;
 
             if (pendingClockReset_.exchange(false, std::memory_order_acquire)) {
-                renderClock_.reset();
-                lastAnchorTimeUs_ = 0;
+                s->renderClock.reset();
+                s->lastAnchorTimeUs = 0;
                 syncCoordinator_.reset();
             }
 
             if (!VideoSurfaceRegistry::instance().hasSurface()) {
-                std::lock_guard<std::mutex> lk(decoderMtx_);
-                decoder_.reset();
-                renderClock_.reset();
-                lastAnchorTimeUs_ = 0;
-                if (!surfaceLostKeyFrameRequested_) {
+                std::lock_guard<std::mutex> lk(s->mtx);
+                s->decoder.reset();
+                s->renderClock.reset();
+                s->lastAnchorTimeUs = 0;
+                if (!s->surfaceLostKeyFrameRequested) {
                     fq->requestKeyFrame();
-                    surfaceLostKeyFrameRequested_ = true;
+                    s->surfaceLostKeyFrameRequested = true;
                 }
             } else {
-                surfaceLostKeyFrameRequested_ = false;
+                s->surfaceLostKeyFrameRequested = false;
                 int64_t now = nowUs();
 
                 // Anchor render clock on first frame
-                if (!renderClock_.isAnchored()) {
+                if (!s->renderClock.isAnchored()) {
                     int64_t nextPts;
                     if (fq->peekNextPts(nextPts)) {
                         int64_t adjustedTarget = fq->bufferTargetUs() + syncCoordinator_.videoBufferAdjustmentUs();
                         adjustedTarget = std::clamp(adjustedTarget,
                                                     video_config::jitter::kMinBufferUs,
                                                     video_config::jitter::kMaxBufferUs);
-                        renderClock_.anchor(nextPts, now, adjustedTarget);
-                        lastAnchorTimeUs_ = now;
+                        s->renderClock.anchor(nextPts, now, adjustedTarget);
+                        s->lastAnchorTimeUs = now;
                     }
-                } else if (lastAnchorTimeUs_ > 0 &&
-                           (now - lastAnchorTimeUs_) >= video_config::kReanchorIntervalUs) {
-                    renderClock_.reset();
-                    lastAnchorTimeUs_ = 0;
+                } else if (s->lastAnchorTimeUs > 0 &&
+                           (now - s->lastAnchorTimeUs) >= video_config::kReanchorIntervalUs) {
+                    s->renderClock.reset();
+                    s->lastAnchorTimeUs = 0;
                 }
 
                 // Update buffer target with A/V sync correction
@@ -212,18 +237,18 @@ private:
                 adjustedTarget = std::clamp(adjustedTarget,
                                             video_config::jitter::kMinBufferUs,
                                             video_config::jitter::kMaxBufferUs);
-                renderClock_.updateBufferTarget(adjustedTarget);
-                renderClock_.setPlaybackRate(fq->playbackRate());
+                s->renderClock.updateBufferTarget(adjustedTarget);
+                s->renderClock.setPlaybackRate(fq->playbackRate());
 
                 // Update jitter metrics
                 fq->metrics().jitterUs.store(fq->jitterUs(), std::memory_order_relaxed);
                 fq->metrics().bufferTargetUs.store(fq->bufferTargetUs(), std::memory_order_relaxed);
 
                 // Pop and decode
-                auto popResult = fq->tryPopReadyFrame(frame, renderClock_, now);
+                auto popResult = fq->tryPopReadyFrame(frame, s->renderClock, now);
                 if (popResult != PopResult::Nothing) {
-                    std::lock_guard<std::mutex> lk(decoderMtx_);
-                    auto* dec = getOrCreateDecoderLocked(fq);
+                    std::lock_guard<std::mutex> lk(s->mtx);
+                    auto* dec = getOrCreateDecoderLocked(s, fq);
                     if (dec) {
                         auto decodeStart = nowUs();
                         if (dec->submitFrame(frame.data.data(), frame.data.size(),
@@ -233,11 +258,11 @@ private:
                             auto smoothed = prev == 0 ? decodeDuration : prev + (decodeDuration - prev) / 8;
                             fq->metrics().decodeLatencyUs.store(smoothed, std::memory_order_relaxed);
                             fq->metrics().lastDecodeTimeUs.store(nowUs(), std::memory_order_relaxed);
-                            consecutiveErrors_ = 0;
-                            decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
+                            s->consecutiveErrors = 0;
+                            s->decoderResetBackoffUs = kInitialDecoderResetBackoffUs;
                             fq->metrics().framesDecoded.fetch_add(1, std::memory_order_relaxed);
                             fq->metrics().currentFps.store(
-                                fpsCounter_.tick(nowUs()), std::memory_order_relaxed);
+                                s->fpsCounter.tick(nowUs()), std::memory_order_relaxed);
                             if (dec->decodedWidth() > 0) {
                                 fq->metrics().width.store(dec->decodedWidth(), std::memory_order_relaxed);
                                 fq->metrics().height.store(dec->decodedHeight(), std::memory_order_relaxed);
@@ -248,20 +273,20 @@ private:
                         } else {
                             fq->metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
                             fq->metrics().lastDecodeError.store(dec->lastError(), std::memory_order_relaxed);
-                            if (++consecutiveErrors_ >= kMaxConsecutiveErrors) {
+                            if (++s->consecutiveErrors >= kMaxConsecutiveErrors) {
                                 MEDIA_LOG_E("VideoDecodeThread: %d consecutive errors, resetting decoder (backoff=%lldms)",
-                                            consecutiveErrors_, static_cast<long long>(decoderResetBackoffUs_ / 1000));
-                                decoder_.reset();
-                                renderClock_.reset();
-                                lastAnchorTimeUs_ = 0;
-                                decoderResetTimeUs_ = nowUs();
-                                decoderResetBackoffUs_ = std::min(decoderResetBackoffUs_ * 2, kMaxDecoderResetBackoffUs);
+                                            s->consecutiveErrors, static_cast<long long>(s->decoderResetBackoffUs / 1000));
+                                s->decoder.reset();
+                                s->renderClock.reset();
+                                s->lastAnchorTimeUs = 0;
+                                s->decoderResetTimeUs = nowUs();
+                                s->decoderResetBackoffUs = std::min(s->decoderResetBackoffUs * 2, kMaxDecoderResetBackoffUs);
                                 fq->requestKeyFrame();
                                 fq->metrics().decoderResets.fetch_add(1, std::memory_order_relaxed);
-                                consecutiveErrors_ = 0;
+                                s->consecutiveErrors = 0;
                             }
                         }
-                        if (decoder_) decoder_->postDecode();
+                        if (s->decoder) s->decoder->postDecode();
                     }
                     didWork = true;
                 }
@@ -312,14 +337,8 @@ private:
     mutable std::atomic<bool> watchdogTripped_{false};
     std::atomic<uint32_t> watchdogTripCount_{0};
     std::atomic<VideoFrameQueue*> frameQueue_{nullptr};
-    DecoderFactory decoderFactory_;
 
-    std::unique_ptr<VideoDecoder> decoder_;
-    std::mutex decoderMtx_;
-
-    VideoRenderClock renderClock_;
-    FpsCounter fpsCounter_;
-    int64_t lastAnchorTimeUs_ = 0;
+    std::unique_ptr<DecoderState> state_;
     AVSyncCoordinator syncCoordinator_;
 
     std::atomic<bool> pendingClockReset_{false};
@@ -327,10 +346,6 @@ private:
     static constexpr int kMaxConsecutiveErrors = 5;
     static constexpr int64_t kInitialDecoderResetBackoffUs = 200'000;   // 200ms
     static constexpr int64_t kMaxDecoderResetBackoffUs = 2'000'000;     // 2s
-    int consecutiveErrors_ = 0;
-    int64_t decoderResetTimeUs_ = 0;
-    int64_t decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
-    bool surfaceLostKeyFrameRequested_ = false;
 };
 
 }  // namespace media

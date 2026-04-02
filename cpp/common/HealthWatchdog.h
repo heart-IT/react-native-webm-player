@@ -124,6 +124,13 @@ public:
 
         HealthSnapshot snap = readMetrics_();
 
+        // Initialize window on first evaluate so the first window starts from
+        // actual pipeline start, not epoch 0
+        if (windowStartUs_ == 0) {
+            windowStartUs_ = now;
+            windowBaseSnapshot_ = snap;
+        }
+
         // Service deferred window reset (called from JS thread via resetStream)
         if (windowResetRequested_.load(std::memory_order_acquire)) {
             windowResetRequested_.store(false, std::memory_order_relaxed);

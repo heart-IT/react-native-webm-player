@@ -108,9 +108,9 @@ public:
             if (lastArrivalUs_ > 0) {
                 int64_t gapUs = arrivalUs - lastArrivalUs_;
                 int64_t curMax = metrics_.maxInterFrameGapUs.load(std::memory_order_relaxed);
-                if (gapUs > curMax) {
-                    metrics_.maxInterFrameGapUs.store(gapUs, std::memory_order_relaxed);
-                }
+                while (gapUs > curMax &&
+                       !metrics_.maxInterFrameGapUs.compare_exchange_weak(
+                           curMax, gapUs, std::memory_order_relaxed)) {}
                 if (gapUs > 500000) {
                     metrics_.gapsOver500ms.fetch_add(1, std::memory_order_relaxed);
                     metrics_.gapsOver100ms.fetch_add(1, std::memory_order_relaxed);
