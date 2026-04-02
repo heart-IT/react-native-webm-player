@@ -70,6 +70,24 @@ set(ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 set(ENABLE_SAMPLE_PROGRAMS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(libwebm)
 
+# whisper.cpp — on-device speech transcription
+FetchContent_Declare(
+    whisper
+    GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+    GIT_TAG v1.8.4
+    GIT_SHALLOW TRUE
+)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(WHISPER_SDL2 OFF CACHE BOOL "" FORCE)
+set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
+set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_METAL OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(whisper)
+
 find_library(log-lib log)
 find_library(android-lib android)
 
@@ -108,12 +126,19 @@ set(DEMUX_SOURCES
     ${CPP_ROOT}/demux/WebmDemuxer.cpp
 )
 
+# Transcription — whisper.cpp integration
+set(TRANSCRIPT_SOURCES
+    ${CPP_ROOT}/transcript/TranscriptEngine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/transcript/transcript_jni.cpp
+)
+
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${JSI_SOURCES}
     ${PLAYBACK_SOURCES}
     ${VIDEO_SOURCES}
     ${DEMUX_SOURCES}
     ${SPEEXDSP_SOURCES}
+    ${TRANSCRIPT_SOURCES}
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
@@ -123,10 +148,12 @@ target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
     ${CPP_ROOT}/playback
     ${CPP_ROOT}/video
     ${CPP_ROOT}/demux
+    ${CPP_ROOT}/transcript
     # Android-specific headers
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/playback
     ${CMAKE_CURRENT_SOURCE_DIR}/video
+    ${CMAKE_CURRENT_SOURCE_DIR}/transcript
     # Opus headers
     ${opus_SOURCE_DIR}/include
     # libwebm headers
@@ -134,6 +161,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
     # SpeexDSP headers
     ${SPEEXDSP_ROOT}/include
     ${SPEEXDSP_ROOT}/libspeexdsp
+    # whisper.cpp headers
+    ${whisper_SOURCE_DIR}/include
 )
 
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE HAVE_OPUS=1 FLOATING_POINT=1 EXPORT=)
@@ -199,4 +228,5 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     mediandk
     opus
     webm
+    whisper
 )

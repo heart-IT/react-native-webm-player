@@ -24,6 +24,8 @@
 #include "ClipBuffer.h"
 #include "StallRecoveryController.h"
 #include "demux/WebmDemuxer.h"
+#include "transcript/TranscriptThread.h"
+#include "transcript/TranscriptRegistry.h"
 #include "video/VideoFrameQueue.h"
 #include "video/VideoSurfaceRegistry.h"
 
@@ -38,7 +40,9 @@ enum class MethodId : uint8_t {
     WarmUp, SetKeyFrameNeededCallback, Pause, Resume, IsPaused, GetCurrentTimeUs,
     GetPlaybackState, SetBufferTarget, SetAudioFocusCallback, SetCatchupPolicy,
     SetStreamStatus, SetPlaybackRate, SetClipBufferDuration, CaptureClip, SeekTo,
-    GetBufferRangeSeconds
+    GetBufferRangeSeconds,
+    SetTranscriptionEnabled, SetTranscriptCallback, GetTranscriptHistory,
+    SetTranslationEnabled
 };
 
 inline MethodId lookupMethod(const std::string& name) noexcept {
@@ -74,6 +78,10 @@ inline MethodId lookupMethod(const std::string& name) noexcept {
     if (name == "captureClip") return MethodId::CaptureClip;
     if (name == "seekTo") return MethodId::SeekTo;
     if (name == "getBufferRangeSeconds") return MethodId::GetBufferRangeSeconds;
+    if (name == "setTranscriptionEnabled") return MethodId::SetTranscriptionEnabled;
+    if (name == "setTranscriptCallback") return MethodId::SetTranscriptCallback;
+    if (name == "getTranscriptHistory") return MethodId::GetTranscriptHistory;
+    if (name == "setTranslationEnabled") return MethodId::SetTranslationEnabled;
     return MethodId::Unknown;
 }
 
@@ -111,6 +119,15 @@ public:
     }
 
     void teardown() noexcept {
+        // Clear callbacks first so no in-flight async can reference this orchestrator
+        media::transcript::TranscriptRegistry::instance().clearCallback(
+            media::transcript::CallbackSlot::JsCallback);
+        transcriptJsCallback_.reset();
+        session_.setTranscriptBuffer(nullptr);
+        if (transcriptThread_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        transcriptThread_.reset();
         session_.stop();
         joinClipThread();
         media::AudioSessionManager::instance().setRouteCallback(nullptr);
@@ -448,6 +465,103 @@ public:
                     if (!weak.lock()) return jsi::Value(0.0);
                     return jsi::Value(static_cast<double>(clipBuffer_.availableRangeSeconds()));
                 });
+        case MethodId::SetTranscriptionEnabled:
+            return jsi::Function::createFromHostFunction(rt, name, 2,
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock() || count < 1) return jsi::Value(false);
+                    bool enabled = args[0].getBool();
+                    if (enabled) {
+                        if (transcriptThread_ && transcriptThread_->isRunning()) return jsi::Value(true);
+                        std::string modelPath;
+                        if (count >= 2 && args[1].isString()) {
+                            modelPath = args[1].getString(rt).utf8(rt);
+                        }
+                        if (modelPath.empty()) {
+                            MEDIA_LOG_E("setTranscriptionEnabled: model path required");
+                            return jsi::Value(false);
+                        }
+                        transcriptThread_ = std::make_unique<media::transcript::TranscriptThread>();
+                        if (!transcriptThread_->start(modelPath)) {
+                            transcriptThread_.reset();
+                            return jsi::Value(false);
+                        }
+                        session_.setTranscriptBuffer(transcriptThread_->ringBuffer());
+                    } else {
+                        // Null the pointer first so the audio callback stops pushing
+                        session_.setTranscriptBuffer(nullptr);
+                        // Brief spin to ensure any in-flight push() completes before
+                        // we destroy the ring buffer. Audio callbacks are ~20ms apart
+                        // and push() takes <1us, so 1ms is more than sufficient.
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        transcriptThread_.reset();
+                        media::transcript::TranscriptRegistry::instance().clearHistory();
+                    }
+                    return jsi::Value(true);
+                });
+        case MethodId::SetTranscriptCallback:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this, weak = weakOwner_, callInvoker = callInvoker_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    if (!weak.lock()) return jsi::Value(false);
+                    if (count < 1 || args[0].isNull() || args[0].isUndefined()) {
+                        transcriptJsCallback_.reset();
+                        media::transcript::TranscriptRegistry::instance().clearCallback(
+                            media::transcript::CallbackSlot::JsCallback);
+                        return jsi::Value(true);
+                    }
+                    auto cb = std::make_shared<jsi::Function>(args[0].asObject(rt).asFunction(rt));
+                    auto weakCb = weak;
+                    transcriptJsCallback_ = cb;
+                    auto* orch = this;
+                    media::transcript::TranscriptRegistry::instance().setCallback(
+                        media::transcript::CallbackSlot::JsCallback,
+                        [cb, callInvoker, weakCb, orch](const media::transcript::TranscriptSegment& seg) {
+                            if (!weakCb.lock() || !orch->runtime_) return;
+                            auto segCopy = std::make_shared<media::transcript::TranscriptSegment>(seg);
+                            callInvoker->invokeAsync([cb, segCopy, weakCb, orch]() {
+                                if (!weakCb.lock() || !orch->runtime_) return;
+                                auto& rt = *orch->runtime_;
+                                jsi::Object obj(rt);
+                                obj.setProperty(rt, "text", jsi::String::createFromUtf8(rt, segCopy->text));
+                                obj.setProperty(rt, "startUs", static_cast<double>(segCopy->startUs));
+                                obj.setProperty(rt, "endUs", static_cast<double>(segCopy->endUs));
+                                obj.setProperty(rt, "isFinal", segCopy->isFinal);
+                                cb->call(rt, std::move(obj));
+                            });
+                        });
+                    return jsi::Value(true);
+                });
+        case MethodId::GetTranscriptHistory:
+            return jsi::Function::createFromHostFunction(rt, name, 0,
+                [this, weak = weakOwner_](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                    if (!weak.lock()) return jsi::Value::undefined();
+                    auto history = media::transcript::TranscriptRegistry::instance().getHistory();
+                    int64_t currentTimeUs = session_.currentTimeUs();
+                    auto arr = jsi::Array(rt, history.size());
+                    for (size_t i = 0; i < history.size(); ++i) {
+                        const auto& h = history[i];
+                        double durationSec = static_cast<double>(h.endUs - h.startUs) / 1'000'000.0;
+                        double agoSec = static_cast<double>(currentTimeUs - h.startUs) / 1'000'000.0;
+                        jsi::Object seg(rt);
+                        seg.setProperty(rt, "text", jsi::String::createFromUtf8(rt, h.text));
+                        seg.setProperty(rt, "startUs", static_cast<double>(h.startUs));
+                        seg.setProperty(rt, "endUs", static_cast<double>(h.endUs));
+                        seg.setProperty(rt, "isFinal", h.isFinal);
+                        seg.setProperty(rt, "durationSeconds", durationSec);
+                        seg.setProperty(rt, "agoSeconds", agoSec);
+                        arr.setValueAtIndex(rt, i, std::move(seg));
+                    }
+                    return std::move(arr);
+                });
+        case MethodId::SetTranslationEnabled:
+            return jsi::Function::createFromHostFunction(rt, name, 1,
+                [this, weak = weakOwner_](jsi::Runtime&, const jsi::Value&, const jsi::Value* args, size_t count) {
+                    if (!weak.lock() || count < 1) return jsi::Value(false);
+                    bool enabled = args[0].getBool();
+                    if (transcriptThread_) {
+                        transcriptThread_->setTranslateToEnglish(enabled);
+                    }
+                    return jsi::Value(true);
+                });
         case MethodId::Unknown:
         default:
             return jsi::Value::undefined();
@@ -466,7 +580,9 @@ public:
             "getCurrentTimeUs", "getPlaybackState", "setBufferTarget",
             "setAudioFocusCallback", "setCatchupPolicy", "setStreamStatus",
             "setPlaybackRate", "setClipBufferDuration", "captureClip",
-            "seekTo", "getBufferRangeSeconds"
+            "seekTo", "getBufferRangeSeconds",
+            "setTranscriptionEnabled", "setTranscriptCallback", "getTranscriptHistory",
+            "setTranslationEnabled"
         }) {
             names.push_back(jsi::PropNameID::forAscii(rt, n));
         }
@@ -1089,6 +1205,10 @@ private:
     WeakOwner weakOwner_;
     std::thread clipThread_;
     std::atomic<bool> clipThreadDone_{true};
+
+    // Transcription
+    std::unique_ptr<media::transcript::TranscriptThread> transcriptThread_;
+    std::shared_ptr<jsi::Function> transcriptJsCallback_;
 
     void joinClipThread() noexcept {
         if (clipThread_.joinable()) clipThread_.join();

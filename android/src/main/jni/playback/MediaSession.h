@@ -14,6 +14,7 @@
 #include "AudioMixer.h"
 #include "DecodeThread.h"
 #include "common/HealthWatchdog.h"
+#include "transcript/TranscriptRingBuffer.h"
 #include "AAudioOutputBridge.h"
 #include "AudioSessionManager.h"
 
@@ -494,6 +495,10 @@ public:
         audio_.setSyncCoordinator(coordinator);
     }
 
+    void setTranscriptBuffer(transcript::TranscriptRingBuffer* buf) noexcept {
+        transcriptBuffer_.store(buf, std::memory_order_release);
+    }
+
     [[nodiscard]] bool isDecodeThreadResponsive() noexcept {
         return decodeThread_.isResponsive();
     }
@@ -573,12 +578,17 @@ private:
             return 0;
         }
 
-        return mixer_.mix(output, frameCount);
+        size_t written = mixer_.mix(output, frameCount);
+        if (auto* buf = transcriptBuffer_.load(std::memory_order_acquire)) {
+            buf->push(output, written);
+        }
+        return written;
     }
 
     const SessionConfig config_;
     std::mutex lifecycleMtx_;
     std::atomic<SessionState> state_{SessionState::Stopped};
+    std::atomic<transcript::TranscriptRingBuffer*> transcriptBuffer_{nullptr};
     int64_t startTimeUs_ = 0;
 
     DecodedAudioPool audioPool_;

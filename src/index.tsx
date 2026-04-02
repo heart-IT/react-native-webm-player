@@ -404,6 +404,33 @@ export interface TrackInfo {
 
 export type KeyFrameNeededCallback = () => void
 
+/** A segment of transcribed speech with timing. */
+export interface TranscriptSegment {
+  /** Transcribed text. */
+  text: string
+  /** Segment start in microseconds (pipeline clock). */
+  startUs: number
+  /** Segment end in microseconds (pipeline clock). */
+  endUs: number
+  /** True if this is a finalized segment (not a partial/in-progress result). */
+  isFinal: boolean
+  /** Segment duration in seconds. Use with captureClip() to extract this moment. */
+  durationSeconds: number
+  /** Seconds ago relative to current playback position. Use with seekTo(-agoSeconds). */
+  agoSeconds: number
+}
+
+/** Callback fired when a new transcript segment is available. */
+export type TranscriptCallback = (segment: TranscriptSegment) => void
+
+/** Props for the native TranscriptView overlay component. */
+export interface TranscriptViewProps {
+  /** Show or hide live captions. @default false */
+  enabled?: boolean
+  /** React Native view style. */
+  style?: ViewStyle
+}
+
 /** Props for the native VideoView component. */
 export interface VideoViewProps {
   /** Mirror the video horizontally (useful for self-view camera preview). @default false */
@@ -453,6 +480,10 @@ interface MediaPipelineJSI {
   captureClip(lastNSeconds: number): Promise<string>
   seekTo(offsetSeconds: number): boolean
   getBufferRangeSeconds(): number
+  setTranscriptionEnabled(enabled: boolean, modelPath?: string): boolean
+  setTranslationEnabled(enabled: boolean): boolean
+  setTranscriptCallback(callback: TranscriptCallback | null): boolean
+  getTranscriptHistory(): TranscriptSegment[]
 }
 
 declare global {
@@ -573,7 +604,19 @@ export const MediaPipeline = {
   /** Seek within the buffered ring buffer. @param offsetSeconds Negative = rewind from live, 0 = return to live edge. */
   seekTo: (offsetSeconds: number): boolean => getMediaPipeline().seekTo(offsetSeconds),
   /** Get how many seconds of rewind are available in the ring buffer. */
-  getBufferRangeSeconds: (): number => getMediaPipeline().getBufferRangeSeconds()
+  getBufferRangeSeconds: (): number => getMediaPipeline().getBufferRangeSeconds(),
+
+  /** Enable or disable on-device speech transcription. Pass model path when enabling. */
+  setTranscriptionEnabled: (enabled: boolean, modelPath?: string): boolean => getMediaPipeline().setTranscriptionEnabled(enabled, modelPath),
+
+  /** Translate to English instead of transcribing in source language. Zero additional cost. */
+  setTranslationEnabled: (enabled: boolean): boolean => getMediaPipeline().setTranslationEnabled(enabled),
+
+  /** Set callback for live transcript segments. Pass null to unsubscribe. */
+  setTranscriptCallback: (callback: TranscriptCallback | null): boolean => getMediaPipeline().setTranscriptCallback(callback),
+
+  /** Get history of all transcript segments since transcription was enabled. */
+  getTranscriptHistory: (): TranscriptSegment[] => getMediaPipeline().getTranscriptHistory()
 }
 
 // --- VideoView Native Component ---
@@ -586,6 +629,19 @@ const NativeVideoView = requireNativeComponent<VideoViewProps>('WebmVideoView')
  */
 export function VideoView(props: VideoViewProps): React.ReactElement {
   return React.createElement(NativeVideoView, props)
+}
+
+// --- TranscriptView Native Component ---
+
+const NativeTranscriptView = requireNativeComponent<TranscriptViewProps>('WebmTranscriptView')
+
+/**
+ * Native overlay view for live speech transcription captions.
+ * Renders text directly from the native transcript engine — no JS in the hot path.
+ * Place inside or alongside VideoView.
+ */
+export function TranscriptView(props: TranscriptViewProps): React.ReactElement {
+  return React.createElement(NativeTranscriptView, props)
 }
 
 /**

@@ -13,6 +13,7 @@
 #include "../../cpp/playback/AudioMixer.h"
 #include "../../cpp/playback/DecodeThread.h"
 #include "../../cpp/common/HealthWatchdog.h"
+#include "../../cpp/transcript/TranscriptRingBuffer.h"
 #include "AVAudioOutputBridge.h"
 #include "AudioSessionManager.h"
 
@@ -486,6 +487,10 @@ public:
         audio_.setSyncCoordinator(coordinator);
     }
 
+    void setTranscriptBuffer(transcript::TranscriptRingBuffer* buf) noexcept {
+        transcriptBuffer_.store(buf, std::memory_order_release);
+    }
+
     [[nodiscard]] bool isDecodeThreadResponsive() noexcept {
         return decodeThread_.isResponsive();
     }
@@ -563,12 +568,18 @@ private:
             return 0;
         }
 
-        return mixer_.mix(output, frameCount);
+        size_t written = mixer_.mix(output, frameCount);
+        // RT-safe tap: lock-free push to transcript ring buffer (if active)
+        if (auto* buf = transcriptBuffer_.load(std::memory_order_acquire)) {
+            buf->push(output, written);
+        }
+        return written;
     }
 
     const SessionConfig config_;
     std::mutex lifecycleMtx_;
     std::atomic<SessionState> state_{SessionState::Stopped};
+    std::atomic<transcript::TranscriptRingBuffer*> transcriptBuffer_{nullptr};
     int64_t startTimeUs_ = 0;
 
     DecodedAudioPool audioPool_;

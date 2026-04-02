@@ -26,10 +26,13 @@ Pod::Spec.new do |s|
     "cpp/third_party/speexdsp/include/speex/*.h"
   ]
 
-  # Exclude build artifacts
+  # Exclude build artifacts and build scripts
   s.exclude_files = [
     "ios/opus/build/**/*",
-    "ios/opus/build-opus.sh"
+    "ios/opus/build-opus.sh",
+    "ios/whisper/build/**/*",
+    "ios/whisper/build-whisper.sh",
+    "ios/whisper/models/**/*"
   ]
 
   s.private_header_files = [
@@ -40,11 +43,11 @@ Pod::Spec.new do |s|
     "cpp/third_party/speexdsp/**/*.h"
   ]
 
-  # Required frameworks for audio, video, and SIMD
-  s.frameworks = ["AVFoundation", "AudioToolbox", "VideoToolbox", "CoreMedia", "Accelerate", "UIKit"]
+  # Required frameworks for audio, video, SIMD, and Metal (whisper.cpp GPU inference)
+  s.frameworks = ["AVFoundation", "AudioToolbox", "VideoToolbox", "CoreMedia", "Accelerate", "UIKit", "Metal"]
 
-  # Vendored Opus 1.6.1 XCFramework
-  s.vendored_frameworks = "ios/opus/lib/opus.xcframework"
+  # Vendored Opus 1.6.1 XCFramework + whisper.cpp XCFramework
+  s.vendored_frameworks = ["ios/opus/lib/opus.xcframework", "ios/whisper/lib/whisper.xcframework"]
 
   # Header search paths for cross-platform code and vendored Opus
   s.pod_target_xcconfig = {
@@ -60,7 +63,9 @@ Pod::Spec.new do |s|
       '$(PODS_TARGET_SRCROOT)/ios',
       '$(PODS_TARGET_SRCROOT)/ios/playback',
       '$(PODS_TARGET_SRCROOT)/ios/video',
-      '$(PODS_TARGET_SRCROOT)/ios/opus/lib/include'
+      '$(PODS_TARGET_SRCROOT)/ios/opus/lib/include',
+      '$(PODS_TARGET_SRCROOT)/ios/whisper/lib/include',
+      '$(PODS_TARGET_SRCROOT)/cpp/transcript'
     ].join(' '),
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
     'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) HAVE_OPUS=1 FLOATING_POINT=1 EXPORT=',
