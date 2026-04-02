@@ -1,3 +1,5 @@
+// Opus 1.6.1 decoder wrapper with OSCE (Deep PLC) support.
+// Thread safety: NOT thread-safe. All calls must be from the decode thread.
 #pragma once
 
 #include <memory>
@@ -63,6 +65,8 @@ public:
         return true;
     }
 
+    // Decode an Opus packet into float PCM samples.
+    // Returns number of decoded samples per channel, or -1 on error (check lastError()).
     int decode(const uint8_t* input, size_t inputSize, float* output, size_t maxFrames) noexcept {
         if (!input || !output) {
             lastError_ = OPUS_BAD_ARG;
@@ -93,6 +97,9 @@ public:
         return frames;
     }
 
+    // Generate PLC (packet loss concealment) output for a missing packet.
+    // Uses Opus OSCE (Deep PLC) when complexity >= 7 for high-quality concealment.
+    // Returns number of samples per channel, or -1 on error.
     int decodePLC(float* output, size_t maxFrames) noexcept {
         if (!output) {
             lastError_ = OPUS_BAD_ARG;

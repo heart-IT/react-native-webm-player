@@ -1,3 +1,6 @@
+// Video pipeline data types: encoded frames, decoder state, and metrics counters.
+// All metric counters are std::atomic for lock-free access across threads.
+// Values must match TypeScript enums in src/index.tsx.
 #pragma once
 
 #include <cstdint>
@@ -7,7 +10,7 @@
 
 namespace media {
 
-// Observable state of the video decoder lifecycle
+// Observable state of the video decoder lifecycle.
 enum class VideoDecoderState : uint8_t {
     NotCreated = 0,      // Decoder not yet created (initial state)
     WaitingSurface = 1,  // No render surface registered

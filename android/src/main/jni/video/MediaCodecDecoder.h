@@ -1,3 +1,6 @@
+// Android VP9 hardware decoder using MediaCodec NDK API.
+// Submits encoded VP9 frames and renders decoded output to an ANativeWindow surface.
+// Implements the VideoDecoder interface for use by VideoDecodeThread.
 #pragma once
 
 #include <cstdint>

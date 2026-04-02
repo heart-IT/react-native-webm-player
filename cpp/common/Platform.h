@@ -1,3 +1,5 @@
+// Platform and architecture detection macros.
+// Defines MEDIA_PLATFORM_ANDROID/IOS and MEDIA_ARCH_ARM64/X64.
 #pragma once
 
 // Platform detection

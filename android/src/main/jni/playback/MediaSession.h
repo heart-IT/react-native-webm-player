@@ -1,3 +1,5 @@
+// Android media session: owns the audio decode channel, AAudio output bridge,
+// audio session manager, and decode thread. Lifecycle: init → start → stop → destroy.
 #pragma once
 
 #include <memory>

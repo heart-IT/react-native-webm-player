@@ -1,3 +1,6 @@
+// Audio routing types shared between iOS and Android.
+// Defines route enums, device info, focus state, and callback types
+// used by RouteHandler and platform AudioSessionManagers.
 #pragma once
 
 #include <cstdint>
@@ -6,6 +9,7 @@
 
 namespace media {
 
+// Audio output destination. Values must match TypeScript AudioRoute enum in src/index.tsx.
 enum class AudioRoute : uint8_t {
     Unknown = 0,
     Earpiece = 1,

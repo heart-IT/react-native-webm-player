@@ -1,3 +1,5 @@
+// Android JSI module for the video pipeline: VP9 decode thread, surface management,
+// and video metrics. Paired with MediaPipelineModule which handles audio + demux.
 #pragma once
 
 #include <jsi/jsi.h>

@@ -1,3 +1,6 @@
+// Android JSI module: exposes MediaPipeline API to JavaScript via JSI.
+// Handles feedData(), demuxing, audio pipeline, health watchdog, and clip buffer.
+// Video is handled by the separate VideoPipelineModule.
 #pragma once
 
 #include <jsi/jsi.h>

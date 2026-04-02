@@ -1,3 +1,5 @@
+// Audio pipeline data types: frames, stream state, and metrics counters.
+// All metric counters are std::atomic for lock-free access from the audio callback thread.
 #pragma once
 
 #include <cstdint>
@@ -7,6 +9,7 @@
 
 namespace media {
 
+// Audio pipeline lifecycle state.
 enum class StreamState : uint8_t {
     Inactive = 0,
     Buffering,

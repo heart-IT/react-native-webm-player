@@ -1,3 +1,6 @@
+// iOS VP9 hardware decoder using VTDecompressionSession.
+// Submits encoded VP9 frames and renders decoded output to an AVSampleBufferDisplayLayer.
+// Implements the VideoDecoder interface for use by VideoDecodeThread.
 #pragma once
 
 #import <AVFoundation/AVFoundation.h>

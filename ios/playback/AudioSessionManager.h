@@ -1,3 +1,5 @@
+// iOS audio session: AVAudioSession configuration, route change notifications,
+// and device enumeration. Routes events to the shared C++ RouteHandler.
 #pragma once
 
 #include "../../cpp/common/AudioRouteTypes.h"

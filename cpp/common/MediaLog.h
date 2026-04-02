@@ -1,3 +1,6 @@
+// Debug logging macros for the media pipeline.
+// Routes to __android_log_print (Android) or os_log (iOS).
+// NEVER call from the audio callback thread — logging performs I/O.
 #pragma once
 
 #include <atomic>

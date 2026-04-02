@@ -1,3 +1,5 @@
+// Monotonic microsecond clock for timing measurements.
+// Uses clock_gettime(CLOCK_MONOTONIC) on Android, mach_absolute_time() on iOS.
 #pragma once
 
 #include <cstdint>

@@ -1,3 +1,7 @@
+// Reactive audio routing handler — receives OS route-change events and decides:
+// dedup (same route), restart audio stream, reset drift compensation, fire JS callback.
+// Zero state machines, zero timers. The OS manages device state internally.
+// Thread safety: all methods must be called from the same thread (platform audio session thread).
 #pragma once
 
 #include "AudioRouteTypes.h"

@@ -1,3 +1,6 @@
+// Central timing and sizing constants for the broadcast playback pipeline.
+// All values are compile-time constants validated by static_assert at the bottom.
+// See docs/ARCHITECTURE.md for design rationale behind key values.
 #pragma once
 
 #include <cstdint>
@@ -57,10 +60,12 @@ namespace jitter {
     // 2 frames (40ms) minimum — spec allows 20ms but single-frame buffer causes
     // rapid Playing↔Underrun oscillation on devices with callback jitter > 1ms.
     constexpr int64_t kMinBufferUs = 40000;
-    constexpr int64_t kMaxBufferUs = 200000;
-    constexpr int64_t kDefaultBufferUs = 60000;  // 3 frames default for stable playback
+    constexpr int64_t kMaxBufferUs = 200000;     // 200ms upper bound prevents runaway latency
+    constexpr int64_t kDefaultBufferUs = 60000;  // 3 frames — stable on WiFi, converges down on good links
+    // EWMA smoothing factor: 0.125 (1/8) balances responsiveness vs stability.
+    // Higher = reacts faster to changes but noisier. Lower = smoother but slow to adapt.
     constexpr float kJitterAlpha = 0.125f;
-    constexpr int kMinSamplesForEstimate = 8;
+    constexpr int kMinSamplesForEstimate = 8;    // Need 8 arrivals before trusting the estimate
 }
 
 namespace mix {

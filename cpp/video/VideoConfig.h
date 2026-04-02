@@ -1,3 +1,5 @@
+// VP9 video pipeline constants for broadcast playback.
+// See docs/ARCHITECTURE.md for design rationale.
 #pragma once
 
 #include <cstdint>
@@ -22,11 +24,11 @@ constexpr int64_t kReanchorIntervalUs = 30'000'000;
 
 // Video jitter buffer configuration
 namespace jitter {
-    constexpr int64_t kDefaultBufferUs = 66000;    // 2 frames @ 30fps
-    constexpr int64_t kMinBufferUs = 33000;         // 1 frame
-    constexpr int64_t kMaxBufferUs = 200000;        // ~6 frames
-    constexpr int64_t kMaxNormalPtsDeltaUs = 66000; // 2× frame interval — discontinuity threshold
-    constexpr int kMinSamplesForEstimate = 6;       // Need 6 arrivals before trusting estimate
+    constexpr int64_t kDefaultBufferUs = 66000;    // 2 frames @ 30fps — balances latency vs robustness
+    constexpr int64_t kMinBufferUs = 33000;         // 1 frame — minimum for decode pipeline
+    constexpr int64_t kMaxBufferUs = 200000;        // ~6 frames — caps latency under heavy jitter
+    constexpr int64_t kMaxNormalPtsDeltaUs = 66000; // 2× frame interval — beyond this is a PTS discontinuity
+    constexpr int kMinSamplesForEstimate = 6;       // Need 6 arrivals before trusting jitter estimate
 }
 
 // Video decode thread idle sleep (base interval, microseconds)

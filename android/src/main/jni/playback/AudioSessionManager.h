@@ -1,3 +1,5 @@
+// Android audio session: focus management, route detection, and device enumeration.
+// Bridges Kotlin AudioSessionBridge (JNI) with the shared C++ RouteHandler.
 #pragma once
 
 #include <jni.h>

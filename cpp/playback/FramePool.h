@@ -1,3 +1,13 @@
+// Lock-free frame pool and SPSC queue for the audio pipeline.
+//
+// FramePool<T, N>: Pre-allocated fixed-size pool. acquire() returns a FrameToken
+// (RAII handle that auto-releases on destruction). Lock-free via atomic CAS.
+//
+// FrameQueue<T, PoolSize, QueueSize>: Single-Producer Single-Consumer queue of
+// FrameTokens with acquire/release memory ordering. Used for JS→decode and
+// decode→callback handoffs.
+//
+// Both are designed for the audio hot path: no allocations, no locks, no exceptions.
 #pragma once
 
 #include <atomic>

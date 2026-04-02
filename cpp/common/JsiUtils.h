@@ -1,3 +1,5 @@
+// JSI utility functions for safe argument extraction and buffer access.
+// Used at the JS↔native boundary in MediaPipelineModule and VideoPipelineModule.
 #pragma once
 
 #include <jsi/jsi.h>

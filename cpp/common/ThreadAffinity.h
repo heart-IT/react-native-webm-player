@@ -1,3 +1,6 @@
+// Thread priority and CPU affinity configuration for decode and worker threads.
+// Attempts SCHED_FIFO (Android) or QoS (iOS) for real-time-adjacent priority,
+// with graceful fallback to nice values when RT scheduling is unavailable.
 #pragma once
 
 #include <cstring>

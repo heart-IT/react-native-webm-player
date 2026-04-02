@@ -17,28 +17,31 @@ class BlockEntry;
 
 namespace media::demux {
 
+// Opus audio packet extracted from WebM. Points into demuxer's internal buffer —
+// valid only until the next feedData() or reset() call.
 struct AudioPacket {
-    const uint8_t* data;
-    size_t size;
-    int64_t ptsUs;
-    int64_t durationUs;
+    const uint8_t* data;      // Raw Opus packet bytes
+    size_t size;              // Packet size in bytes (max 1275 per Opus spec)
+    int64_t ptsUs;            // Presentation timestamp in microseconds
+    int64_t durationUs;       // Packet duration in microseconds (typically 20000)
 };
 
+// VP9 video packet extracted from WebM. Same lifetime rules as AudioPacket.
 struct VideoPacket {
-    const uint8_t* data;
-    size_t size;
-    int64_t ptsUs;
-    bool isKeyFrame;
+    const uint8_t* data;      // Raw VP9 frame bytes
+    size_t size;              // Frame size in bytes (up to ~512KB for 4K keyframes)
+    int64_t ptsUs;            // Presentation timestamp in microseconds
+    bool isKeyFrame;          // True for keyframes (decoder can start from here)
 };
 
 // Packets in DemuxResult point into an internal buffer owned by WebmDemuxer.
 // They remain valid until the next call to feedData() or reset().
 // Callers must consume or copy packet data before calling feedData() again.
 struct DemuxResult {
-    std::vector<AudioPacket> audioPackets;
-    std::vector<VideoPacket> videoPackets;
-    std::string error;
-    int newClusterCount = 0;
+    std::vector<AudioPacket> audioPackets;  // Opus packets extracted this call
+    std::vector<VideoPacket> videoPackets;  // VP9 packets extracted this call
+    std::string error;                      // Non-empty on parse error (logged, not fatal)
+    int newClusterCount = 0;                // New WebM clusters encountered this call
 };
 
 struct TrackInfo {

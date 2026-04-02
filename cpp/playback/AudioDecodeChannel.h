@@ -1,4 +1,9 @@
-// Lock-free audio callback path - no mutex acquisition in readSamples()
+// Single-stream Opus decode channel: encoded frames in, PCM samples out.
+// Three-thread design:
+//   JS thread     → pushEncodedFrame() → PendingAudioQueue (SPSC)
+//   Decode thread → processPendingDecode() → DecodedAudioQueue (SPSC)
+//   Audio callback → readSamples() (lock-free: no mutex, no alloc, no I/O)
+// readSamples() also handles drift compensation, PLC crossfade, and fast-drain.
 #pragma once
 
 #include "common/MediaLog.h"

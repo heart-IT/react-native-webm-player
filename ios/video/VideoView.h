@@ -1,3 +1,5 @@
+// Native UIView subclass for rendering decoded VP9 frames via AVSampleBufferDisplayLayer.
+// Managed by VideoViewManager for React Native component registration.
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 
