@@ -208,6 +208,33 @@ enum StreamStatus {
 }
 ```
 
+#### `AudioFocusState`
+
+Android only — iOS handles audio session interruptions automatically.
+
+```ts
+enum AudioFocusState {
+  Gained = 0,              // Audio focus regained
+  Lost = 1,                // Permanent loss (another app took focus)
+  LostTransient = 2,       // Temporary loss (phone call)
+  LostTransientCanDuck = 3 // Can continue at reduced volume
+}
+```
+
+#### `VideoDecoderState`
+
+Exposed via `getMetrics().video.decoderState` for triage diagnostics.
+
+```ts
+enum VideoDecoderState {
+  NotCreated = 0,     // Decoder not initialized
+  WaitingSurface = 1, // Waiting for render surface
+  BackingOff = 2,     // Retrying after error
+  Active = 3,         // Decoding frames
+  Failed = 4          // Unrecoverable decoder error
+}
+```
+
 ### Health Monitoring
 
 ```ts
@@ -373,6 +400,17 @@ if (bt) MediaPipeline.setAudioRoute(AudioRoute.BluetoothA2dp, bt.deviceId)
 
 Route changes are handled reactively. Connect/disconnect BT or wired headsets and the player adjusts automatically with drift compensation reset.
 
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [Getting Started](docs/GETTING_STARTED.md) | Tutorial: build a broadcast player step by step |
+| [Integration Guide](docs/INTEGRATION_GUIDE.md) | Platform setup: background audio, permissions, clip capture, DVR |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Diagnose audio/video issues using metrics |
+| [Technical Reference](TECHNICAL.md) | Timing constants, metrics fields, threading model, test coverage |
+| [Architecture](docs/ARCHITECTURE.md) | Design rationale, data flow, and subsystem internals |
+| [Contributing](CONTRIBUTING.md) | Development workflow and pull request guidelines |
+
 ## Build
 
 ```sh
@@ -395,12 +433,12 @@ brew install opus speexdsp   # macOS
 ```
 
 ```sh
-yarn test:asan   # AddressSanitizer + LeakSanitizer (30 tests)
-yarn test:tsan   # ThreadSanitizer (25 tests)
-yarn test:ubsan  # UndefinedBehaviorSanitizer (71 tests)
+yarn test:asan   # AddressSanitizer + LeakSanitizer
+yarn test:tsan   # ThreadSanitizer
+yarn test:ubsan  # UndefinedBehaviorSanitizer
 ```
 
-126 sanitizer tests total across ASan, TSan, and UBSan.
+263 native tests across 7 test binaries. See [`tests/sanitizer/README.md`](tests/sanitizer/README.md) for details.
 
 ### iOS Opus
 

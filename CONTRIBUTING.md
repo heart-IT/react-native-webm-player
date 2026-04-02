@@ -25,9 +25,9 @@ The [example app](/example/) demonstrates usage of the library. You need to run 
 
 It is configured to use the local version of the library, so any changes you make to the library's source code will be reflected in the example app. Changes to the library's JavaScript code will be reflected in the example app without a rebuild, but native code changes will require a rebuild of the example app.
 
-If you want to use Android Studio or Xcode to edit the native code, you can open the `example/android` or `example/ios` directories respectively in those editors. To edit the Objective-C or Swift files, open `example/ios/OpusAudioExample.xcworkspace` in Xcode and find the source files at `Pods > Development Pods > opus-native-io`.
+If you want to use Android Studio or Xcode to edit the native code, you can open the `example/android` or `example/ios` directories respectively in those editors. To edit the Objective-C or Swift files, open `example/ios/WebmPlayerExample.xcworkspace` in Xcode and find the source files at `Pods > Development Pods > webm-player`.
 
-To edit the Java or Kotlin files, open `example/android` in Android studio and find the source files at `opus-native-io` under `Android`.
+To edit the Java or Kotlin files, open `example/android` in Android Studio and find the source files at `webm-player` under `Android`.
 
 You can use various commands from the root directory to work with the project.
 
@@ -52,7 +52,7 @@ yarn example ios
 To confirm that the app is running with the new architecture, you can check the Metro logs for a message like this:
 
 ```sh
-Running "OpusNativeIOExample" with {"fabric":true,"initialProps":{"concurrentRoot":true},"rootTag":1}
+Running "WebmPlayerExample" with {"fabric":true,"initialProps":{"concurrentRoot":true},"rootTag":1}
 ```
 
 Note the `"fabric":true` and `"concurrentRoot":true` properties.
@@ -90,6 +90,36 @@ The `package.json` file contains various scripts for common tasks:
 - `yarn example start`: start the Metro server for the example app.
 - `yarn example android`: run the example app on Android.
 - `yarn example ios`: run the example app on iOS.
+
+### Native C++ Development
+
+The shared C++ code in `cpp/` is where most of the audio/video pipeline logic lives. To test changes locally without building the full React Native app:
+
+```sh
+# Prerequisites
+brew install opus speexdsp
+
+# Run all sanitizer tests
+yarn test:asan   # AddressSanitizer + LeakSanitizer
+yarn test:tsan   # ThreadSanitizer
+yarn test:ubsan  # UndefinedBehaviorSanitizer
+```
+
+Or build and run individual test binaries:
+
+```sh
+cd tests/sanitizer
+cmake -B build -DSANITIZER=address -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+./build/test_lsan
+./build/test_ubsan
+./build/test_route_handler
+./build/test_e2e_demux
+./build/test_temporal_stress
+./build/test_health_watchdog
+```
+
+See [`tests/sanitizer/README.md`](tests/sanitizer/README.md) for details on test coverage and adding new tests.
 
 ### Sending a pull request
 

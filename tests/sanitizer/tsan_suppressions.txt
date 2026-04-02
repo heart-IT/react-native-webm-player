@@ -1,9 +1,6 @@
-# TSan suppression file for opus-native-io sanitizer tests.
+# TSan suppression file for webm-player sanitizer tests.
 #
-# TxRingBuffer uses sequence-number-based SPSC synchronization:
-# The writer stores non-atomic slot fields (dataSize, timestampUs, seqNum),
-# then publishes via slot.sequence.store(release). The reader checks
-# slot.sequence.load(acquire) before reading those fields.
-# This is a correct synchronization pattern that TSan cannot prove.
-race:TxRingBuffer::drain
-race:TxRingBuffer::write
+# Add suppressions here for known false positives in lock-free code
+# where TSan cannot model the synchronization protocol.
+#
+# Format: race:ClassName::method

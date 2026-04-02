@@ -1,135 +1,8 @@
 # Technical Reference — @holepunchto/webm-player
 
-Internals, architecture, data flow, timing model, and testing guide for developers integrating or debugging the WebM broadcast player.
+Factual reference for timing constants, threading model, metrics fields, queue contracts, and test coverage.
 
----
-
-## Architecture
-
-```
-Hypercore (read-only) → Bare Thread → RPC (muxed WebM bytes)
-    ↓
-JavaScript — feedData() forwarding only (no processing, no buffering)
-    ↓ JSI
-WebmDemuxer (shared C++) — incremental parse → AudioPacket[] + VideoPacket[]
-    ↓                                    ↓
-Audio Pipeline                     Video Pipeline
-  AudioDecodeChannel:                VideoFrameQueue:
-  Opus → JitterBuffer →             VP9 HW Decode → JitterBuffer →
-  DriftComp → Mixer →               VideoSyncController →
-  AAudio / RemoteIO →               MediaCodec Surface / VideoView →
-  Speaker                           Screen
-    ↑                                    ↑
-    └──────── AVSyncCoordinator ─────────┘
-              (audio = master clock)
-```
-
-### Layer Responsibilities
-
-| Layer | Does | Does NOT |
-|-------|------|----------|
-| **Bare Thread** | Hypercore read, delivers muxed WebM bytes | Demuxing, audio/video processing |
-| **JavaScript** | Receives muxed WebM via callback, calls `feedData()` | Buffering, DSP, timing, pacing, demuxing |
-| **Native (Demuxer)** | Parses WebM container, extracts Opus + VP9 packets | Decoding, playback |
-| **Native Audio** | Opus decode, jitter buffer, drift comp, mixer, routing | Capture, encode, network I/O |
-| **Native Video** | VP9 HW decode, render sync, surface management | Encode, network I/O |
-
-### Invariants
-
-- JS passes muxed WebM bytes — native handles all demuxing.
-- Audio callbacks only touch PCM. No codec, no locks, no allocations.
-- JS has no timing authority — native controls all pacing.
-- Audio is the master clock for A/V sync.
-- Single broadcast stream — one audio track, one video track.
-- Receive-only player — no capture, no encoding, no TX path.
-
----
-
-## Data Flow
-
-### feedData() Path
-
-```
-JS: feedData(webmBytes)
-  → JSI: extractBuffer() (zero-copy or single-copy)
-  → ClipBuffer::appendBytes() (tee raw bytes for clip capture / DVR)
-  → StallRecoveryController::onDataReceived() (reset stall detection)
-  → WebmDemuxer::feedData()
-    → StreamReader::append() (append to internal buffer)
-    → Incremental parse (fallthrough state machine)
-    → Return DemuxResult { AudioPacket[], VideoPacket[], error, newClusterCount }
-  → ClipBuffer: setStreamHeader(), onNewCluster(), onKeyFrame(), onBlockPts()
-  → Route AudioPackets → MediaSession::pushAudioFrame() → AudioDecodeChannel
-  → Route VideoPackets → VideoFrameQueue::pushEncodedFrame()
-  → Return bool to JS (false if parse error)
-```
-
-### Audio Pipeline
-
-```
-feedData() → demux → AudioDecodeChannel::pushEncodedFrame()
-  → PendingAudioPool (16 slots, pre-allocated)
-  → PendingAudioQueue (SPSC: JS thread → decode thread)
-  → DecodeThread: processPendingDecode()
-    → Pool token acquired BEFORE popping encoded queue (no frame loss)
-    → Opus decode → DecodedAudioFrame (960 samples, 20ms)
-    → DecodedAudioQueue (SPSC: decode thread → audio callback)
-  → Audio callback: readSamples() (LOCK-FREE)
-    → Drift compensation (Speex resampler if ratio != 1.0)
-    → Crossfade on PLC→real transitions
-    → Fast-drain with crossfade for burst backlogs
-  → AudioMixer: gain application (NEON/SSE SIMD)
-  → AudioLevelMeter: peak/RMS computation (NEON/SSE SIMD, atomic store)
-  → Platform audio output (AAudio / RemoteIO)
-```
-
-### Video Pipeline
-
-```
-feedData() → demux → VideoFrameQueue::pushEncodedFrame()
-  → Keyframe gating (drops non-keyframes until first keyframe)
-  → Mutex-protected deque (max 8 frames)
-  → VideoDecodeThread: tryPopReadyFrame()
-    → VideoRenderClock: wait until scheduled render time
-    → Skip stale frames (late by > half frame interval)
-  → VP9 HW decode (MediaCodec / VTDecompressionSession)
-  → Surface render (ANativeWindow / AVSampleBufferDisplayLayer)
-  → AVSyncCoordinator: report video render PTS
-```
-
-### A/V Sync
-
-Audio is the master clock. `AVSyncCoordinator` tracks the offset between audio and video render timestamps:
-
-| Offset | Action |
-|--------|--------|
-| < 15ms | No correction (ITU-R BT.1359 dead zone) |
-| 15-45ms | Gradual proportional correction |
-| > 45ms | Aggressive full correction |
-
-Video adjusts its buffer target based on the sync offset. Audio never adjusts for video.
-
----
-
-## Demuxer State Machine
-
-```
-                    feedData() with EBML magic
-WaitingForEBML ──────────────────────────────► WaitingForSegment
-     ↑                                                │
-     │ reset()                      Segment created   │
-     │                                                ↓
-  [any state]                                   ParsingTracks
-                                                      │
-                                     Tracks loaded    │
-                                     (A_OPUS + V_VP9) ↓
-                                                  Streaming
-                                                 (extracting blocks)
-```
-
-- **Incremental parsing:** Each state attempts parse and falls through on success. If more data needed, returns empty result (no error).
-- **Buffer compaction:** Discards consumed bytes before current cluster to prevent unbounded memory growth.
-- **Packet lifetime:** Packets in `DemuxResult` point into demuxer's internal buffer. Valid until next `feedData()` or `reset()` call. Both pipelines copy immediately.
+For architecture and design rationale, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For troubleshooting, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ---
 
@@ -183,6 +56,7 @@ All audio queues are **Single-Producer Single-Consumer** with `acquire`/`release
 | Max speedup | 1.05x | Catchup resampler cap |
 | Max consecutive PLC | 8 frames (160ms) | Decoder reset after this |
 | PTS forward jump | 500ms | Triggers decoder reset |
+| PTS backward jump | 200ms | Triggers decoder reset |
 | Decode pool | 16 slots | Pre-allocated decoded frame pool |
 | Decode queue | 8 slots | SPSC decoded frame queue |
 | Encoded pool | 16 slots | Pre-allocated encoded frame pool |
@@ -201,7 +75,7 @@ All audio queues are **Single-Producer Single-Consumer** with `acquire`/`release
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| Dead zone | 15ms | No correction below this |
+| Dead zone | 15ms | No correction below this (ITU-R BT.1359) |
 | Emergency threshold | 45ms | Full correction above this |
 | Correction range | 30ms (15-45ms) | Proportional correction band |
 | EWMA alpha | 1/8 | Offset smoothing factor |
@@ -215,77 +89,18 @@ All audio queues are **Single-Producer Single-Consumer** with `acquire`/`release
 | Measurement window | 30s | PPM calculation window |
 | Max combined ratio | 1.1025 | drift(1.05) x catchup(1.05) absolute max |
 
----
+### Stall Recovery
 
-## Jitter Buffer
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| Detecting threshold | 250ms | Begin monitoring |
+| Stall threshold | 500ms | Confirmed stall, request keyframe |
+| Failed threshold | 30s | Report failure |
+| Keyframe re-request interval | 2s | During sustained stalls |
+| First keyframe request delay | 200ms | Avoid spam during brief hiccups |
+| Recovery buffer target | 60ms | Minimum decoded buffer before declaring healthy |
 
-Adaptive EWMA estimator with spike detection and burst memory.
-
-### Algorithm
-
-1. **Arrival jitter:** Track inter-packet arrival time vs. expected interval
-2. **EWMA smoothing:** `jitter = alpha * sample + (1-alpha) * jitter` (alpha = 0.125)
-3. **Spike detection:** If deviation > 3x current estimate, bypass EWMA and jump immediately
-4. **Spike hold:** Maintain elevated target for 2 seconds after spike
-5. **Burst memory:** Track recurring spike patterns (ring buffer of 4 recent spikes). If 2+ spikes in 30s window, maintain a floor at 75% of minimum recent spike jitter
-6. **Buffer target:** `max(jitter * 2.5, minBuffer, burstFloor)` clamped to `[40ms, 200ms]`
-
-### Drift Tracking
-
-The jitter estimator also tracks long-term clock drift between sender and receiver:
-- Measures cumulative sample-count vs. wall-clock delta over 30s windows
-- Reports drift as PPM to `DriftCompensator`
-- Drift compensation activates only above 50 PPM threshold
-
----
-
-## Stream Recovery
-
-### Keyframe Gating (Video)
-
-`VideoFrameQueue` starts with `needsKeyFrame_ = true`. All non-keyframe VP9 packets are dropped until a keyframe arrives.
-
-- **Stream start:** Video is black until first keyframe (~500ms)
-- **After decode error:** `requestKeyFrame()` clears queue and re-enables gating
-- **Upstream signal:** `setKeyFrameNeededCallback()` notifies JS when native needs a keyframe. JS can request one from the Hypercore source to reduce recovery time below the natural keyframe interval (~500ms).
-
-### PTS Discontinuity (Audio)
-
-When `AudioDecodeChannel` detects a PTS jump > 500ms forward or > 200ms backward:
-1. Sets `needsDecoderReset_` flag
-2. Decode thread resets Opus decoder on next cycle
-3. Crossfade prevents click at splice point
-4. `ptsDiscontinuities` metric incremented
-
-### Automatic Stall Recovery
-
-`StallRecoveryController` in `cpp/common/StallRecoveryController.h` automatically handles feed stalls without JS intervention:
-
-```
-Healthy → Detecting (gap > 250ms) → Stalled (gap > 500ms) → Recovering (data resumes) → Healthy (buffer sufficient)
-                                        ↓
-                                  Failed (gap > 30s)
-```
-
-| State | Trigger | Action |
-|-------|---------|--------|
-| Detecting | Gap > 250ms | Monitor, no action yet |
-| Stalled | Gap > 500ms | Request keyframe via callback, set video queue to keyframe-gating |
-| Recovering | Data resumes | Rebuffer, wait for decoded buffer > 60ms |
-| Failed | Stall > 30s | Report failure, stop requesting keyframes |
-
-During sustained stalls, keyframe re-requests fire every 2 seconds. The first request fires 200ms into the stall to avoid spamming during brief hiccups.
-
-Stall metrics exposed via `getMetrics().stall`: state, stallCount, recoveryCount, keyFrameRequests, totalStallMs, lastStallMs, longestStallMs.
-
-### Feed Starvation
-
-If JS stops calling `feedData()`:
-- **Audio:** Transitions to Underrun state, outputs silence, PLC conceals gaps up to 160ms
-- **Video:** Holds last rendered frame
-- **Recovery:** When data resumes, decoder resets if gap > 500ms; crossfade prevents click
-
-### Backpressure
+### Backpressure Limits
 
 | Pipeline | Mechanism | Limit | On overflow |
 |----------|-----------|-------|-------------|
@@ -293,111 +108,13 @@ If JS stops calling `feedData()`:
 | Audio | Encoded pool exhaustion | 16 slots | Drop frame |
 | Video | Queue depth cap | 8 frames | Drop oldest frame |
 
----
+### Clip Buffer
 
-## Clip Capture
-
-`ClipBuffer` in `cpp/common/ClipBuffer.h` maintains a rolling ring buffer of raw WebM bytes, teed from `feedData()`. Zero re-encoding — extracts standalone WebM files by prepending cached EBML+Segment+Tracks header to selected cluster data.
-
-### Architecture
-
-```
-feedData() → ClipBuffer::appendBytes() (circular write)
-           → onNewCluster() / onKeyFrame() (cluster index)
-           → setStreamHeader() (cached once at Streaming state)
-
-captureClip(seconds) → walk keyframe index backward → copy header + clusters → file I/O on background thread → Promise<string>
-```
-
-### Ring Buffer Design
-
-- **Circular byte buffer:** Configurable size (default 4MB, ~30s at typical bitrate)
-- **Cluster index:** Ring of up to 512 `ClusterRecord` entries tracking ring offset, size, PTS, keyframe flag
-- **Keyframe-aligned extraction:** Clips always start at a keyframe cluster
-- **Wrap-around safety:** Each cluster record stores a monotonic byte counter; extraction detects overwritten data
-- **Thread safety:** Mutex-protected (JS thread writes, background thread reads for extraction; neither is RT)
-
-### API
-
-```typescript
-MediaPipeline.setClipBufferDuration(30)     // Enable, 30s rolling buffer
-const path = await MediaPipeline.captureClip(10)  // Extract last 10s as .webm file
-```
-
-Output is a valid standalone WebM file playable by any VP9-capable player. Can be published as a new Hypercore for P2P distribution.
-
----
-
-## DVR Timeshift
-
-`seekTo()` reuses the ClipBuffer infrastructure to seek backward into buffered data without network requests.
-
-### Algorithm
-
-1. Compute target PTS from offset: `targetPts = currentTimeUs + offsetSeconds * 1e6`
-2. Set `timeshifting_ = true` — incoming `feedData()` calls accumulate in `livePendingBuffer_` instead of demuxing
-3. Extract bytes from ClipBuffer via `extractFromPts(targetPts)` — header + clusters from nearest keyframe
-4. Reset demuxer + audio/video pipelines (without clearing ClipBuffer)
-5. Re-feed extracted bytes through demuxer in 64KB chunks, dispatching packets normally
-6. Drain `livePendingBuffer_` through demuxer to catch up to live
-7. Clear `timeshifting_` — resume normal flow
-
-### API
-
-```typescript
-MediaPipeline.seekTo(-10)        // Rewind 10 seconds
-MediaPipeline.seekTo(0)          // Return to live
-MediaPipeline.getBufferRangeSeconds()  // How far back seeking is possible
-```
-
----
-
-## Audio Level Metering
-
-`AudioLevelMeter` in `cpp/playback/AudioMixer.h` computes peak and RMS levels on every audio callback with zero additional allocations.
-
-- **SIMD:** NEON (ARM) and SSE (x86) paths for vectorized peak/sum-of-squares
-- **Lock-free:** Results stored in atomics, readable from any thread
-- **Clip detection:** Counts frames exceeding 1.0 (digital clipping)
-- **dBFS conversion:** `toDbfs(linear)` — static helper, returns -100 for silence
-
-Exposed via `getMetrics().levels`: peakLevel, rmsLevel, peakDbfs, rmsDbfs, clipCount.
-
----
-
-## Audio Routing
-
-Reactive model — zero state machines, zero timers. `RouteHandler` (shared C++) receives OS route change events and decides: dedup, restart, drift reset, JS callback.
-
-### iOS
-
-```
-AVAudioSessionRouteChangeNotification → serial GCD queue →
-  detectCurrentRoute() → RouteHandler::onRouteDetected() →
-  [dedup | restart | drift reset | JS callback]
-```
-
-Category: `.playback` with `.allowBluetoothA2DP` option.
-
-### Android
-
-```
-Kotlin AudioSessionBridge → JNI nativeOnAudioRouteChanged →
-  RouteHandler::onRouteDetected() →
-  [dedup | restart | drift reset | JS callback]
-```
-
-Uses `setCommunicationDevice()` on API 31+, legacy `setSpeakerphoneOn/startBluetoothSco` below.
-
-### Restart Rules
-
-| Transition | Restart? | Reason |
-|------------|----------|--------|
-| Same route | No | No change |
-| Unknown → anything | No | Initial detection |
-| Speaker ↔ Earpiece | No | Same hardware path |
-| A2DP ↔ Speaker/Earpiece | No | Both output-only |
-| All other transitions | **Yes** | Different hardware path |
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| Default buffer size | 4 MB | ~30s at typical bitrate |
+| Max cluster index | 512 entries | Ring of ClusterRecord entries |
+| Seek chunk size | 64 KB | Re-feed block size during DVR seek |
 
 ---
 
@@ -405,68 +122,43 @@ Uses `setCommunicationDevice()` on API 31+, legacy `setSpeakerphoneOn/startBluet
 
 ### iOS: AVAudioOutputBridge
 
-- **AudioUnit:** RemoteIO (`kAudioUnitSubType_RemoteIO`), output-only
-- **Format:** float32, mono, at hardware sample rate
-- **Resampling:** Speex resampler when hardware rate != 48kHz (common on BT)
-- **Callback drain:** Tracks in-flight callbacks via atomic counter. Waits for drain before AudioUnit disposal.
-- **Restart:** Dedicated thread with exponential backoff (100ms base, 3200ms max, 5 retries)
-- **Warm-up:** Pre-starts AudioUnit with silence for zero-latency first-frame
+| Property | Value |
+|----------|-------|
+| AudioUnit | RemoteIO (`kAudioUnitSubType_RemoteIO`), output-only |
+| Format | float32, mono, hardware sample rate |
+| Resampling | Speex when hardware rate != 48kHz |
+| Category | `.playback` with `.allowBluetoothA2DP` |
+| Restart backoff | 100ms base, 3200ms max, 5 retries |
 
 ### Android: AAudioOutputBridge
 
-- **API:** AAudio with `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY`
-- **Sharing:** Exclusive mode preferred, falls back to Shared if unavailable or sample rate mismatch
-- **Format:** float32, mono, 48kHz requested
-- **Resampling:** Speex resampler when AAudio grants different sample rate
-- **Error callback:** Stores error (no I/O on RT thread), schedules restart via atomic flag
-- **Restart:** Dedicated thread with same backoff strategy as iOS
+| Property | Value |
+|----------|-------|
+| API | AAudio, `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY` |
+| Sharing | Exclusive preferred, Shared fallback |
+| Format | float32, mono, 48kHz requested |
+| Resampling | Speex when AAudio grants different rate |
+| Restart backoff | 100ms base, 3200ms max, 5 retries |
 
-### Resample Buffer Sizing
+### Resample Buffer
 
-Both platforms pre-allocate source buffers for worst-case: 4096 hardware frames at 6x upsample ratio (8kHz → 48kHz) = 24,576 samples. The render callback clamps to buffer capacity as defense-in-depth.
+Both platforms: 4096 hardware frames x 6x upsample ratio (8kHz → 48kHz) = 24,576 samples pre-allocated.
 
 ---
 
-## Health Watchdog
+## Audio Route Restart Matrix
 
-State machine in `cpp/common/HealthWatchdog.h`, wired through `DecodeThread` → `MediaSession` → `MediaPipelineModule` (both platforms). Uses `weak_from_this` + `CallInvoker::invokeAsync` for JS dispatch.
+| Transition | Restart? |
+|------------|----------|
+| Same route | No |
+| Unknown → anything | No |
+| Speaker ↔ Earpiece | No |
+| A2DP ↔ Speaker/Earpiece | No |
+| All other transitions | **Yes** |
 
-### API
+---
 
-```typescript
-enum StreamHealth {
-  Healthy = 0,      // All metrics normal
-  Buffering = 1,    // Initial buffering or rebuffering after gap
-  Degraded = 2,     // Playback continuing with quality loss
-  Stalled = 3,      // No data flowing, PLC/frame-hold active
-  Failed = 4        // Unrecoverable — requires stop/start
-}
-
-interface HealthEvent {
-  status: StreamHealth
-  detail: string
-  streamStatus: StreamStatus   // Context from integrator (Live/Buffering/Ended/NoPeers)
-  metrics: {
-    underruns: number
-    decodeErrors: number
-    framesDropped: number
-    avSyncOffsetUs: number
-    bufferTargetUs: number
-    gapsOver100ms: number
-    gapsOver500ms: number
-    ptsDiscontinuities: number
-    decoderResets: number
-    videoFramesReceived: number
-    videoFramesDecoded: number
-    videoFramesDropped: number
-  }
-}
-
-type HealthCallback = (event: HealthEvent) => void
-// On MediaPipeline: setHealthCallback(callback: HealthCallback | null): boolean
-```
-
-### States
+## Health Watchdog States
 
 | State | Trigger | Recovery |
 |-------|---------|----------|
@@ -476,11 +168,9 @@ type HealthCallback = (event: HealthEvent) => void
 | **Stalled** | Feed gap > 500ms | Resume feeding |
 | **Failed** | Decode thread detached or audio output stopped | Requires `stop()` + `start()` |
 
-### Trigger Conditions
+### Transition Conditions
 
-Events fire on **transitions only** — not repeatedly while in a state.
-
-| Transition | Condition | Detail |
+| Transition | Condition | Detail string |
 |-----------|-----------|--------|
 | → Buffering | First `feedData()` after `start()`, before audio plays | "initial buffering" |
 | → Buffering | `underruns` increments after being in Healthy | "rebuffering: audio underrun" |
@@ -493,115 +183,13 @@ Events fire on **transitions only** — not repeatedly while in a state.
 | → Failed | Audio output `lastError` non-zero + restart retries exhausted | "audio output failed" |
 | → Failed | `decoderResets` > 3 in 10 seconds | "decoder failing repeatedly" |
 
-### Evaluation Window
-
-- 5-second sliding window for delta computation
-- Compares current metrics snapshot against window-start baseline
-- Only fires on state *transition*, not repeatedly while in a state
-
-### Implementation Notes
-
-- **Thread:** Health checks run on the decode thread (already periodic). Callback dispatched to JS thread via `CallInvoker::invokeAsync`.
-- **Dedup:** Only fire on state transition. Track `currentHealth_` atomic. Compare-and-swap before firing.
-- **Lifecycle:** Same `weak_from_this` + null-check pattern as route callback. Clear in `uninstall()`.
-- **No RT-thread work:** Health evaluation reads atomics only. No allocation, no locks.
-- **Rate limit:** Maximum one event per 500ms to prevent JS thread flooding during cascading failures.
-
----
-
-## Testing
-
-### Automated (CI)
-
-| Test | Command | Tests |
-|------|---------|-------|
-| AddressSanitizer + LeakSanitizer | `yarn test:asan` | 30 |
-| ThreadSanitizer | `yarn test:tsan` | 25 |
-| UndefinedBehaviorSanitizer | `yarn test:ubsan` | 71 |
-| RouteHandler (pure C++) | Runs with ASan build | 17 |
-| TypeScript build | `yarn prepare` | — |
-| Type check | `yarn typecheck` | — |
-| Lint | `yarn lint` | — |
-
-Total: **143 native tests** across 4 test suites.
-
-### What the Tests Cover
-
-**LeakSanitizer (test_lsan.cpp):** FramePool acquire/release/RAII, FrameQueue SPSC push/pop/clear, JitterEstimator lifecycle, DriftCompensator/Speex resampler, CatchupController, AudioMixer, DecodeThread start/stop, OpusDecoderAdapter init/decode/PLC/move, pool stress cycles, ClipBuffer enable/disable/extract lifecycle, StallRecoveryController reset cycles.
-
-**ThreadSanitizer (test_tsan.cpp):** Concurrent FramePool acquire/release (4 threads), SPSC producer/consumer (1000 frames), JitterEstimator concurrent update/read with spike detection, DriftCompensator concurrent update+read, CatchupController bidirectional, AudioDecodeChannel concurrent push+read+decode, AudioMixer concurrent access, DecodeThread concurrent push, StreamMetrics concurrent counters, VideoFrameQueue concurrent push/pop and reset-during-push, VideoJitterEstimator and VideoSurfaceRegistry concurrent access, ClipBuffer concurrent append+extractClip+extractFromPts, StallRecoveryController concurrent evaluate+onDataReceived+stall-and-recover, AudioLevelMeter concurrent update+read.
-
-**UndefinedBehaviorSanitizer (test_ubsan.cpp):** Pool boundary conditions (exhaustion, double-release, access-after-release), JitterEstimator arithmetic (zero interval, large deviation, negative timestamps, overflow guards), DriftCompensator division-by-zero/extreme-drift/negative-drift, Speex resampler extreme ratios (0.5-2.0), CatchupController no-slowdown/speedup-to-unity, AudioMixer null/zero/gain-ramp, AudioDecodeChannel inactive-read/push/zero-size/buffer-target-extremes, OpusDecoderAdapter null/uninitialized/DTX/garbage/zero-size, AudioResampler passthrough/max-output/float, VideoFrameQueue keyframe/oversize/null/overflow, VideoJitterEstimator/RenderClock edge cases, AudioLevelMeter silence/sine/clipping/dBFS/non-aligned/small-buffer, ClipBuffer lifecycle/wrap-around/extractFromPts/availableRange, StallRecoveryController initial-state/reset.
-
-**RouteHandler (test_route_handler.cpp):** Initial route detection, dedup same-route, route change with callback+restart, builtin transitions (no restart), A2DP transitions (no restart), SCO/Wired/USB transitions (restart), unknown route handling, drift reset behavior, reset/reinitialize, comprehensive `needsRestart()` matrix, multiple sequential route changes.
-
-### Manual (Pre-Release)
-
-| Test | Requirement |
-|------|-------------|
-| Device matrix | 3+ Android OEMs, 2+ iOS devices |
-| A/V sync | < 45ms offset sustained |
-| 4-hour stability | No memory growth, no crashes |
-| Power consumption | < 8%/hr (screen on) |
-| Bluetooth routing | Connect/disconnect/reconnect A2DP |
-| Background execution | Audio continues in background |
-| Route changes | Speaker ↔ BT ↔ Wired transitions |
-| Video quality | No persistent artifacts, keyframe recovery |
-
-### Running Tests Locally
-
-```sh
-# Prerequisites
-brew install opus speexdsp
-
-# ASan (memory errors + leaks)
-cd tests/sanitizer
-cmake -B build -DSANITIZER=address -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j
-./build/test_lsan
-./build/test_ubsan
-./build/test_route_handler
-
-# TSan (data races)
-cmake -B build_tsan -DSANITIZER=thread -DCMAKE_BUILD_TYPE=Debug
-cmake --build build_tsan -j --target test_tsan
-./build_tsan/test_tsan
-```
-
-### Writing New Tests
-
-Tests use a simple static-registration pattern:
-
-```cpp
-#include <cstdio>
-
-struct Test { const char* name; bool (*fn)(); };
-static Test tests[512];
-static int testCount = 0;
-
-#define TEST(name) \
-  static bool test_##name(); \
-  static struct Register_##name { \
-    Register_##name() { tests[testCount++] = {#name, test_##name}; } \
-  } reg_##name; \
-  static bool test_##name()
-
-TEST(my_new_test) {
-    // Test code here
-    return true;  // pass
-}
-```
-
-Add tests to the appropriate file based on what sanitizer should catch the class of bug:
-- `test_lsan.cpp` — memory leaks, use-after-free, double-free
-- `test_tsan.cpp` — data races, concurrent access patterns
-- `test_ubsan.cpp` — integer overflow, null deref, division by zero, out-of-bounds
+Evaluation: 5-second sliding window, events fire on state transitions only, rate-limited to one event per 500ms.
 
 ---
 
 ## Metrics Reference
 
-`MediaPipeline.getMetrics()` returns a `PlayerMetrics` object:
+`MediaPipeline.getMetrics()` returns a `PlayerMetrics` object. See [`src/index.tsx`](src/index.tsx) for the full TypeScript interface.
 
 ### health
 
@@ -618,6 +206,7 @@ Add tests to the appropriate file based on what sanitizer should catch the class
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `framesReceived` | number | Audio frames received from demuxer |
 | `underruns` | number | Audio callback had no data (silence output) |
 | `framesDropped` | number | Frames dropped due to overflow or late arrival |
 | `framesDrained` | number | Frames discarded by fast-drain (burst backlog) |
@@ -630,26 +219,39 @@ Add tests to the appropriate file based on what sanitizer should catch the class
 | `gapsOver50ms` | number | Feed gaps > 50ms |
 | `gapsOver100ms` | number | Feed gaps > 100ms |
 | `gapsOver500ms` | number | Feed gaps > 500ms |
+| `plcFrames` | number | PLC (packet loss concealment) frames generated |
+| `peakConsecutivePLC` | number | Longest consecutive PLC run |
 
 ### video
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `avSyncOffsetUs` | number | Current A/V sync offset (audio = master) |
+| `framesReceived` | number | VP9 frames received from demuxer |
 | `framesDecoded` | number | VP9 frames successfully decoded |
 | `framesDropped` | number | Video frames dropped |
 | `decodeErrors` | number | VP9 decode failures |
-| `decoderResets` | number | VP9 decoder resets (error accumulation or session invalidation) |
 | `currentFps` | number | Current render frame rate |
 | `width` | number | Decoded video width |
 | `height` | number | Decoded video height |
+| `jitterUs` | number | Video jitter estimate |
+| `bufferTargetUs` | number | Video jitter buffer target |
 | `lateFrames` | number | Frames past render deadline |
 | `skippedFrames` | number | Frames skipped (stale, replaced by fresher) |
+| `decoderResets` | number | VP9 decoder resets |
 | `surfaceLostCount` | number | Render surface detach events |
 | `maxInterFrameGapMs` | number | Largest gap between consecutive video frames received |
 | `gapsOver50ms` | number | Video feed gaps > 50ms |
 | `gapsOver100ms` | number | Video feed gaps > 100ms |
 | `gapsOver500ms` | number | Video feed gaps > 500ms |
+| `driftPpm` | number | Video clock drift in PPM |
+| `decodeLatencyUs` | number | Last decode duration |
+| `lastDecodeTimeUs` | number | Timestamp of last decode |
+| `lastDecodeError` | number | Last VP9 decode error code |
+| `queueDepth` | number | Current encoded video queue depth |
+| `needsKeyFrame` | boolean | Waiting for keyframe |
+| `keyFrameRequests` | number | Total keyframes requested |
+| `decoderState` | number | VideoDecoderState enum value |
 
 ### pipeline
 
@@ -690,6 +292,10 @@ Add tests to the appropriate file based on what sanitizer should catch the class
 | `lastError` | number | Last platform error code (0 = OK) |
 | `actualSampleRate` | number | Hardware sample rate granted |
 | `latencyUs` | number | Measured output latency |
+| `callbackJitterUs` | number | Audio callback timing jitter |
+| `running` | boolean | Audio output stream is running |
+| `interrupted` | boolean | Audio session interrupted (iOS) |
+| `sampleRateValid` | boolean | Granted sample rate is usable |
 
 ### bluetooth
 
@@ -745,38 +351,71 @@ Add tests to the appropriate file based on what sanitizer should catch the class
 | `audioPacketsEmitted` | number | Opus packets extracted |
 | `videoPacketsEmitted` | number | VP9 packets extracted |
 | `overflowCount` | number | Demuxer buffer overflow events |
-| `parseState` | number | Demuxer parse state (0-4) |
+| `blockStallCount` | number | Blocks stalled waiting for data |
+| `bufferBytes` | number | Current demuxer buffer size |
+| `parseState` | number | Demuxer state (0=WaitingForEBML, 1=WaitingForSegment, 2=ParsingTracks, 3=Streaming) |
+| `partialDropCount` | number | Partial blocks dropped |
 
 ---
 
-## Triage Guide
+## Testing
 
-### Audio Issues
+### Automated (CI)
 
-| Symptom | Check | Likely Cause |
-|---------|-------|-------------|
-| Silence / dropouts | `quality.underruns` rising | Feed starvation or decode failure |
-| Clicks / pops | `quality.framesDrained` > 0 | Fast-drain discarding frames (burst too large) |
-| Robotic / pitch shift | `drift.driftPpm` > 200 | Excessive clock drift |
-| Gradual latency increase | `jitter.bufferTargetUs` > 100000 | Jitter spikes inflating target |
-| Stuttery audio | `quality.ptsDiscontinuities` > 0 | Timestamp jumps in source |
+| Suite | Command | Tests | What it catches |
+|-------|---------|-------|-----------------|
+| AddressSanitizer + LeakSanitizer | `yarn test:asan` | 31 | Memory leaks, use-after-free, double-free, buffer overflow |
+| ThreadSanitizer | `yarn test:tsan` | 34 | Data races, concurrent access violations |
+| UndefinedBehaviorSanitizer | `yarn test:ubsan` | 87 | Integer overflow, null deref, division by zero, out-of-bounds |
+| Route handler | Runs with ASan build | 18 | Audio routing logic (pure C++) |
+| End-to-end demux | Runs with ASan build | 22 | WebM demuxer with real stream data |
+| Temporal stress | Runs with UBSan build | 19 | Pipeline behavior under temporal stress |
+| Health watchdog | Standalone | 52 | Health state machine transitions |
+| TypeScript build | `yarn prepare` | — | Type errors |
+| Type check | `yarn typecheck` | — | Type errors without build |
+| Lint | `yarn lint` | — | Style violations |
 
-### Video Issues
+Total: **263 native tests** across 7 test binaries.
 
-| Symptom | Check | Likely Cause |
-|---------|-------|-------------|
-| Black screen | `video.framesDropped` = `video.framesDecoded` = 0 | Waiting for keyframe |
-| Freezes | `video.lateFrames` rising | Network jitter too high |
-| Green / corrupt | `video.decodeErrors` > 0 | VP9 decoder state corrupted (auto-recovers via keyframe) |
-| Lip sync off | `video.avSyncOffsetUs` > 45000 | Clock drift dragging audio away from video |
+### Test Coverage
 
-### System Issues
+**LeakSanitizer (test_lsan.cpp):** FramePool acquire/release/RAII, FrameQueue SPSC push/pop/clear, JitterEstimator lifecycle, DriftCompensator/Speex resampler, CatchupController, AudioMixer, DecodeThread start/stop, OpusDecoderAdapter init/decode/PLC/move, pool stress cycles, ClipBuffer enable/disable/extract lifecycle, StallRecoveryController reset cycles.
 
-| Symptom | Check | Likely Cause |
-|---------|-------|-------------|
-| `feedData()` returns false | — | Malformed WebM data |
-| Rising memory | `pools.*UnderPressure` | Decode thread falling behind |
-| Audio stops on BT connect | `audioOutput.restartCount` rising | Audio output restart failed |
+**ThreadSanitizer (test_tsan.cpp):** Concurrent FramePool acquire/release (4 threads), SPSC producer/consumer (1000 frames), JitterEstimator concurrent update/read with spike detection, DriftCompensator concurrent update+read, CatchupController bidirectional, AudioDecodeChannel concurrent push+read+decode, AudioMixer concurrent access, DecodeThread concurrent push, StreamMetrics concurrent counters, VideoFrameQueue concurrent push/pop and reset-during-push, VideoJitterEstimator and VideoSurfaceRegistry concurrent access, ClipBuffer concurrent append+extractClip+extractFromPts, StallRecoveryController concurrent evaluate+onDataReceived+stall-and-recover, AudioLevelMeter concurrent update+read.
+
+**UndefinedBehaviorSanitizer (test_ubsan.cpp):** Pool boundary conditions (exhaustion, double-release, access-after-release), JitterEstimator arithmetic (zero interval, large deviation, negative timestamps, overflow guards), DriftCompensator division-by-zero/extreme-drift/negative-drift, Speex resampler extreme ratios (0.5-2.0), CatchupController no-slowdown/speedup-to-unity, AudioMixer null/zero/gain-ramp, AudioDecodeChannel inactive-read/push/zero-size/buffer-target-extremes, OpusDecoderAdapter null/uninitialized/DTX/garbage/zero-size, AudioResampler passthrough/max-output/float, VideoFrameQueue keyframe/oversize/null/overflow, VideoJitterEstimator/RenderClock edge cases, AudioLevelMeter silence/sine/clipping/dBFS/non-aligned/small-buffer, ClipBuffer lifecycle/wrap-around/extractFromPts/availableRange, StallRecoveryController initial-state/reset.
+
+**RouteHandler (test_route_handler.cpp):** Initial route detection, dedup same-route, route change with callback+restart, builtin transitions (no restart), A2DP transitions (no restart), SCO/Wired/USB transitions (restart), unknown route handling, drift reset behavior, reset/reinitialize, comprehensive `needsRestart()` matrix, multiple sequential route changes.
+
+### Running Tests Locally
+
+```sh
+# Prerequisites
+brew install opus speexdsp
+
+# ASan (memory errors + leaks)
+cd tests/sanitizer
+cmake -B build -DSANITIZER=address -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+./build/test_lsan
+./build/test_ubsan
+./build/test_route_handler
+
+# TSan (data races)
+cmake -B build_tsan -DSANITIZER=thread -DCMAKE_BUILD_TYPE=Debug
+cmake --build build_tsan -j --target test_tsan
+./build_tsan/test_tsan
+```
+
+### Test File Guide
+
+| File | Sanitizer | What to add here |
+|------|-----------|-----------------|
+| `test_lsan.cpp` | ASan + LSan | Memory leaks, use-after-free, double-free |
+| `test_tsan.cpp` | TSan | Data races, concurrent access patterns |
+| `test_ubsan.cpp` | UBSan | Integer overflow, null deref, division by zero, out-of-bounds |
+| `test_route_handler.cpp` | ASan | Audio routing logic (pure C++) |
+| `test_temporal_stress.cpp` | UBSan | Behavioral pipeline verification under temporal stress |
 
 ---
 
@@ -818,6 +457,11 @@ webm-player/
 ├── ios/
 │   ├── playback/                    # RemoteIO + audio session
 │   └── video/                       # VTDecompressionSession VP9
+├── docs/
+│   ├── ARCHITECTURE.md              # Design rationale and data flow
+│   ├── GETTING_STARTED.md           # Tutorial
+│   ├── INTEGRATION_GUIDE.md         # Platform setup how-to
+│   └── TROUBLESHOOTING.md           # Symptom-driven diagnosis
 ├── example/                         # Example React Native app
 └── tests/sanitizer/                 # ASan, TSan, UBSan tests
 ```
