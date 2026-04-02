@@ -254,7 +254,11 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         break;
 
     case ParseState::Error:
-        cachedResult_.error = "demuxer in error state, call reset() to recover";
+        // Auto-reset on continued feed rather than requiring explicit JS reset().
+        // This allows recovery after transient parse failures without JS intervention.
+        // The new data will be parsed on the next feedData() call after reset.
+        MEDIA_LOG_W("WebmDemuxer: auto-resetting from error state on new feedData");
+        reset();
         return cachedResult_;
     }
 

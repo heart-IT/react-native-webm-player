@@ -118,6 +118,10 @@ export interface PlayerMetrics {
     keyFrameRequests: number
     /** VideoDecoderState enum value (0=NotCreated through 4=Failed). */
     decoderState: number
+    /** Video decode thread is responding to heartbeat checks. */
+    decodeThreadResponsive: boolean
+    /** Milliseconds since last video decode thread heartbeat. */
+    timeSinceVideoHeartbeatMs: number
   }
   /** Audio pipeline state. */
   pipeline: {
@@ -145,6 +149,8 @@ export interface PlayerMetrics {
     mode: string
     /** True if AAudio exclusive mode or RemoteIO low-latency was granted. */
     isLowestLatency: boolean
+    /** Estimated end-to-end latency in microseconds (buffered audio + output latency). */
+    endToEndUs: number
   }
   /** Frame pool pressure indicators. */
   pools: {

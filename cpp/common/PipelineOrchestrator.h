@@ -19,6 +19,7 @@
 #include "MediaConfig.h"
 #include "JsiUtils.h"
 #include "AudioRouteTypes.h"
+#include "MediaTime.h"
 #include "HealthWatchdog.h"
 #include "ClipBuffer.h"
 #include "StallRecoveryController.h"
@@ -399,10 +400,18 @@ public:
                                 auto clipData = std::make_shared<std::vector<uint8_t>>(std::move(clipResult.data));
                                 // Hold strong ref to keep module (and thus orch) alive until async callback completes
                                 auto threadOwner = weakOwner.lock();
-                                // Detach previous clip thread if still running — it holds
-                                // a strong owner ref so the module stays alive. Blocking
-                                // join here would stall the JS thread for the full I/O.
-                                if (orch->clipThread_.joinable()) orch->clipThread_.detach();
+                                // Join previous clip thread with a short timeout to avoid
+                                // accumulating detached threads on rapid clip requests.
+                                // Fall back to detach if still running — it holds a strong
+                                // owner ref so the module stays alive.
+                                if (orch->clipThread_.joinable()) {
+                                    if (orch->clipThreadDone_.load(std::memory_order_acquire)) {
+                                        orch->clipThread_.join();
+                                    } else {
+                                        orch->clipThread_.detach();
+                                    }
+                                }
+                                orch->clipThreadDone_.store(false, std::memory_order_relaxed);
                                 orch->clipThread_ = std::thread([clipData, resolve, reject, callInvoker, threadOwner, orch]() {
                                     std::string filePath = media::ClipBuffer::generateFilePath();
                                     std::string error;
@@ -413,13 +422,17 @@ public:
                                         fclose(f);
                                         if (written != clipData->size()) error = "incomplete write";
                                     }
-                                    if (!threadOwner || !orch->runtime_) return;
+                                    if (!threadOwner || !orch->runtime_) {
+                                        orch->clipThreadDone_.store(true, std::memory_order_release);
+                                        return;
+                                    }
                                     callInvoker->invokeAsync([resolve, reject, filePath, error, threadOwner, orch]() {
                                         if (!threadOwner || !orch->runtime_) return;
                                         auto& rt = *orch->runtime_;
                                         if (error.empty()) resolve->call(rt, jsi::String::createFromUtf8(rt, filePath));
                                         else reject->call(rt, jsi::String::createFromUtf8(rt, error));
                                     });
+                                    orch->clipThreadDone_.store(true, std::memory_order_release);
                                 });
                                 return jsi::Value::undefined();
                             }));
@@ -585,6 +598,7 @@ private:
         jsi::Object latency(rt);
         latency.setProperty(rt, "mode", media::latencyModeToString(metrics.grantedLatencyMode));
         latency.setProperty(rt, "isLowestLatency", metrics.grantedLatencyMode == media::LatencyMode::LowLatency);
+        latency.setProperty(rt, "endToEndUs", static_cast<double>(metrics.bufferedDurationUs + metrics.audioOutputLatencyUs));
         result.setProperty(rt, "latency", std::move(latency));
 
         jsi::Object pools(rt);
@@ -689,6 +703,9 @@ private:
             video.setProperty(rt, "needsKeyFrame", videoQueue_->isAwaitingKeyFrame());
             video.setProperty(rt, "keyFrameRequests", static_cast<double>(vm.keyFrameRequests.load(std::memory_order_relaxed)));
             video.setProperty(rt, "decoderState", static_cast<int>(vm.decoderState.load(std::memory_order_relaxed)));
+            video.setProperty(rt, "decodeThreadResponsive", vm.decodeThreadResponsive.load(std::memory_order_relaxed));
+            int64_t vhb = vm.lastHeartbeatUs.load(std::memory_order_relaxed);
+            video.setProperty(rt, "timeSinceVideoHeartbeatMs", vhb > 0 ? static_cast<double>(nowUs() - vhb) / 1000.0 : 0.0);
         } else {
             video.setProperty(rt, "framesReceived", 0.0); video.setProperty(rt, "framesDecoded", 0.0);
             video.setProperty(rt, "framesDropped", 0.0); video.setProperty(rt, "decodeErrors", 0.0);
@@ -701,6 +718,7 @@ private:
             video.setProperty(rt, "gapsOver500ms", 0.0); video.setProperty(rt, "driftPpm", 0.0);
             video.setProperty(rt, "decodeLatencyUs", 0.0); video.setProperty(rt, "lastDecodeTimeUs", 0.0);
             video.setProperty(rt, "lastDecodeError", 0); video.setProperty(rt, "queueDepth", 0); video.setProperty(rt, "needsKeyFrame", false); video.setProperty(rt, "keyFrameRequests", 0.0); video.setProperty(rt, "decoderState", 0);
+            video.setProperty(rt, "decodeThreadResponsive", false); video.setProperty(rt, "timeSinceVideoHeartbeatMs", 0.0);
         }
         video.setProperty(rt, "avSyncOffsetUs", syncCoordinator_
             ? static_cast<double>(syncCoordinator_->currentOffsetUs()) : 0.0);
@@ -1071,6 +1089,7 @@ private:
     jsi::Runtime* runtime_{nullptr};
     WeakOwner weakOwner_;
     std::thread clipThread_;
+    std::atomic<bool> clipThreadDone_{true};
 
     void joinClipThread() noexcept {
         if (clipThread_.joinable()) clipThread_.join();

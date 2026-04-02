@@ -105,9 +105,9 @@ enum class LatencyMode : uint8_t {
 
 inline const char* latencyModeToString(LatencyMode mode) noexcept {
     switch (mode) {
-        case LatencyMode::LowLatency: return "LowLatency";
-        case LatencyMode::Standard:   return "Standard";
-        default:                      return "Unknown";
+        case LatencyMode::LowLatency: return "low_latency";
+        case LatencyMode::Standard:   return "standard";
+        default:                      return "unknown";
     }
 }
 

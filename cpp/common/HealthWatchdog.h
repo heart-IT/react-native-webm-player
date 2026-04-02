@@ -218,11 +218,12 @@ public:
             return StreamHealth::Degraded;
         if (errorDelta >= config::health::kDegradedDecodeErrorThreshold)
             return StreamHealth::Degraded;
-        // Audio receiving frames but not producing output — decoder is failing
-        if (audioRecvDelta > 0 && audioOutputDelta == 0)
+        // Audio receiving frames but not producing output — decoder is failing.
+        // Require meaningful receive count to avoid false trigger during initial buffering.
+        if (audioRecvDelta > 10 && audioOutputDelta == 0)
             return StreamHealth::Degraded;
-        // Video receiving frames but not decoding any — decoder is failing
-        if (videoRecvDelta > 0 && videoDecDelta == 0)
+        // Video receiving frames but not decoding any — decoder is failing.
+        if (videoRecvDelta > 10 && videoDecDelta == 0)
             return StreamHealth::Degraded;
         // Sustained A/V desync beyond ITU-R BT.1359 perceptible threshold
         int64_t absOffset = snap.avSyncOffsetUs >= 0 ? snap.avSyncOffsetUs : -snap.avSyncOffsetUs;

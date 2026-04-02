@@ -61,6 +61,10 @@ struct VideoStreamMetrics {
     // Decoder lifecycle state (for triage: why is decode not happening?)
     std::atomic<uint8_t> decoderState{static_cast<uint8_t>(VideoDecoderState::NotCreated)};
 
+    // Video decode thread liveness (written by VideoDecodeThread, read by PipelineOrchestrator)
+    std::atomic<bool> decodeThreadResponsive{false};
+    std::atomic<int64_t> lastHeartbeatUs{0};
+
     void reset() noexcept {
         framesReceived.store(0, std::memory_order_relaxed);
         framesDecoded.store(0, std::memory_order_relaxed);
@@ -86,6 +90,8 @@ struct VideoStreamMetrics {
         needsKeyFrame.store(true, std::memory_order_relaxed);
         keyFrameRequests.store(0, std::memory_order_relaxed);
         decoderState.store(static_cast<uint8_t>(VideoDecoderState::NotCreated), std::memory_order_relaxed);
+        decodeThreadResponsive.store(false, std::memory_order_relaxed);
+        lastHeartbeatUs.store(0, std::memory_order_relaxed);
     }
 };
 

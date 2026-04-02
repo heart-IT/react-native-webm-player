@@ -38,10 +38,10 @@ public:
         if (running_.load(std::memory_order_acquire)) return true;
         if (!queue || !factory) return false;
 
-        frameQueue_ = queue;
+        frameQueue_.store(queue, std::memory_order_relaxed);
         decoderFactory_ = std::move(factory);
-        frameQueue_->setWakeCallback([this]() { wake(); });
-        frameQueue_->setResetCallback([this]() {
+        queue->setWakeCallback([this]() { wake(); });
+        queue->setResetCallback([this]() {
             pendingClockReset_.store(true, std::memory_order_release);
             wake();
         });
@@ -55,13 +55,17 @@ public:
     void stop() {
         running_.store(false, std::memory_order_release);
         wake();
-        if (frameQueue_) {
-            frameQueue_->setWakeCallback(nullptr);
-            frameQueue_->setResetCallback(nullptr);
+        auto* queue = frameQueue_.load(std::memory_order_acquire);
+        if (queue) {
+            queue->setWakeCallback(nullptr);
+            queue->setResetCallback(nullptr);
         }
         timedJoin(thread_, threadExited_, config::thread::kThreadJoinTimeoutMs, "VideoDecodeThread");
 
         if (!threadExited_.load(std::memory_order_acquire)) {
+            // Null out frameQueue_ so the detached thread stops accessing it
+            // on its next loop iteration (every access loads this atomic).
+            frameQueue_.store(nullptr, std::memory_order_release);
             MEDIA_LOG_E("VideoDecodeThread: thread detached, skipping resource destruction");
             return;
         }
@@ -74,12 +78,13 @@ public:
         consecutiveErrors_ = 0;
         decoderResetTimeUs_ = 0;
         decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
+        surfaceLostKeyFrameRequested_ = false;
         syncCoordinator_.reset();
         pendingClockReset_.store(false, std::memory_order_relaxed);
         lastHeartbeatUs_.store(0, std::memory_order_relaxed);
         watchdogTripped_.store(false, std::memory_order_relaxed);
         watchdogTripCount_.store(0, std::memory_order_relaxed);
-        frameQueue_ = nullptr;
+        frameQueue_.store(nullptr, std::memory_order_relaxed);
         decoderFactory_ = nullptr;
     }
 
@@ -119,11 +124,11 @@ public:
     }
 
 private:
-    // Caller must hold decoderMtx_
-    VideoDecoder* getOrCreateDecoderLocked() {
+    // Caller must hold decoderMtx_. fq must be non-null.
+    VideoDecoder* getOrCreateDecoderLocked(VideoFrameQueue* fq) {
         if (decoder_) return decoder_.get();
 
-        auto& metrics = frameQueue_->metrics();
+        auto& metrics = fq->metrics();
 
         // Backoff after error-driven decoder reset to prevent HAL thrashing
         if (decoderResetTimeUs_ > 0) {
@@ -161,6 +166,9 @@ private:
         uint32_t lastWakeVersion = 0;
 
         while (running_.load(std::memory_order_acquire)) {
+            auto* fq = frameQueue_.load(std::memory_order_acquire);
+            if (!fq) break;  // Queue nulled by stop() after detach
+
             bool didWork = false;
 
             if (pendingClockReset_.exchange(false, std::memory_order_acquire)) {
@@ -174,15 +182,19 @@ private:
                 decoder_.reset();
                 renderClock_.reset();
                 lastAnchorTimeUs_ = 0;
-                frameQueue_->requestKeyFrame();
+                if (!surfaceLostKeyFrameRequested_) {
+                    fq->requestKeyFrame();
+                    surfaceLostKeyFrameRequested_ = true;
+                }
             } else {
+                surfaceLostKeyFrameRequested_ = false;
                 int64_t now = nowUs();
 
                 // Anchor render clock on first frame
                 if (!renderClock_.isAnchored()) {
                     int64_t nextPts;
-                    if (frameQueue_->peekNextPts(nextPts)) {
-                        int64_t adjustedTarget = frameQueue_->bufferTargetUs() + syncCoordinator_.videoBufferAdjustmentUs();
+                    if (fq->peekNextPts(nextPts)) {
+                        int64_t adjustedTarget = fq->bufferTargetUs() + syncCoordinator_.videoBufferAdjustmentUs();
                         adjustedTarget = std::clamp(adjustedTarget,
                                                     video_config::jitter::kMinBufferUs,
                                                     video_config::jitter::kMaxBufferUs);
@@ -196,48 +208,46 @@ private:
                 }
 
                 // Update buffer target with A/V sync correction
-                int64_t adjustedTarget = frameQueue_->bufferTargetUs() + syncCoordinator_.videoBufferAdjustmentUs();
+                int64_t adjustedTarget = fq->bufferTargetUs() + syncCoordinator_.videoBufferAdjustmentUs();
                 adjustedTarget = std::clamp(adjustedTarget,
                                             video_config::jitter::kMinBufferUs,
                                             video_config::jitter::kMaxBufferUs);
                 renderClock_.updateBufferTarget(adjustedTarget);
-                renderClock_.setPlaybackRate(frameQueue_->playbackRate());
+                renderClock_.setPlaybackRate(fq->playbackRate());
 
                 // Update jitter metrics
-                frameQueue_->metrics().jitterUs.store(frameQueue_->jitterUs(), std::memory_order_relaxed);
-                frameQueue_->metrics().bufferTargetUs.store(frameQueue_->bufferTargetUs(), std::memory_order_relaxed);
+                fq->metrics().jitterUs.store(fq->jitterUs(), std::memory_order_relaxed);
+                fq->metrics().bufferTargetUs.store(fq->bufferTargetUs(), std::memory_order_relaxed);
 
                 // Pop and decode
-                auto popResult = frameQueue_->tryPopReadyFrame(frame, renderClock_, now);
+                auto popResult = fq->tryPopReadyFrame(frame, renderClock_, now);
                 if (popResult != PopResult::Nothing) {
-                    // Hold lock for entire submit+postDecode cycle so the
-                    // decoder pointer stays valid through both operations
                     std::lock_guard<std::mutex> lk(decoderMtx_);
-                    auto* dec = getOrCreateDecoderLocked();
+                    auto* dec = getOrCreateDecoderLocked(fq);
                     if (dec) {
                         auto decodeStart = nowUs();
                         if (dec->submitFrame(frame.data.data(), frame.data.size(),
                                               frame.ptsUs, frame.isKeyFrame)) {
                             auto decodeDuration = nowUs() - decodeStart;
-                            auto prev = frameQueue_->metrics().decodeLatencyUs.load(std::memory_order_relaxed);
+                            auto prev = fq->metrics().decodeLatencyUs.load(std::memory_order_relaxed);
                             auto smoothed = prev == 0 ? decodeDuration : prev + (decodeDuration - prev) / 8;
-                            frameQueue_->metrics().decodeLatencyUs.store(smoothed, std::memory_order_relaxed);
-                            frameQueue_->metrics().lastDecodeTimeUs.store(nowUs(), std::memory_order_relaxed);
+                            fq->metrics().decodeLatencyUs.store(smoothed, std::memory_order_relaxed);
+                            fq->metrics().lastDecodeTimeUs.store(nowUs(), std::memory_order_relaxed);
                             consecutiveErrors_ = 0;
                             decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
-                            frameQueue_->metrics().framesDecoded.fetch_add(1, std::memory_order_relaxed);
-                            frameQueue_->metrics().currentFps.store(
+                            fq->metrics().framesDecoded.fetch_add(1, std::memory_order_relaxed);
+                            fq->metrics().currentFps.store(
                                 fpsCounter_.tick(nowUs()), std::memory_order_relaxed);
                             if (dec->decodedWidth() > 0) {
-                                frameQueue_->metrics().width.store(dec->decodedWidth(), std::memory_order_relaxed);
-                                frameQueue_->metrics().height.store(dec->decodedHeight(), std::memory_order_relaxed);
+                                fq->metrics().width.store(dec->decodedWidth(), std::memory_order_relaxed);
+                                fq->metrics().height.store(dec->decodedHeight(), std::memory_order_relaxed);
                                 VideoSurfaceRegistry::instance().setDecodedResolution(
                                     dec->decodedWidth(), dec->decodedHeight());
                             }
                             syncCoordinator_.onVideoRender(frame.ptsUs, nowUs());
                         } else {
-                            frameQueue_->metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
-                            frameQueue_->metrics().lastDecodeError.store(dec->lastError(), std::memory_order_relaxed);
+                            fq->metrics().decodeErrors.fetch_add(1, std::memory_order_relaxed);
+                            fq->metrics().lastDecodeError.store(dec->lastError(), std::memory_order_relaxed);
                             if (++consecutiveErrors_ >= kMaxConsecutiveErrors) {
                                 MEDIA_LOG_E("VideoDecodeThread: %d consecutive errors, resetting decoder (backoff=%lldms)",
                                             consecutiveErrors_, static_cast<long long>(decoderResetBackoffUs_ / 1000));
@@ -246,20 +256,22 @@ private:
                                 lastAnchorTimeUs_ = 0;
                                 decoderResetTimeUs_ = nowUs();
                                 decoderResetBackoffUs_ = std::min(decoderResetBackoffUs_ * 2, kMaxDecoderResetBackoffUs);
-                                frameQueue_->requestKeyFrame();
-                                frameQueue_->metrics().decoderResets.fetch_add(1, std::memory_order_relaxed);
+                                fq->requestKeyFrame();
+                                fq->metrics().decoderResets.fetch_add(1, std::memory_order_relaxed);
                                 consecutiveErrors_ = 0;
                             }
                         }
-                        // Release output buffers while still holding lock
                         if (decoder_) decoder_->postDecode();
                     }
                     didWork = true;
                 }
             }
 
-            lastHeartbeatUs_.store(nowUs(), std::memory_order_relaxed);
+            auto heartbeatNow = nowUs();
+            lastHeartbeatUs_.store(heartbeatNow, std::memory_order_relaxed);
             watchdogTripped_.store(false, std::memory_order_relaxed);
+            fq->metrics().decodeThreadResponsive.store(true, std::memory_order_relaxed);
+            fq->metrics().lastHeartbeatUs.store(heartbeatNow, std::memory_order_relaxed);
 
             if (!didWork) {
                 consecutiveIdleCycles++;
@@ -299,7 +311,7 @@ private:
     std::atomic<int64_t> lastHeartbeatUs_{0};
     mutable std::atomic<bool> watchdogTripped_{false};
     std::atomic<uint32_t> watchdogTripCount_{0};
-    VideoFrameQueue* frameQueue_ = nullptr;
+    std::atomic<VideoFrameQueue*> frameQueue_{nullptr};
     DecoderFactory decoderFactory_;
 
     std::unique_ptr<VideoDecoder> decoder_;
@@ -318,6 +330,7 @@ private:
     int consecutiveErrors_ = 0;
     int64_t decoderResetTimeUs_ = 0;
     int64_t decoderResetBackoffUs_ = kInitialDecoderResetBackoffUs;
+    bool surfaceLostKeyFrameRequested_ = false;
 };
 
 }  // namespace media
