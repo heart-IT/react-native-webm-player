@@ -153,6 +153,14 @@ add_executable(test_audit_proof
 )
 target_link_libraries(test_audit_proof PRIVATE ${OPUS_LIBRARY} ${SPEEXDSP_LIBRARY})
 
+# ---- Transcript module tests (ring buffer + registry) ----
+add_executable(test_transcript
+    test_transcript.cpp
+)
+target_include_directories(test_transcript PRIVATE
+    ${CPP_ROOT}/transcript
+)
+
 # ---- HealthWatchdog state machine test ----
 add_executable(test_health_watchdog
     test_health_watchdog.cpp
