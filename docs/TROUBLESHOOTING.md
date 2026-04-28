@@ -139,3 +139,66 @@ Intermittent gaps just above the 500ms stall threshold.
 1. `quality.gapsOver500ms` trip stall detection.
 2. Raise buffer to absorb longer gaps: `setBufferTarget(120, 120)`.
 3. Investigate source — Hypercore peer connection unstable?
+
+---
+
+## Build / install
+
+### iOS — `[CP] Copy XCFrameworks` fails with `No such file or directory`
+
+The podspec's `prepare_command` didn't finish building `opus.xcframework` or `whisper.xcframework`. Most often `cmake` is missing or the Xcode CLI tools aren't installed.
+
+```sh
+brew install cmake
+xcode-select --install
+
+(cd ios/opus && ./build-opus.sh build)
+(cd ios/whisper && ./build-whisper.sh build)
+cd example/ios && bundle exec pod install
+```
+
+See [Integration Guide › Pod install builds vendored XCFrameworks](INTEGRATION_GUIDE.md#pod-install-builds-vendored-xcframeworks).
+
+### iOS — `fmt` / `consteval` build errors locally
+
+```
+call to consteval function 'fmt::basic_format_string<...>' is not a constant expression
+```
+
+Xcode 26.x ships a stricter clang that rejects React Native 0.81's vendored `fmt` headers. **Environmental, not a project bug** — CI uses a pinned Xcode image and builds clean. To unblock locally, install Xcode 16 alongside 26 and switch:
+
+```sh
+sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+```
+
+### Android — `error: member access into incomplete type`
+
+Stale `.cxx/` build cache after a header restructure. Clean and rebuild:
+
+```sh
+cd example/android && ./gradlew clean
+rm -rf ../../android/.cxx
+yarn example android
+```
+
+If the error persists after a clean build, a real bug — file an issue with the failing compiler invocation.
+
+### Android — NDK version mismatch
+
+This library requires NDK r27 (clang with C++20 support). Older NDKs miss `<concepts>` and the `std::ranges` library. Set in `example/android/local.properties`:
+
+```
+ndk.dir=/Users/you/Library/Android/sdk/ndk/27.1.12297006
+```
+
+### Bundler / Ruby — `Could not find 'bundler' (2.5.23)`
+
+System Ruby on macOS is read-only. Install a user-level Ruby:
+
+```sh
+brew install rbenv
+rbenv install 3.2.2 && rbenv global 3.2.2
+gem install bundler:2.5.23
+```
+
+Restart your shell (or `exec zsh`) so the rbenv shim takes precedence over `/usr/bin/ruby`.

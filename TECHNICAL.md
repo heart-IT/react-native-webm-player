@@ -135,6 +135,24 @@ Exponential backoff prevents reset storms. Doubles on consecutive failures, rese
 
 ---
 
+## Compile-time flags
+
+Set in `android/src/main/jni/CMakeLists.txt` (Android) and `WebmPlayer.podspec` (iOS).
+
+| Flag                    | Default | Where set       | Purpose                                                           |
+| ----------------------- | ------- | --------------- | ----------------------------------------------------------------- |
+| `HAVE_OPUS=1`           | always  | both            | Enables Opus decode path (the player won't run without it)        |
+| `HAVE_WHISPER=1`        | always  | both            | Enables on-device transcription (whisper.cpp)                     |
+| `FLOATING_POINT=1`      | always  | both            | SpeexDSP resampler in floating-point mode                         |
+| `EXPORT=` (empty)       | always  | both            | SpeexDSP symbol-export macro — neutralized for static linking     |
+| `USE_NEON=1`            | arm64   | iOS only        | Enable NEON SIMD intrinsics in audio mixer                        |
+| `MEDIA_DEBUG`           | Debug   | Android (Debug) | Compiles `MEDIA_LOG_*` macros to logcat output (no-op in Release) |
+| `MEDIA_DEBUG_THREADING` | Debug   | Android (Debug) | Compiles thread-affinity / scheduler trace logs                   |
+
+Release builds strip both `MEDIA_DEBUG*` flags — log calls compile to nothing, zero runtime cost.
+
+---
+
 ## Audio route restart matrix
 
 | Transition              | Restart? |

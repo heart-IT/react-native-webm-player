@@ -1,8 +1,14 @@
 # @heartit/webm-player
 
+[![CI](https://github.com/heart-IT/react-native-webm-player/actions/workflows/ci.yml/badge.svg)](https://github.com/heart-IT/react-native-webm-player/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@heartit/webm-player.svg)](https://www.npmjs.com/package/@heartit/webm-player)
+[![license](https://img.shields.io/npm/l/@heartit/webm-player.svg)](LICENSE)
+
 Native WebM broadcast player for React Native — VP9 video + Opus audio with hardware-accelerated decode and A/V sync.
 
 Receive-only. No capture, no encoding, no transmission. JS passes muxed WebM bytes to native via `feedData()`; native demuxes, decodes, and renders.
+
+Built for low-latency broadcast streams (one producer, many consumers) where standard players carry overhead you don't need: peer streaming, multi-track, DRM, ABR ladders. JSI for synchronous native calls; audio is the master clock; A/V sync targets <45ms sustained.
 
 ## Install
 
@@ -198,6 +204,11 @@ MediaPipeline.setHealthCallback((event: HealthEvent) => {
     case StreamHealth.Buffering:
       showSpinner()
       break
+    case StreamHealth.Degraded:
+      // Sustained underruns, decode errors, A/V drift, or video stalls.
+      // Player keeps playing — log for telemetry.
+      logTelemetry('degraded', event.detail, event.metrics)
+      break
     case StreamHealth.Stalled:
       reconnectStream()
       break
@@ -354,12 +365,16 @@ yarn test:ubsan  # UndefinedBehaviorSanitizer
 
 368 native tests across 12 binaries. See [`tests/sanitizer/README.md`](tests/sanitizer/README.md).
 
-### iOS Opus XCFramework
+### iOS vendored XCFrameworks
+
+Both XCFrameworks build automatically on `pod install` (via the podspec's `prepare_command`). Manual rebuild is only needed if you change the build script.
 
 ```sh
 cd ios/opus
-./build-opus.sh clean
-./build-opus.sh build   # Opus 1.6.1
+./build-opus.sh clean && ./build-opus.sh build       # Opus 1.6.1
+
+cd ../whisper
+./build-whisper.sh clean && ./build-whisper.sh build # whisper.cpp v1.8.4
 ```
 
 ## Platform requirements

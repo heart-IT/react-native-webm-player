@@ -43,8 +43,27 @@ Running "WebmPlayerExample" with {"fabric":true,"initialProps":{"concurrentRoot"
 ```sh
 yarn typecheck
 yarn lint
+yarn lint:size                  # file-size budget enforcement
 yarn format                     # fix formatting
 ```
+
+### File-size budgets
+
+`yarn lint:size` enforces a **600-line hard ceiling** and **400-line warning** per source file (vendored and generated code excluded). If your change pushes a file past 400 lines, the PR description must explain why no extraction was possible.
+
+The principle: line budgets are a forcing function. Fixes accumulating in one file are a refactor signal, not a comfort zone. Bug fixes don't grow files past budget — extract first (in its own PR), fix in the new file.
+
+A single class should have a single responsibility. If a class has more than one `public:` block, that class is doing more than one thing — split it. Headers stay in `.h`; non-template implementations belong in `.cpp` or `.inl`.
+
+### Adding a new JSI method
+
+The native API is wired through a single dispatch table on both platforms. To add a method:
+
+1. Declare in `src/MediaPipeline.ts` (TS-side type).
+2. Add the binding in the appropriate `cpp/common/bindings/*.inl` — current files: `LifecycleBindings`, `AudioControlBindings`, `AudioRoutingBindings`, `CallbackBindings`, `ClipBindings`, `QueryBindings`, `TranscriptBindings`.
+3. Native handler lives in `cpp/common/PipelineOrchestrator.h` or the relevant subsystem.
+4. iOS + Android share the binding — no platform-specific JSI plumbing needed unless the call must touch a platform API.
+5. If the method changes `HealthEvent.metrics`, update `cpp/pipeline/MetricsCollector.h` and the README metrics table.
 
 ## Scripts
 

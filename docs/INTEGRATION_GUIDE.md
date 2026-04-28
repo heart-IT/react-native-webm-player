@@ -187,6 +187,25 @@ function openBatterySettings() {
 
 ## iOS
 
+### Pod install builds vendored XCFrameworks
+
+`pod install` runs `prepare_command` from `WebmPlayer.podspec`, which builds two XCFrameworks from source:
+
+- `ios/opus/lib/opus.xcframework` — Opus 1.6.1
+- `ios/whisper/lib/whisper.xcframework` — whisper.cpp v1.8.4
+
+**Required tools:** `cmake` (`brew install cmake`) and Xcode CLI tools. Cold first install takes ~3–5 min; subsequent installs skip if the xcframeworks already exist.
+
+If `pod install` fails with `[CP] Copy XCFrameworks` errors at build time, the prepare step likely didn't complete. Rebuild manually:
+
+```sh
+(cd ios/opus && ./build-opus.sh build)
+(cd ios/whisper && ./build-whisper.sh build)
+cd example/ios && bundle exec pod install
+```
+
+Each XCFramework ships an `ios-arm64` device slice and an `ios-arm64_x86_64-simulator` universal slice — supports both Apple Silicon and Intel simulators.
+
 ### Background audio
 
 `Info.plist`:
