@@ -20,6 +20,7 @@ yarn
 The example app is wired to the local library, so library JS changes are picked up without rebuilds; native changes require a rebuild of the example.
 
 Open native sources in:
+
 - **Xcode:** `example/ios/WebmPlayerExample.xcworkspace` → `Pods > Development Pods > webm-player`
 - **Android Studio:** `example/android` → `webm-player` under Android
 
@@ -47,17 +48,17 @@ yarn format                     # fix formatting
 
 ## Scripts
 
-| Script | Purpose |
-|--------|---------|
-| `yarn` | Install deps |
-| `yarn prepare` | Build TS → `lib/` |
-| `yarn build` | Clean + rebuild |
-| `yarn typecheck` | Type check |
-| `yarn lint` | Lint (`lunte`) |
-| `yarn format` | Prettier |
-| `yarn test` | Format check + lint |
-| `yarn clean` | Remove build artifacts |
-| `yarn example start \| ios \| android` | Run example app |
+| Script                                 | Purpose                |
+| -------------------------------------- | ---------------------- |
+| `yarn`                                 | Install deps           |
+| `yarn prepare`                         | Build TS → `lib/`      |
+| `yarn build`                           | Clean + rebuild        |
+| `yarn typecheck`                       | Type check             |
+| `yarn lint`                            | Lint (`lunte`)         |
+| `yarn format`                          | Prettier               |
+| `yarn test`                            | Format check + lint    |
+| `yarn clean`                           | Remove build artifacts |
+| `yarn example start \| ios \| android` | Run example app        |
 
 ## Native C++ development
 

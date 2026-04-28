@@ -211,12 +211,22 @@ import { MediaPipeline, StreamHealth, type HealthEvent } from '@heartit/webm-pla
 
 MediaPipeline.setHealthCallback((event: HealthEvent) => {
   switch (event.status) {
-    case StreamHealth.Buffering: showLoadingSpinner(); break
-    case StreamHealth.Healthy:   hideLoadingSpinner(); break
-    case StreamHealth.Degraded:  showQualityWarning(event.detail); break
-    case StreamHealth.Stalled:   showReconnecting(); break
+    case StreamHealth.Buffering:
+      showLoadingSpinner()
+      break
+    case StreamHealth.Healthy:
+      hideLoadingSpinner()
+      break
+    case StreamHealth.Degraded:
+      showQualityWarning(event.detail)
+      break
+    case StreamHealth.Stalled:
+      showReconnecting()
+      break
     case StreamHealth.Failed:
-      MediaPipeline.stop(); MediaPipeline.start(); reconnectToSource()
+      MediaPipeline.stop()
+      MediaPipeline.start()
+      reconnectToSource()
       break
   }
 })
@@ -233,8 +243,12 @@ import { MediaPipeline, StreamStatus } from '@heartit/webm-player'
 
 MediaPipeline.setKeyFrameNeededCallback(() => requestKeyFrameFromSource())
 
-function onSourceDisconnected() { MediaPipeline.setStreamStatus(StreamStatus.NoPeers) }
-function onSourceReconnected()  { MediaPipeline.setStreamStatus(StreamStatus.Live) }
+function onSourceDisconnected() {
+  MediaPipeline.setStreamStatus(StreamStatus.NoPeers)
+}
+function onSourceReconnected() {
+  MediaPipeline.setStreamStatus(StreamStatus.Live)
+}
 ```
 
 Without `setKeyFrameNeededCallback` wired, recovery still works — but must wait for the next natural keyframe (~500ms typical) instead of requesting one immediately.
@@ -264,10 +278,10 @@ Reactive — connect/disconnect headsets and the player adjusts automatically wi
 ## Clip capture
 
 ```typescript
-MediaPipeline.setClipBufferDuration(60)                              // keep last 60s
+MediaPipeline.setClipBufferDuration(60) // keep last 60s
 
 async function captureClip(seconds: number): Promise<string> {
-  return MediaPipeline.captureClip(seconds)                          // returns file path
+  return MediaPipeline.captureClip(seconds) // returns file path
 }
 ```
 
@@ -281,8 +295,8 @@ Seek within the buffered ring for instant replay. DVR reuses the clip buffer —
 
 ```typescript
 const available = MediaPipeline.getBufferRangeSeconds()
-MediaPipeline.seekTo(-10)   // rewind 10s
-MediaPipeline.seekTo(0)     // return to live
+MediaPipeline.seekTo(-10) // rewind 10s
+MediaPipeline.seekTo(0) // return to live
 ```
 
 ---
@@ -294,11 +308,19 @@ import { MediaPipeline, AudioFocusState } from '@heartit/webm-player'
 
 MediaPipeline.setAudioFocusCallback((state) => {
   switch (state) {
-    case AudioFocusState.Lost:                 MediaPipeline.stop(); break
-    case AudioFocusState.LostTransient:        MediaPipeline.pause(); break
-    case AudioFocusState.LostTransientCanDuck: MediaPipeline.setGain(0.3); break
+    case AudioFocusState.Lost:
+      MediaPipeline.stop()
+      break
+    case AudioFocusState.LostTransient:
+      MediaPipeline.pause()
+      break
+    case AudioFocusState.LostTransientCanDuck:
+      MediaPipeline.setGain(0.3)
+      break
     case AudioFocusState.Gained:
-      MediaPipeline.resume(); MediaPipeline.setGain(1.0); break
+      MediaPipeline.resume()
+      MediaPipeline.setGain(1.0)
+      break
   }
 })
 ```
@@ -311,12 +333,12 @@ MediaPipeline.setAudioFocusCallback((state) => {
 function logPlaybackHealth() {
   const m = MediaPipeline.getMetrics()
   console.log({
-    underruns:   m.quality.underruns,
-    fps:         m.video.currentFps,
-    avSyncUs:    m.video.avSyncOffsetUs,
-    driftPpm:    m.drift.driftPpm,
-    jitterUs:    m.jitter.bufferTargetUs,
-    stall:       m.stall.state
+    underruns: m.quality.underruns,
+    fps: m.video.currentFps,
+    avSyncUs: m.video.avSyncOffsetUs,
+    driftPpm: m.drift.driftPpm,
+    jitterUs: m.jitter.bufferTargetUs,
+    stall: m.stall.state
   })
 }
 

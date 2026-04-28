@@ -120,26 +120,16 @@ function App(): React.ReactElement {
   const [running, setRunning] = useState(false)
   const [muted, setMuted] = useState(false)
   const [gain, setGain] = useState(1.0)
-  const [currentRoute, setCurrentRoute] = useState<AudioRoute>(
-    AudioRoute.Speaker
-  )
-  const [availableDevices, setAvailableDevices] = useState<AudioDeviceInfo[]>(
-    []
-  )
-  const [healthStatus, setHealthStatus] = useState<StreamHealth>(
-    StreamHealth.Healthy
-  )
+  const [currentRoute, setCurrentRoute] = useState<AudioRoute>(AudioRoute.Speaker)
+  const [availableDevices, setAvailableDevices] = useState<AudioDeviceInfo[]>([])
+  const [healthStatus, setHealthStatus] = useState<StreamHealth>(StreamHealth.Healthy)
   const [healthDetail, setHealthDetail] = useState('')
   const [trackInfo, setTrackInfo] = useState<TrackInfo | null>(null)
   const [metrics, setMetrics] = useState<PlayerMetrics | null>(null)
   const [paused, setPaused] = useState(false)
   const [playbackRate, setPlaybackRate] = useState(1.0)
-  const [catchupPolicy, setCatchupPolicy] = useState<CatchupPolicy>(
-    CatchupPolicy.Accelerate
-  )
-  const [playbackState, setPlaybackState] = useState<PlaybackState>(
-    PlaybackState.Idle
-  )
+  const [catchupPolicy, setCatchupPolicy] = useState<CatchupPolicy>(CatchupPolicy.Accelerate)
+  const [playbackState, setPlaybackState] = useState<PlaybackState>(PlaybackState.Idle)
   const [bufferRange, setBufferRange] = useState(0)
   const [clipPath, setClipPath] = useState<string | null>(null)
   const [clipCapturing, setClipCapturing] = useState(false)
@@ -326,7 +316,7 @@ function App(): React.ReactElement {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle='light-content' />
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.title}>WebM Player</Text>
 
@@ -334,12 +324,7 @@ function App(): React.ReactElement {
 
         {/* Health status bar */}
         {running && (
-          <View
-            style={[
-              styles.healthBar,
-              { backgroundColor: healthColor(healthStatus) }
-            ]}
-          >
+          <View style={[styles.healthBar, { backgroundColor: healthColor(healthStatus) }]}>
             <Text style={styles.healthText}>
               {healthLabel(healthStatus)}
               {healthDetail ? ` — ${healthDetail}` : ''}
@@ -359,33 +344,23 @@ function App(): React.ReactElement {
 
           {installed && !running && (
             <View style={styles.buttonRow}>
-              <TouchableOpacity
-                style={[styles.button, styles.flexButton]}
-                onPress={doWarmUp}
-              >
+              <TouchableOpacity style={[styles.button, styles.flexButton]} onPress={doWarmUp}>
                 <Text style={styles.buttonText}>Warm Up</Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.button, styles.flexButton]}
-                onPress={doStart}
-              >
+              <TouchableOpacity style={[styles.button, styles.flexButton]} onPress={doStart}>
                 <Text style={styles.buttonText}>Start</Text>
               </TouchableOpacity>
             </View>
           )}
 
           {running && (
-            <TouchableOpacity
-              style={[styles.button, styles.stopButton]}
-              onPress={doStop}
-            >
+            <TouchableOpacity style={[styles.button, styles.stopButton]} onPress={doStop}>
               <Text style={styles.buttonText}>Stop</Text>
             </TouchableOpacity>
           )}
 
           <Text style={styles.status}>
-            Installed: {installed ? 'Yes' : 'No'} | Running:{' '}
-            {running ? 'Yes' : 'No'} | State:{' '}
+            Installed: {installed ? 'Yes' : 'No'} | Running: {running ? 'Yes' : 'No'} | State:{' '}
             {playbackStateLabel(playbackState)}
           </Text>
         </View>
@@ -405,20 +380,13 @@ function App(): React.ReactElement {
               <Text style={styles.sectionTitle}>Audio</Text>
               <View style={styles.controlRow}>
                 <TouchableOpacity
-                  style={[
-                    styles.muteButton,
-                    muted && styles.muteButtonActive
-                  ]}
+                  style={[styles.muteButton, muted && styles.muteButtonActive]}
                   onPress={toggleMute}
                 >
-                  <Text style={styles.buttonText}>
-                    {muted ? 'Unmute' : 'Mute'}
-                  </Text>
+                  <Text style={styles.buttonText}>{muted ? 'Unmute' : 'Mute'}</Text>
                 </TouchableOpacity>
                 <View style={styles.gainContainer}>
-                  <Text style={styles.gainLabel}>
-                    Gain: {gain.toFixed(1)}
-                  </Text>
+                  <Text style={styles.gainLabel}>Gain: {gain.toFixed(1)}</Text>
                   <View style={styles.gainButtons}>
                     <TouchableOpacity
                       style={styles.gainButton}
@@ -439,9 +407,7 @@ function App(): React.ReactElement {
 
             {/* Audio Route */}
             <View style={styles.section}>
-              <Text style={styles.sectionTitle}>
-                Route: {routeName(currentRoute)}
-              </Text>
+              <Text style={styles.sectionTitle}>Route: {routeName(currentRoute)}</Text>
               <View style={styles.routeRow}>
                 {(availableDevices.length > 0
                   ? [...new Set(availableDevices.map((d) => d.route))]
@@ -449,10 +415,7 @@ function App(): React.ReactElement {
                 ).map((route) => (
                   <TouchableOpacity
                     key={route}
-                    style={[
-                      styles.routeButton,
-                      currentRoute === route && styles.routeButtonActive
-                    ]}
+                    style={[styles.routeButton, currentRoute === route && styles.routeButtonActive]}
                     onPress={() => setRoute(route)}
                   >
                     <Text style={styles.routeText}>{routeName(route)}</Text>
@@ -469,24 +432,17 @@ function App(): React.ReactElement {
                   style={[styles.button, styles.flexButton, paused && styles.muteButtonActive]}
                   onPress={paused ? doResume : doPause}
                 >
-                  <Text style={styles.buttonText}>
-                    {paused ? 'Resume' : 'Pause'}
-                  </Text>
+                  <Text style={styles.buttonText}>{paused ? 'Resume' : 'Pause'}</Text>
                 </TouchableOpacity>
               </View>
 
               {/* Playback Rate */}
-              <Text style={styles.subLabel}>
-                Rate: {playbackRate.toFixed(1)}x
-              </Text>
+              <Text style={styles.subLabel}>Rate: {playbackRate.toFixed(1)}x</Text>
               <View style={styles.buttonRow}>
                 {[0.5, 1.0, 1.5, 2.0].map((rate) => (
                   <TouchableOpacity
                     key={rate}
-                    style={[
-                      styles.rateButton,
-                      playbackRate === rate && styles.routeButtonActive
-                    ]}
+                    style={[styles.rateButton, playbackRate === rate && styles.routeButtonActive]}
                     onPress={() => changePlaybackRate(rate)}
                   >
                     <Text style={styles.routeText}>{rate}x</Text>
@@ -498,20 +454,12 @@ function App(): React.ReactElement {
             {/* DVR / Seek */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>DVR / Seek</Text>
-              <Text style={styles.metricText}>
-                Buffer range: {bufferRange.toFixed(1)}s
-              </Text>
+              <Text style={styles.metricText}>Buffer range: {bufferRange.toFixed(1)}s</Text>
               <View style={styles.buttonRow}>
-                <TouchableOpacity
-                  style={[styles.button, styles.flexButton]}
-                  onPress={doRewind}
-                >
+                <TouchableOpacity style={[styles.button, styles.flexButton]} onPress={doRewind}>
                   <Text style={styles.buttonText}>Rewind 10s</Text>
                 </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.button, styles.flexButton]}
-                  onPress={doGoLive}
-                >
+                <TouchableOpacity style={[styles.button, styles.flexButton]} onPress={doGoLive}>
                   <Text style={styles.buttonText}>Go Live</Text>
                 </TouchableOpacity>
               </View>
@@ -555,9 +503,7 @@ function App(): React.ReactElement {
                     ]}
                     onPress={() => changeCatchupPolicy(policy)}
                   >
-                    <Text style={styles.routeText}>
-                      {catchupPolicyLabel(policy)}
-                    </Text>
+                    <Text style={styles.routeText}>{catchupPolicyLabel(policy)}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -567,12 +513,9 @@ function App(): React.ReactElement {
             {trackInfo && (
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Track Info</Text>
+                <Text style={styles.metricText}>Audio: {trackInfo.audioCodecId}</Text>
                 <Text style={styles.metricText}>
-                  Audio: {trackInfo.audioCodecId}
-                </Text>
-                <Text style={styles.metricText}>
-                  Video: {trackInfo.videoCodecId} {trackInfo.videoWidth}x
-                  {trackInfo.videoHeight}
+                  Video: {trackInfo.videoCodecId} {trackInfo.videoWidth}x{trackInfo.videoHeight}
                 </Text>
               </View>
             )}
@@ -586,12 +529,9 @@ function App(): React.ReactElement {
                   {levelMeter(metrics.levels.peakDbfs)}
                 </Text>
                 <Text style={styles.meterText}>
-                  RMS:  {metrics.levels.rmsDbfs.toFixed(1)} dBFS{' '}
-                  {levelMeter(metrics.levels.rmsDbfs)}
+                  RMS: {metrics.levels.rmsDbfs.toFixed(1)} dBFS {levelMeter(metrics.levels.rmsDbfs)}
                 </Text>
-                <Text style={styles.metricText}>
-                  Clips: {metrics.levels.clipCount}
-                </Text>
+                <Text style={styles.metricText}>Clips: {metrics.levels.clipCount}</Text>
               </View>
             )}
 
@@ -600,28 +540,13 @@ function App(): React.ReactElement {
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Stall Recovery</Text>
                 <View style={styles.metricsGrid}>
-                  <MetricItem label="State" value={metrics.stall.state} />
-                  <MetricItem label="Stalls" value={metrics.stall.stallCount} />
-                  <MetricItem
-                    label="Recoveries"
-                    value={metrics.stall.recoveryCount}
-                  />
-                  <MetricItem
-                    label="KF Requests"
-                    value={metrics.stall.keyFrameRequests}
-                  />
-                  <MetricItem
-                    label="Total"
-                    value={`${metrics.stall.totalStallMs}ms`}
-                  />
-                  <MetricItem
-                    label="Last"
-                    value={`${metrics.stall.lastStallMs}ms`}
-                  />
-                  <MetricItem
-                    label="Longest"
-                    value={`${metrics.stall.longestStallMs}ms`}
-                  />
+                  <MetricItem label='State' value={metrics.stall.state} />
+                  <MetricItem label='Stalls' value={metrics.stall.stallCount} />
+                  <MetricItem label='Recoveries' value={metrics.stall.recoveryCount} />
+                  <MetricItem label='KF Requests' value={metrics.stall.keyFrameRequests} />
+                  <MetricItem label='Total' value={`${metrics.stall.totalStallMs}ms`} />
+                  <MetricItem label='Last' value={`${metrics.stall.lastStallMs}ms`} />
+                  <MetricItem label='Longest' value={`${metrics.stall.longestStallMs}ms`} />
                 </View>
               </View>
             )}
@@ -631,50 +556,17 @@ function App(): React.ReactElement {
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Quality Metrics</Text>
                 <View style={styles.metricsGrid}>
-                  <MetricItem
-                    label="Underruns"
-                    value={metrics.quality.underruns}
-                  />
-                  <MetricItem
-                    label="Drops (A)"
-                    value={metrics.quality.framesDropped}
-                  />
-                  <MetricItem
-                    label="Decode Err"
-                    value={metrics.quality.decodeErrors}
-                  />
-                  <MetricItem
-                    label="Dec Resets"
-                    value={metrics.quality.decoderResets}
-                  />
-                  <MetricItem
-                    label="PTS Disc"
-                    value={metrics.quality.ptsDiscontinuities}
-                  />
-                  <MetricItem
-                    label="Gaps >50ms"
-                    value={metrics.quality.gapsOver50ms}
-                  />
-                  <MetricItem
-                    label="Gaps >100ms"
-                    value={metrics.quality.gapsOver100ms}
-                  />
-                  <MetricItem
-                    label="Gaps >500ms"
-                    value={metrics.quality.gapsOver500ms}
-                  />
-                  <MetricItem
-                    label="Max Gap"
-                    value={`${metrics.quality.maxInterFrameGapMs}ms`}
-                  />
-                  <MetricItem
-                    label="Received"
-                    value={metrics.quality.framesReceived}
-                  />
-                  <MetricItem
-                    label="Drained"
-                    value={metrics.quality.framesDrained}
-                  />
+                  <MetricItem label='Underruns' value={metrics.quality.underruns} />
+                  <MetricItem label='Drops (A)' value={metrics.quality.framesDropped} />
+                  <MetricItem label='Decode Err' value={metrics.quality.decodeErrors} />
+                  <MetricItem label='Dec Resets' value={metrics.quality.decoderResets} />
+                  <MetricItem label='PTS Disc' value={metrics.quality.ptsDiscontinuities} />
+                  <MetricItem label='Gaps >50ms' value={metrics.quality.gapsOver50ms} />
+                  <MetricItem label='Gaps >100ms' value={metrics.quality.gapsOver100ms} />
+                  <MetricItem label='Gaps >500ms' value={metrics.quality.gapsOver500ms} />
+                  <MetricItem label='Max Gap' value={`${metrics.quality.maxInterFrameGapMs}ms`} />
+                  <MetricItem label='Received' value={metrics.quality.framesReceived} />
+                  <MetricItem label='Drained' value={metrics.quality.framesDrained} />
                 </View>
               </View>
             )}
@@ -684,60 +576,27 @@ function App(): React.ReactElement {
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Video Metrics</Text>
                 <View style={styles.metricsGrid}>
+                  <MetricItem label='FPS' value={metrics.video.currentFps.toFixed(1)} />
                   <MetricItem
-                    label="FPS"
-                    value={metrics.video.currentFps.toFixed(1)}
-                  />
-                  <MetricItem
-                    label="A/V Sync"
+                    label='A/V Sync'
                     value={`${(metrics.video.avSyncOffsetUs / 1000).toFixed(1)}ms`}
                   />
+                  <MetricItem label='Decoded' value={metrics.video.framesDecoded} />
+                  <MetricItem label='Drops (V)' value={metrics.video.framesDropped} />
+                  <MetricItem label='Late' value={metrics.video.lateFrames} />
+                  <MetricItem label='Skipped' value={metrics.video.skippedFrames} />
+                  <MetricItem label='Queue' value={metrics.video.queueDepth} />
                   <MetricItem
-                    label="Decoded"
-                    value={metrics.video.framesDecoded}
-                  />
-                  <MetricItem
-                    label="Drops (V)"
-                    value={metrics.video.framesDropped}
-                  />
-                  <MetricItem
-                    label="Late"
-                    value={metrics.video.lateFrames}
-                  />
-                  <MetricItem
-                    label="Skipped"
-                    value={metrics.video.skippedFrames}
-                  />
-                  <MetricItem
-                    label="Queue"
-                    value={metrics.video.queueDepth}
-                  />
-                  <MetricItem
-                    label="V Jitter"
+                    label='V Jitter'
                     value={`${(metrics.video.jitterUs / 1000).toFixed(1)}ms`}
                   />
+                  <MetricItem label='V Drift' value={`${metrics.video.driftPpm.toFixed(0)}ppm`} />
+                  <MetricItem label='V Dec Err' value={metrics.video.decodeErrors} />
+                  <MetricItem label='V Dec Rst' value={metrics.video.decoderResets} />
+                  <MetricItem label='Surf Lost' value={metrics.video.surfaceLostCount} />
+                  <MetricItem label='Needs KF' value={metrics.video.needsKeyFrame ? 'Yes' : 'No'} />
                   <MetricItem
-                    label="V Drift"
-                    value={`${metrics.video.driftPpm.toFixed(0)}ppm`}
-                  />
-                  <MetricItem
-                    label="V Dec Err"
-                    value={metrics.video.decodeErrors}
-                  />
-                  <MetricItem
-                    label="V Dec Rst"
-                    value={metrics.video.decoderResets}
-                  />
-                  <MetricItem
-                    label="Surf Lost"
-                    value={metrics.video.surfaceLostCount}
-                  />
-                  <MetricItem
-                    label="Needs KF"
-                    value={metrics.video.needsKeyFrame ? 'Yes' : 'No'}
-                  />
-                  <MetricItem
-                    label="Size"
+                    label='Size'
                     value={`${metrics.video.width}x${metrics.video.height}`}
                   />
                 </View>
@@ -750,29 +609,17 @@ function App(): React.ReactElement {
                 <Text style={styles.sectionTitle}>Jitter / Drift</Text>
                 <View style={styles.metricsGrid}>
                   <MetricItem
-                    label="Jitter"
+                    label='Jitter'
                     value={`${(metrics.jitter.jitterUs / 1000).toFixed(1)}ms`}
                   />
                   <MetricItem
-                    label="Buf Target"
+                    label='Buf Target'
                     value={`${(metrics.jitter.bufferTargetUs / 1000).toFixed(0)}ms`}
                   />
-                  <MetricItem
-                    label="Drift"
-                    value={`${metrics.drift.driftPpm.toFixed(0)}ppm`}
-                  />
-                  <MetricItem
-                    label="Drift Active"
-                    value={metrics.drift.active ? 'Yes' : 'No'}
-                  />
-                  <MetricItem
-                    label="Ratio"
-                    value={metrics.drift.currentRatio.toFixed(6)}
-                  />
-                  <MetricItem
-                    label="Catchup"
-                    value={metrics.drift.catchupRatio.toFixed(6)}
-                  />
+                  <MetricItem label='Drift' value={`${metrics.drift.driftPpm.toFixed(0)}ppm`} />
+                  <MetricItem label='Drift Active' value={metrics.drift.active ? 'Yes' : 'No'} />
+                  <MetricItem label='Ratio' value={metrics.drift.currentRatio.toFixed(6)} />
+                  <MetricItem label='Catchup' value={metrics.drift.catchupRatio.toFixed(6)} />
                 </View>
               </View>
             )}
@@ -782,34 +629,22 @@ function App(): React.ReactElement {
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Pipeline / Session</Text>
                 <View style={styles.metricsGrid}>
+                  <MetricItem label='Stream St' value={metrics.pipeline.audioStreamState} />
+                  <MetricItem label='Gain' value={metrics.pipeline.currentGain.toFixed(2)} />
                   <MetricItem
-                    label="Stream St"
-                    value={metrics.pipeline.audioStreamState}
-                  />
-                  <MetricItem
-                    label="Gain"
-                    value={metrics.pipeline.currentGain.toFixed(2)}
-                  />
-                  <MetricItem
-                    label="Buffered"
+                    label='Buffered'
                     value={`${(metrics.pipeline.bufferedDurationUs / 1000).toFixed(0)}ms`}
                   />
                   <MetricItem
-                    label="Decoded"
+                    label='Decoded'
                     value={`${(metrics.pipeline.decodedDurationUs / 1000).toFixed(0)}ms`}
                   />
                   <MetricItem
-                    label="Uptime"
+                    label='Uptime'
                     value={`${(metrics.session.uptimeMs / 1000).toFixed(0)}s`}
                   />
-                  <MetricItem
-                    label="Samples"
-                    value={metrics.session.samplesOutput}
-                  />
-                  <MetricItem
-                    label="Rate"
-                    value={metrics.session.playbackRate.toFixed(2)}
-                  />
+                  <MetricItem label='Samples' value={metrics.session.samplesOutput} />
+                  <MetricItem label='Rate' value={metrics.session.playbackRate.toFixed(2)} />
                 </View>
               </View>
             )}
@@ -819,30 +654,12 @@ function App(): React.ReactElement {
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Demux</Text>
                 <View style={styles.metricsGrid}>
-                  <MetricItem
-                    label="Bytes Fed"
-                    value={metrics.demux.totalBytesFed}
-                  />
-                  <MetricItem
-                    label="Feed Calls"
-                    value={metrics.demux.feedDataCalls}
-                  />
-                  <MetricItem
-                    label="Audio Pkts"
-                    value={metrics.demux.audioPacketsEmitted}
-                  />
-                  <MetricItem
-                    label="Video Pkts"
-                    value={metrics.demux.videoPacketsEmitted}
-                  />
-                  <MetricItem
-                    label="Overflow"
-                    value={metrics.demux.overflowCount}
-                  />
-                  <MetricItem
-                    label="Parse St"
-                    value={metrics.demux.parseState}
-                  />
+                  <MetricItem label='Bytes Fed' value={metrics.demux.totalBytesFed} />
+                  <MetricItem label='Feed Calls' value={metrics.demux.feedDataCalls} />
+                  <MetricItem label='Audio Pkts' value={metrics.demux.audioPacketsEmitted} />
+                  <MetricItem label='Video Pkts' value={metrics.demux.videoPacketsEmitted} />
+                  <MetricItem label='Overflow' value={metrics.demux.overflowCount} />
+                  <MetricItem label='Parse St' value={metrics.demux.parseState} />
                 </View>
               </View>
             )}
@@ -852,52 +669,31 @@ function App(): React.ReactElement {
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Audio Output / Health</Text>
                 <View style={styles.metricsGrid}>
+                  <MetricItem label='Restarts' value={metrics.audioOutput.restartCount} />
+                  <MetricItem label='Last Err' value={metrics.audioOutput.lastError} />
+                  <MetricItem label='Sample Rate' value={metrics.audioOutput.actualSampleRate} />
                   <MetricItem
-                    label="Restarts"
-                    value={metrics.audioOutput.restartCount}
-                  />
-                  <MetricItem
-                    label="Last Err"
-                    value={metrics.audioOutput.lastError}
-                  />
-                  <MetricItem
-                    label="Sample Rate"
-                    value={metrics.audioOutput.actualSampleRate}
-                  />
-                  <MetricItem
-                    label="Latency"
+                    label='Latency'
                     value={`${(metrics.audioOutput.latencyUs / 1000).toFixed(1)}ms`}
                   />
+                  <MetricItem label='Mode' value={metrics.latency.mode} />
                   <MetricItem
-                    label="Mode"
-                    value={metrics.latency.mode}
-                  />
-                  <MetricItem
-                    label="Lowest Lat"
+                    label='Lowest Lat'
                     value={metrics.latency.isLowestLatency ? 'Yes' : 'No'}
                   />
+                  <MetricItem label='BT Route' value={metrics.bluetooth.route} />
+                  <MetricItem label='BT A2DP' value={metrics.bluetooth.isA2dp ? 'Yes' : 'No'} />
+                  <MetricItem label='WD Tripped' value={metrics.health.watchdogTripCount} />
                   <MetricItem
-                    label="BT Route"
-                    value={metrics.bluetooth.route}
-                  />
-                  <MetricItem
-                    label="BT A2DP"
-                    value={metrics.bluetooth.isA2dp ? 'Yes' : 'No'}
-                  />
-                  <MetricItem
-                    label="WD Tripped"
-                    value={metrics.health.watchdogTripCount}
-                  />
-                  <MetricItem
-                    label="Heartbeat"
+                    label='Heartbeat'
                     value={`${metrics.health.timeSinceHeartbeatMs}ms`}
                   />
                   <MetricItem
-                    label="Pool Enc"
+                    label='Pool Enc'
                     value={metrics.pools.encodedUnderPressure ? 'PRESS' : 'OK'}
                   />
                   <MetricItem
-                    label="Pool Dec"
+                    label='Pool Dec'
                     value={metrics.pools.decodedUnderPressure ? 'PRESS' : 'OK'}
                   />
                 </View>
@@ -908,11 +704,10 @@ function App(): React.ReactElement {
 
         <View style={styles.section}>
           <Text style={styles.info}>
-            This is a receive-only WebM player. Feed muxed WebM data (VP9 +
-            Opus) via MediaPipeline.feedData() from your Hypercore or network
-            source. Native demuxes and routes audio/video to HW decode
-            pipelines. No mock data is generated — connect a real broadcast
-            stream.
+            This is a receive-only WebM player. Feed muxed WebM data (VP9 + Opus) via
+            MediaPipeline.feedData() from your Hypercore or network source. Native demuxes and
+            routes audio/video to HW decode pipelines. No mock data is generated — connect a real
+            broadcast stream.
           </Text>
         </View>
       </ScrollView>
@@ -920,13 +715,7 @@ function App(): React.ReactElement {
   )
 }
 
-function MetricItem({
-  label,
-  value
-}: {
-  label: string
-  value: string | number
-}) {
+function MetricItem({ label, value }: { label: string; value: string | number }) {
   return (
     <View style={styles.metricItem}>
       <Text style={styles.metricLabel}>{label}</Text>

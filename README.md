@@ -58,60 +58,60 @@ Single broadcast-stream controller. `start()` initializes both audio and video p
 
 #### Lifecycle
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `start()` | `boolean` | Start pipelines |
-| `stop()` | `boolean` | Stop and release resources |
-| `isRunning()` | `boolean` | Pipelines active? |
-| `warmUp()` | `boolean` | Pre-start audio with silence for zero-latency first frame |
-| `pause()` / `resume()` / `isPaused()` | `boolean` | Pause / resume / query |
-| `getPlaybackState()` | `PlaybackState` | Idle \| Buffering \| Playing \| Paused \| Stalled \| Failed |
-| `getCurrentTimeUs()` | `number` | Current position (µs) |
+| Method                                | Returns         | Description                                                 |
+| ------------------------------------- | --------------- | ----------------------------------------------------------- |
+| `start()`                             | `boolean`       | Start pipelines                                             |
+| `stop()`                              | `boolean`       | Stop and release resources                                  |
+| `isRunning()`                         | `boolean`       | Pipelines active?                                           |
+| `warmUp()`                            | `boolean`       | Pre-start audio with silence for zero-latency first frame   |
+| `pause()` / `resume()` / `isPaused()` | `boolean`       | Pause / resume / query                                      |
+| `getPlaybackState()`                  | `PlaybackState` | Idle \| Buffering \| Playing \| Paused \| Stalled \| Failed |
+| `getCurrentTimeUs()`                  | `number`        | Current position (µs)                                       |
 
 #### Stream
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `feedData(buffer)` | `boolean` | Feed muxed WebM bytes. `false` on parse error |
-| `resetStream()` | `boolean` | Reset demuxer + pipelines for a new stream |
-| `requestKeyFrame()` | `boolean` | Request video keyframe recovery upstream |
-| `getTrackInfo()` | `TrackInfo \| null` | Codec IDs + video dimensions |
-| `setStreamStatus(status)` | `boolean` | Enrich health events with stream context |
+| Method                    | Returns             | Description                                   |
+| ------------------------- | ------------------- | --------------------------------------------- |
+| `feedData(buffer)`        | `boolean`           | Feed muxed WebM bytes. `false` on parse error |
+| `resetStream()`           | `boolean`           | Reset demuxer + pipelines for a new stream    |
+| `requestKeyFrame()`       | `boolean`           | Request video keyframe recovery upstream      |
+| `getTrackInfo()`          | `TrackInfo \| null` | Codec IDs + video dimensions                  |
+| `setStreamStatus(status)` | `boolean`           | Enrich health events with stream context      |
 
 #### Audio
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `setMuted(muted)` / `setGain(gain)` | `boolean` | Mute / set gain (0.0–2.0) |
-| `setPlaybackRate(rate)` | `boolean` | Speed (e.g. 1.5 = 1.5×) |
-| `setAudioRoute(route, deviceId?)` | `boolean` | Switch output device |
-| `getAvailableAudioRoutes()` / `getAvailableAudioDevices()` | array | List routes / devices |
-| `getCurrentAudioRoute()` | `AudioRoute` | Current output route |
+| Method                                                     | Returns      | Description               |
+| ---------------------------------------------------------- | ------------ | ------------------------- |
+| `setMuted(muted)` / `setGain(gain)`                        | `boolean`    | Mute / set gain (0.0–2.0) |
+| `setPlaybackRate(rate)`                                    | `boolean`    | Speed (e.g. 1.5 = 1.5×)   |
+| `setAudioRoute(route, deviceId?)`                          | `boolean`    | Switch output device      |
+| `getAvailableAudioRoutes()` / `getAvailableAudioDevices()` | array        | List routes / devices     |
+| `getCurrentAudioRoute()`                                   | `AudioRoute` | Current output route      |
 
 #### Callbacks
 
-| Method | Description |
-|--------|-------------|
-| `setAudioRouteCallback(cb)` | Audio route change events |
-| `setHealthCallback(cb)` | Health state changes |
-| `setKeyFrameNeededCallback(cb)` | Keyframe request events |
-| `setAudioFocusCallback(cb)` | Audio focus events (Android) |
+| Method                          | Description                  |
+| ------------------------------- | ---------------------------- |
+| `setAudioRouteCallback(cb)`     | Audio route change events    |
+| `setHealthCallback(cb)`         | Health state changes         |
+| `setKeyFrameNeededCallback(cb)` | Keyframe request events      |
+| `setAudioFocusCallback(cb)`     | Audio focus events (Android) |
 
 #### Tuning
 
-| Method | Description |
-|--------|-------------|
-| `setBufferTarget(audioMs, videoMs)` | Override jitter buffer targets |
-| `setCatchupPolicy(policy)` | Behavior when falling behind live |
+| Method                              | Description                       |
+| ----------------------------------- | --------------------------------- |
+| `setBufferTarget(audioMs, videoMs)` | Override jitter buffer targets    |
+| `setCatchupPolicy(policy)`          | Behavior when falling behind live |
 
 #### Clip / DVR
 
-| Method | Description |
-|--------|-------------|
+| Method                           | Description                                 |
+| -------------------------------- | ------------------------------------------- |
 | `setClipBufferDuration(seconds)` | Ring buffer size (enables native buffering) |
-| `captureClip(lastNSeconds)` | `Promise<string>` — WebM file path |
-| `seekTo(offsetSeconds)` | Seek in buffered range (negative = rewind) |
-| `getBufferRangeSeconds()` | Available rewind range |
+| `captureClip(lastNSeconds)`      | `Promise<string>` — WebM file path          |
+| `seekTo(offsetSeconds)`          | Seek in buffered range (negative = rewind)  |
+| `getBufferRangeSeconds()`        | Available rewind range                      |
 
 #### Metrics
 
@@ -123,31 +123,71 @@ Native component for decoded VP9 frames. **Only one instance at a time.**
 
 ```tsx
 <VideoView
-  scaleMode={0}  // 0 = fit (letterbox), 1 = fill (crop)
+  scaleMode={0} // 0 = fit (letterbox), 1 = fill (crop)
   mirror={false}
-  style={{ width: '100%', aspectRatio: 16/9 }}
+  style={{ width: '100%', aspectRatio: 16 / 9 }}
 />
 ```
 
 ### Enums
 
 ```ts
-enum AudioRoute { Unknown=0, Earpiece=1, Speaker=2, WiredHeadset=3,
-                  BluetoothSco=4, BluetoothA2dp=5, UsbDevice=6 }
+enum AudioRoute {
+  Unknown = 0,
+  Earpiece = 1,
+  Speaker = 2,
+  WiredHeadset = 3,
+  BluetoothSco = 4,
+  BluetoothA2dp = 5,
+  UsbDevice = 6
+}
 
-enum PlaybackState { Idle=0, Buffering=1, Playing=2, Paused=3, Stalled=4, Failed=5 }
+enum PlaybackState {
+  Idle = 0,
+  Buffering = 1,
+  Playing = 2,
+  Paused = 3,
+  Stalled = 4,
+  Failed = 5
+}
 
-enum StreamHealth { Healthy=0, Buffering=1, Degraded=2, Stalled=3, Failed=4 }
+enum StreamHealth {
+  Healthy = 0,
+  Buffering = 1,
+  Degraded = 2,
+  Stalled = 3,
+  Failed = 4
+}
 
-enum CatchupPolicy { PlayThrough=0, Accelerate=1, DropToLive=2 }
+enum CatchupPolicy {
+  PlayThrough = 0,
+  Accelerate = 1,
+  DropToLive = 2
+}
 
-enum StreamStatus { Live=0, Buffering=1, Ended=2, NoPeers=3 }
+enum StreamStatus {
+  Live = 0,
+  Buffering = 1,
+  Ended = 2,
+  NoPeers = 3
+}
 
 // Android only — iOS handles session interruptions automatically.
-enum AudioFocusState { Gained=0, Lost=1, LostTransient=2, LostTransientCanDuck=3 }
+enum AudioFocusState {
+  Gained = 0,
+  Lost = 1,
+  LostTransient = 2,
+  LostTransientCanDuck = 3
+}
 
 // Exposed via getMetrics().video.decoderState
-enum VideoDecoderState { NotCreated=0, WaitingSurface=1, BackingOff=2, Active=3, Failed=4 }
+enum VideoDecoderState {
+  NotCreated = 0,
+  WaitingSurface = 1,
+  BackingOff = 2,
+  Active = 3,
+  Failed = 4
+}
 ```
 
 ### Health monitoring
@@ -155,10 +195,20 @@ enum VideoDecoderState { NotCreated=0, WaitingSurface=1, BackingOff=2, Active=3,
 ```ts
 MediaPipeline.setHealthCallback((event: HealthEvent) => {
   switch (event.status) {
-    case StreamHealth.Buffering: showSpinner(); break
-    case StreamHealth.Stalled:   reconnectStream(); break
-    case StreamHealth.Failed:    MediaPipeline.stop(); MediaPipeline.start(); reconnectStream(); break
-    case StreamHealth.Healthy:   hideSpinner(); break
+    case StreamHealth.Buffering:
+      showSpinner()
+      break
+    case StreamHealth.Stalled:
+      reconnectStream()
+      break
+    case StreamHealth.Failed:
+      MediaPipeline.stop()
+      MediaPipeline.start()
+      reconnectStream()
+      break
+    case StreamHealth.Healthy:
+      hideSpinner()
+      break
   }
 })
 ```
@@ -168,23 +218,23 @@ MediaPipeline.setHealthCallback((event: HealthEvent) => {
 ```ts
 const m = MediaPipeline.getMetrics()
 
-m.quality.underruns            // Audio callback had no data
-m.quality.framesDropped        // Dropped (overflow / late)
-m.quality.decodeErrors         // Opus decode failures
+m.quality.underruns // Audio callback had no data
+m.quality.framesDropped // Dropped (overflow / late)
+m.quality.decodeErrors // Opus decode failures
 
-m.video.framesDecoded          // VP9 frames decoded
-m.video.currentFps             // Current render FPS
-m.video.avSyncOffsetUs         // A/V offset (audio = master)
-m.video.needsKeyFrame          // Waiting for keyframe
+m.video.framesDecoded // VP9 frames decoded
+m.video.currentFps // Current render FPS
+m.video.avSyncOffsetUs // A/V offset (audio = master)
+m.video.needsKeyFrame // Waiting for keyframe
 
-m.drift.driftPpm               // Clock drift in PPM
-m.drift.active                 // Compensator active
-m.jitter.bufferTargetUs        // Adaptive buffer target
+m.drift.driftPpm // Clock drift in PPM
+m.drift.active // Compensator active
+m.jitter.bufferTargetUs // Adaptive buffer target
 
-m.levels.peakDbfs / rmsDbfs    // dBFS (0 = full scale)
-m.levels.clipCount             // Clipping events
+m.levels.peakDbfs / rmsDbfs // dBFS (0 = full scale)
+m.levels.clipCount // Clipping events
 
-m.stall.state                  // healthy | detecting | stalled | recovering | failed
+m.stall.state // healthy | detecting | stalled | recovering | failed
 m.stall.stallCount / recoveryCount / keyFrameRequests
 
 m.demux.totalBytesFed
@@ -200,8 +250,8 @@ Full interface: [`PlayerMetrics`](src/index.tsx). Field definitions: [TECHNICAL.
 Zero-reencode — raw muxed bytes copied from a native ring buffer into a standalone `.webm` file, instantly.
 
 ```ts
-MediaPipeline.setClipBufferDuration(60)                       // keep last 60s
-const filePath = await MediaPipeline.captureClip(15)          // last 15s → .webm
+MediaPipeline.setClipBufferDuration(60) // keep last 60s
+const filePath = await MediaPipeline.captureClip(15) // last 15s → .webm
 ```
 
 ## DVR rewind
@@ -209,9 +259,9 @@ const filePath = await MediaPipeline.captureClip(15)          // last 15s → .w
 Seek backward into the clip buffer without network requests.
 
 ```ts
-const available = MediaPipeline.getBufferRangeSeconds()       // e.g. 45.2
-MediaPipeline.seekTo(-10)                                     // rewind 10s
-MediaPipeline.seekTo(0)                                       // return to live
+const available = MediaPipeline.getBufferRangeSeconds() // e.g. 45.2
+MediaPipeline.seekTo(-10) // rewind 10s
+MediaPipeline.seekTo(0) // return to live
 ```
 
 ## Audio level metering
@@ -263,8 +313,9 @@ MediaPipeline.setAudioRouteCallback((event) => {
   console.log(event.route, event.availableDevices)
 })
 
-const bt = MediaPipeline.getAvailableAudioDevices()
-  .find(d => d.route === AudioRoute.BluetoothA2dp)
+const bt = MediaPipeline.getAvailableAudioDevices().find(
+  (d) => d.route === AudioRoute.BluetoothA2dp
+)
 if (bt) MediaPipeline.setAudioRoute(AudioRoute.BluetoothA2dp, bt.deviceId)
 ```
 
@@ -272,14 +323,14 @@ Reactive — connect/disconnect headsets and the player adjusts automatically wi
 
 ## Documentation
 
-| Doc | Purpose |
-|-----|---------|
-| [Getting Started](docs/GETTING_STARTED.md) | Tutorial |
+| Doc                                            | Purpose                                          |
+| ---------------------------------------------- | ------------------------------------------------ |
+| [Getting Started](docs/GETTING_STARTED.md)     | Tutorial                                         |
 | [Integration Guide](docs/INTEGRATION_GUIDE.md) | Background audio, permissions, clip capture, DVR |
-| [Troubleshooting](docs/TROUBLESHOOTING.md) | Symptom → metric → fix |
-| [Technical Reference](TECHNICAL.md) | Constants, metrics, threading, tests |
-| [Architecture](docs/ARCHITECTURE.md) | Design rationale and subsystem internals |
-| [Contributing](CONTRIBUTING.md) | Dev workflow and PR guidelines |
+| [Troubleshooting](docs/TROUBLESHOOTING.md)     | Symptom → metric → fix                           |
+| [Technical Reference](TECHNICAL.md)            | Constants, metrics, threading, tests             |
+| [Architecture](docs/ARCHITECTURE.md)           | Design rationale and subsystem internals         |
+| [Contributing](CONTRIBUTING.md)                | Dev workflow and PR guidelines                   |
 
 ## Build
 
@@ -313,13 +364,13 @@ cd ios/opus
 
 ## Platform requirements
 
-| | Android | iOS |
-|---|---|---|
-| Min version | API 29 (Android 10) | iOS 15.1 |
-| Architecture | arm64-v8a | arm64 |
-| Audio API | AAudio (LOW_LATENCY) | RemoteIO AudioUnit |
-| Video API | MediaCodec (HW VP9) | VTDecompressionSession |
-| C++ standard | C++20 | C++20 |
+|              | Android              | iOS                    |
+| ------------ | -------------------- | ---------------------- |
+| Min version  | API 29 (Android 10)  | iOS 15.1               |
+| Architecture | arm64-v8a            | arm64                  |
+| Audio API    | AAudio (LOW_LATENCY) | RemoteIO AudioUnit     |
+| Video API    | MediaCodec (HW VP9)  | VTDecompressionSession |
+| C++ standard | C++20                | C++20                  |
 
 ## License
 

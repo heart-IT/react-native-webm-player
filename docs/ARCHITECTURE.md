@@ -36,14 +36,14 @@ JS's only job is to call `feedData()`. This keeps the JS thread free for UI and 
 
 ### Layer responsibilities
 
-| Layer | Does | Does NOT |
-|-------|------|----------|
-| Bare Thread | Hypercore read, deliver muxed WebM | Demux, decode, process |
-| JavaScript | Receive callback, call `feedData()` | Buffer, DSP, time, pace, demux |
-| Native demuxer | Parse WebM, emit Opus + VP9 packets | Decode, play |
-| Native audio | Opus decode, jitter, drift, mixer, route | Capture, encode, net I/O |
-| Native video | VP9 HW decode, render sync, surfaces | Encode, net I/O |
-| Native transcript | 48→16kHz resample, whisper.cpp, text | Block audio/video, net I/O |
+| Layer             | Does                                     | Does NOT                       |
+| ----------------- | ---------------------------------------- | ------------------------------ |
+| Bare Thread       | Hypercore read, deliver muxed WebM       | Demux, decode, process         |
+| JavaScript        | Receive callback, call `feedData()`      | Buffer, DSP, time, pace, demux |
+| Native demuxer    | Parse WebM, emit Opus + VP9 packets      | Decode, play                   |
+| Native audio      | Opus decode, jitter, drift, mixer, route | Capture, encode, net I/O       |
+| Native video      | VP9 HW decode, render sync, surfaces     | Encode, net I/O                |
+| Native transcript | 48→16kHz resample, whisper.cpp, text     | Block audio/video, net I/O     |
 
 ---
 
@@ -91,7 +91,7 @@ feedData → demux → AudioDecodeChannel::pushEncodedFrame()
  → Platform output (AAudio / RemoteIO)
 ```
 
-**Critical invariant:** the decode thread acquires a pool token *before* popping the encoded queue. Without this, if the pool is exhausted when the decode thread pops, the encoded frame has nowhere to go — a subtle frame-loss race.
+**Critical invariant:** the decode thread acquires a pool token _before_ popping the encoded queue. Without this, if the pool is exhausted when the decode thread pops, the encoded frame has nowhere to go — a subtle frame-loss race.
 
 ### Video pipeline
 

@@ -30,7 +30,8 @@ build() {
     fi
 
     local IOS_BUILD="${BUILD_DIR}/ios-arm64"
-    local SIM_BUILD="${BUILD_DIR}/sim-arm64"
+    local SIM_ARM64_BUILD="${BUILD_DIR}/sim-arm64"
+    local SIM_X86_BUILD="${BUILD_DIR}/sim-x86_64"
 
     # Common CMake flags
     local COMMON_FLAGS=(
@@ -60,18 +61,34 @@ build() {
 
     # Build for iOS simulator (arm64)
     echo "Building whisper.cpp for iOS Simulator arm64..."
-    cmake -S "${SRC_DIR}" -B "${SIM_BUILD}" \
+    cmake -S "${SRC_DIR}" -B "${SIM_ARM64_BUILD}" \
         "${COMMON_FLAGS[@]}" \
         -DCMAKE_SYSTEM_NAME=iOS \
         -DCMAKE_OSX_ARCHITECTURES=arm64 \
         -DCMAKE_OSX_SYSROOT=iphonesimulator \
         -DCMAKE_OSX_DEPLOYMENT_TARGET=15.1 \
-        -DCMAKE_INSTALL_PREFIX="${SIM_BUILD}/install"
-    cmake --build "${SIM_BUILD}" --config Release -j "$(sysctl -n hw.ncpu)"
+        -DCMAKE_INSTALL_PREFIX="${SIM_ARM64_BUILD}/install"
+    cmake --build "${SIM_ARM64_BUILD}" --config Release -j "$(sysctl -n hw.ncpu)"
+
+    # Build for iOS simulator (x86_64) — required so the xcframework's simulator
+    # slice is named ios-arm64_x86_64-simulator. CocoaPods derives the slice name
+    # from the consumer app's $ARCHS at build time; if Xcode targets both archs
+    # for simulator the universal name is required, otherwise [CP] Copy
+    # XCFrameworks fails to find the slice.
+    echo "Building whisper.cpp for iOS Simulator x86_64..."
+    cmake -S "${SRC_DIR}" -B "${SIM_X86_BUILD}" \
+        "${COMMON_FLAGS[@]}" \
+        -DCMAKE_SYSTEM_NAME=iOS \
+        -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_OSX_SYSROOT=iphonesimulator \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=15.1 \
+        -DCMAKE_INSTALL_PREFIX="${SIM_X86_BUILD}/install"
+    cmake --build "${SIM_X86_BUILD}" --config Release -j "$(sysctl -n hw.ncpu)"
 
     # Create fat static libraries (whisper + ggml combined)
     echo "Creating combined static libraries..."
-    mkdir -p "${BUILD_DIR}/ios-combined" "${BUILD_DIR}/sim-combined"
+    mkdir -p "${BUILD_DIR}/ios-combined" "${BUILD_DIR}/sim-arm64-combined" \
+             "${BUILD_DIR}/sim-x86_64-combined" "${BUILD_DIR}/sim-combined"
 
     libtool -static -o "${BUILD_DIR}/ios-combined/libwhisper.a" \
         "${IOS_BUILD}/src/libwhisper.a" \
@@ -82,9 +99,20 @@ build() {
         "${IOS_BUILD}/src/libwhisper.a" \
         $(find "${IOS_BUILD}/ggml" -name "*.a" -type f)
 
-    libtool -static -o "${BUILD_DIR}/sim-combined/libwhisper.a" \
-        "${SIM_BUILD}/src/libwhisper.a" \
-        $(find "${SIM_BUILD}/ggml" -name "*.a" -type f)
+    libtool -static -o "${BUILD_DIR}/sim-arm64-combined/libwhisper.a" \
+        "${SIM_ARM64_BUILD}/src/libwhisper.a" \
+        $(find "${SIM_ARM64_BUILD}/ggml" -name "*.a" -type f)
+
+    libtool -static -o "${BUILD_DIR}/sim-x86_64-combined/libwhisper.a" \
+        "${SIM_X86_BUILD}/src/libwhisper.a" \
+        $(find "${SIM_X86_BUILD}/ggml" -name "*.a" -type f)
+
+    # Lipo the per-arch sim libs into a fat binary so the xcframework slice is
+    # named ios-arm64_x86_64-simulator (matches CocoaPods' expectation).
+    lipo -create \
+        "${BUILD_DIR}/sim-arm64-combined/libwhisper.a" \
+        "${BUILD_DIR}/sim-x86_64-combined/libwhisper.a" \
+        -output "${BUILD_DIR}/sim-combined/libwhisper.a"
 
     # Create XCFramework
     echo "Creating whisper.xcframework..."

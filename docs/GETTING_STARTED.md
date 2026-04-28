@@ -141,7 +141,7 @@ Without this callback, the player still recovers — it just waits for the next 
 ## Step 7 — Stop
 
 ```tsx
-MediaPipeline.stop()   // releases decoders, audio output, buffers
+MediaPipeline.stop() // releases decoders, audio output, buffers
 ```
 
 Call `start()` again to begin a new session.

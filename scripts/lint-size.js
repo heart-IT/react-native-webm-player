@@ -27,18 +27,9 @@ const EXCLUDE_DIRS = new Set([
   'lib',
   'third_party',
   '_deps',
-  '.git',
+  '.git'
 ])
-const SOURCE_EXTS = new Set([
-  '.h',
-  '.cpp',
-  '.mm',
-  '.m',
-  '.kt',
-  '.java',
-  '.tsx',
-  '.ts',
-])
+const SOURCE_EXTS = new Set(['.h', '.cpp', '.mm', '.m', '.kt', '.java', '.tsx', '.ts'])
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -65,9 +56,7 @@ function loadBaseline() {
 }
 
 function saveBaseline(b) {
-  const sorted = Object.fromEntries(
-    Object.entries(b).sort(([a], [c]) => a.localeCompare(c)),
-  )
+  const sorted = Object.fromEntries(Object.entries(b).sort(([a], [c]) => a.localeCompare(c)))
   fs.writeFileSync(BASELINE_PATH, JSON.stringify(sorted, null, 2) + '\n')
 }
 
@@ -101,12 +90,14 @@ function main() {
         if (!updateBaseline) newBaseline[rel] = pinned
       } else if (lines > pinned) {
         errors.push(
-          `${rel}: ${lines} lines (baseline ${pinned}). Baselined files must shrink, not grow. Extract before adding.`,
+          `${rel}: ${lines} lines (baseline ${pinned}). Baselined files must shrink, not grow. Extract before adding.`
         )
         newBaseline[rel] = pinned
       } else {
         if (lines < pinned && !updateBaseline) {
-          warnings.push(`${rel}: ${lines} lines (baseline ${pinned}, --update-baseline to tighten).`)
+          warnings.push(
+            `${rel}: ${lines} lines (baseline ${pinned}, --update-baseline to tighten).`
+          )
         }
         newBaseline[rel] = updateBaseline ? lines : pinned
       }
@@ -119,7 +110,7 @@ function main() {
         warnings.push(`${rel}: ${lines} lines added to baseline.`)
       } else {
         errors.push(
-          `${rel}: ${lines} lines exceeds hard limit of ${HARD}. New files must be under ${HARD}.`,
+          `${rel}: ${lines} lines exceeds hard limit of ${HARD}. New files must be under ${HARD}.`
         )
       }
     } else if (lines > WARN) {
@@ -150,7 +141,7 @@ function main() {
   if (updateBaseline) saveBaseline(newBaseline)
 
   console.log(
-    `lint:size ok — ${files.length} files, ${warnings.length} warnings, ${Object.keys(newBaseline).length} baselined.`,
+    `lint:size ok — ${files.length} files, ${warnings.length} warnings, ${Object.keys(newBaseline).length} baselined.`
   )
 }
 

@@ -97,8 +97,12 @@ void MediaSessionBase<PlatformTraits>::stop() noexcept {
     // here lets any future OS-level audio-session event short-circuit at the
     // singleton's null-check instead of queuing behind us. Idempotent if start()
     // never wired one.
-    if (auto* mgr = sessionMgr_.load(std::memory_order_acquire)) {
-        mgr->setRestartCallback(nullptr);
+    // Route through PlatformTraits so the call is dependent on the template
+    // parameter — defers name lookup to phase-2 instantiation, after the
+    // platform's AudioSessionManager.h has provided the full type. The
+    // sessionMgr_ load just gates "was a callback ever wired".
+    if (sessionMgr_.load(std::memory_order_acquire)) {
+        PlatformTraits::managerInstance().setRestartCallback(nullptr);
     }
 
     std::lock_guard<std::mutex> lk(lifecycleMtx_);

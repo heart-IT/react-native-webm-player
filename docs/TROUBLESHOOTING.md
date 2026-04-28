@@ -28,7 +28,7 @@ Fast-drain discarded frames because a burst arrived too fast. Crossfade masks mo
 
 Excessive clock drift; drift compensator is resampling aggressively.
 
-1. >200 PPM is unusual — check sender clock stability.
+1. > 200 PPM is unusual — check sender clock stability.
 2. If started after a route change: drift compensator should have reset. `audioOutput.restartCount` should have incremented; if not, route detection may be stuck.
 3. `drift.currentRatio` should be ≈1.0 (normal 0.9995–1.005).
 
