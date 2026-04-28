@@ -304,8 +304,8 @@ jobs:
           cd example/ios
           set -o pipefail
           xcodebuild build \
-            -workspace OpusAudioExample.xcworkspace \
-            -scheme OpusAudioExample \
+            -workspace WebmPlayerExample.xcworkspace \
+            -scheme WebmPlayerExample \
             -configuration Release \
             -sdk iphoneos \
             -arch arm64 \
@@ -317,15 +317,15 @@ jobs:
       - name: Scan for private API usage (nm + otool)
         run: |
           # Find the Mach-O binary inside the .app bundle
-          APP_BINARY=$(find example/ios/build -path '*.app/OpusAudioExample' -type f | head -1)
+          APP_BINARY=$(find example/ios/build -path '*.app/WebmPlayerExample' -type f | head -1)
           if [ -z "$APP_BINARY" ]; then
-            APP_BINARY=$(find example/ios/build -name 'OpusAudioExample' -type f | while read f; do
+            APP_BINARY=$(find example/ios/build -name 'WebmPlayerExample' -type f | while read f; do
               file "$f" | grep -q 'Mach-O' && echo "$f" && break
             done)
           fi
           if [ -z "$APP_BINARY" ]; then
             echo "::error::No app binary found in example/ios/build"
-            find example/ios/build -type f -name 'OpusAudio*' 2>/dev/null || true
+            find example/ios/build -type f -name 'WebmPlayer*' 2>/dev/null || true
             exit 1
           fi
           echo "Scanning: $APP_BINARY"
@@ -343,10 +343,10 @@ jobs:
           # references public UIKit symbols (_UIApplicationDidBecomeActiveNotification,
           # _UIKeyboardWillShowNotification, etc.) that share prefixes with private APIs.
           # Instead, scan only our library's static archive.
-          LIB_ARCHIVE=$(find example/ios/build -path '*/libopus-native-io.a' -o -path '*/libOpusAudio.a' | head -1)
+          LIB_ARCHIVE=$(find example/ios/build -path '*/libWebmPlayer.a' | head -1)
           if [ -z "$LIB_ARCHIVE" ]; then
             # Broadened search for any .a containing our code
-            LIB_ARCHIVE=$(find example/ios/build -name '*.a' -path '*opus*' | head -1)
+            LIB_ARCHIVE=$(find example/ios/build -name '*.a' -path '*WebmPlayer*' | head -1)
           fi
 
           if [ -n "$LIB_ARCHIVE" ]; then
