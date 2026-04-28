@@ -1,0 +1,111 @@
+buildscript {
+  ext.WebmPlayer = [
+    buildToolsVersion: "35.0.0",
+    compileSdkVersion: 35,
+    targetSdkVersion: 35,
+    minSdkVersion: 29,
+    ndkVersion: "27.1.12297006",
+    kotlinVersion: "2.0.21"
+  ]
+
+  ext.getExtOrDefault = { prop ->
+    if (rootProject.ext.has(prop)) {
+      return rootProject.ext.get(prop)
+    }
+    return WebmPlayer[prop]
+  }
+
+  ext.getExtOrIntegerDefault = { prop ->
+    if (rootProject.ext.has(prop)) {
+      return rootProject.ext.get(prop)
+    }
+    return WebmPlayer[prop]
+  }
+
+  repositories {
+    google()
+    mavenCentral()
+  }
+
+  dependencies {
+    classpath "com.android.tools.build:gradle:8.7.2"
+  }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+def reactNativeDir = providers.exec {
+  workingDir(projectDir)
+  commandLine("node", "--print", "require.resolve('react-native/package.json')")
+}.standardOutput.asText.get().trim().replace("/package.json", "")
+
+android {
+  namespace "com.heartit.webmplayer"
+
+  ndkVersion getExtOrDefault("ndkVersion")
+  compileSdk getExtOrIntegerDefault("compileSdkVersion")
+
+  defaultConfig {
+    minSdkVersion getExtOrIntegerDefault("minSdkVersion")
+    targetSdkVersion getExtOrIntegerDefault("targetSdkVersion")
+    consumerProguardFiles "consumer-proguard-rules.pro"
+
+    externalNativeBuild {
+      cmake {
+        cppFlags "-frtti -fexceptions -fstack-protector-all"
+        arguments "-DANDROID_STL=c++_shared",
+                  "-DREACT_ANDROID_DIR=${reactNativeDir}/ReactAndroid"
+        abiFilters "arm64-v8a"
+      }
+    }
+  }
+
+  buildFeatures {
+    buildConfig true
+    prefab true
+  }
+
+  externalNativeBuild {
+    cmake {
+      path "src/main/jni/CMakeLists.txt"
+    }
+  }
+
+  buildTypes {
+    debug {
+      externalNativeBuild {
+        cmake {
+          arguments "-DNATIVE_RELEASE=OFF"
+        }
+      }
+    }
+    release {
+      minifyEnabled false
+      externalNativeBuild {
+        cmake {
+          arguments "-DNATIVE_RELEASE=ON"
+        }
+      }
+    }
+  }
+
+  lint {
+    disable "GradleCompatible"
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = "17"
+  }
+}
+
+dependencies {
+  implementation "com.facebook.react:react-android"
+  implementation "androidx.lifecycle:lifecycle-process:2.7.0"
+}

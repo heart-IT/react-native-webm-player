@@ -1,0 +1,371 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  merge_group:
+    types:
+      - checks_requested
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Lint files
+        run: yarn lint
+
+      - name: Typecheck files
+        run: yarn typecheck
+
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Run unit tests
+        run: yarn test
+
+  sanitizer-tests:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread, undefined]
+        include:
+          - sanitizer: address
+            binaries: test_lsan test_tsan test_ubsan
+          - sanitizer: thread
+            binaries: test_tsan
+          - sanitizer: undefined
+            binaries: test_ubsan
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Opus
+        run: brew install opus || brew upgrade opus
+
+      - name: Configure (${{ matrix.sanitizer }})
+        run: |
+          cmake -B tests/sanitizer/build \
+            -S tests/sanitizer \
+            -DSANITIZER=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build tests/sanitizer/build
+
+      - name: Run tests
+        env:
+          TSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/sanitizer/tsan_suppressions.txt halt_on_error=1 history_size=2
+          UBSAN_OPTIONS: halt_on_error=1 print_stacktrace=1
+          # detect_leaks=0: LeakSanitizer unsupported by Apple Clang on macOS.
+          # Revisit if CI moves to Linux runners.
+          ASAN_OPTIONS: halt_on_error=1 detect_leaks=0
+        run: |
+          for bin in ${{ matrix.binaries }}; do
+            echo "=== Running $bin (${{ matrix.sanitizer }}) ==="
+            tests/sanitizer/build/$bin
+          done
+
+  build-library:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Build package
+        run: yarn prepare
+
+  build-android:
+    runs-on: ubuntu-latest
+
+    env:
+      TURBO_CACHE_DIR: .turbo/android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Cache turborepo for Android
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ env.TURBO_CACHE_DIR }}
+          key: ${{ runner.os }}-turborepo-android-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-turborepo-android-
+
+      - name: Check turborepo cache for Android
+        run: |
+          TURBO_CACHE_STATUS=$(node -p "($(yarn turbo run build:android --cache-dir="${{ env.TURBO_CACHE_DIR }}" --dry=json)).tasks.find(t => t.task === 'build:android').cache.status")
+
+          if [[ $TURBO_CACHE_STATUS == "HIT" ]]; then
+            echo "turbo_cache_hit=1" >> $GITHUB_ENV
+          fi
+
+      - name: Install JDK
+        if: env.turbo_cache_hit != 1
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Finalize Android SDK
+        if: env.turbo_cache_hit != 1
+        run: |
+          /bin/bash -c "yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null"
+
+      - name: Cache Gradle
+        if: env.turbo_cache_hit != 1
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.gradle/wrapper
+            ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('example/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build example for Android
+        env:
+          JAVA_OPTS: '-XX:MaxHeapSize=6g'
+        run: |
+          yarn turbo run build:android --cache-dir="${{ env.TURBO_CACHE_DIR }}"
+
+  api-compliance-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Install JDK
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Finalize Android SDK
+        run: |
+          /bin/bash -c "yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null"
+
+      - name: Cache Gradle
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.gradle/wrapper
+            ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('example/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Run Android Lint (hidden API + general compliance)
+        env:
+          JAVA_OPTS: '-XX:MaxHeapSize=6g'
+        run: |
+          cd example/android
+          ./gradlew lint --no-daemon --console=plain -PreactNativeArchitectures=arm64-v8a 2>&1 | tail -20
+
+      - name: Check lint results for API violations
+        run: |
+          LINT_XML=$(find example/android/app/build/reports -name 'lint-results*.xml' 2>/dev/null | head -1)
+          if [ -z "$LINT_XML" ]; then
+            echo "::warning::No lint report found — skipping API compliance check"
+            exit 0
+          fi
+          echo "Checking: $LINT_XML"
+
+          # Fail on @hide API usage (NewApi, PrivateApi)
+          if grep -qE 'id="(NewApi|PrivateApi)".*severity="Error"' "$LINT_XML"; then
+            echo "::error::Android hidden/private API usage detected in lint report"
+            grep -E 'id="(NewApi|PrivateApi)"' "$LINT_XML" | head -20
+            exit 1
+          fi
+
+          echo "Android API compliance: passed"
+
+  build-ios:
+    runs-on: macos-latest
+
+    env:
+      XCODE_VERSION: 26
+      TURBO_CACHE_DIR: .turbo/ios
+      RCT_USE_RN_DEP: 1
+      RCT_USE_PREBUILT_RNCORE: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Cache turborepo for iOS
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ env.TURBO_CACHE_DIR }}
+          key: ${{ runner.os }}-turborepo-ios-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-turborepo-ios-
+
+      - name: Check turborepo cache for iOS
+        run: |
+          TURBO_CACHE_STATUS=$(node -p "($(yarn turbo run build:ios --cache-dir="${{ env.TURBO_CACHE_DIR }}" --dry=json)).tasks.find(t => t.task === 'build:ios').cache.status")
+
+          if [[ $TURBO_CACHE_STATUS == "HIT" ]]; then
+            echo "turbo_cache_hit=1" >> $GITHUB_ENV
+          fi
+
+      - name: Use appropriate Xcode version
+        if: env.turbo_cache_hit != 1
+        uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      - name: Setup Ruby
+        if: env.turbo_cache_hit != 1
+        uses: ruby/setup-ruby@90be1154f987f4dc0fe0dd0feedac9e473aa4ba8 # v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: example
+
+      - name: Install cocoapods
+        if: env.turbo_cache_hit != 1
+        run: |
+          cd example
+          bundle exec pod install --project-directory=ios
+
+      - name: Build example for iOS
+        run: |
+          yarn turbo run build:ios --cache-dir="${{ env.TURBO_CACHE_DIR }}"
+
+  api-compliance-ios:
+    runs-on: macos-latest
+
+    env:
+      XCODE_VERSION: 26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Use appropriate Xcode version
+        uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@90be1154f987f4dc0fe0dd0feedac9e473aa4ba8 # v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: example
+
+      - name: Install cocoapods
+        run: |
+          cd example
+          bundle exec pod install --project-directory=ios
+
+      - name: Build for device (arm64)
+        run: |
+          cd example/ios
+          set -o pipefail
+          xcodebuild build \
+            -workspace OpusAudioExample.xcworkspace \
+            -scheme OpusAudioExample \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=YES \
+            BUILD_DIR="$(pwd)/build" \
+            2>&1 | tail -30
+
+      - name: Scan for private API usage (nm + otool)
+        run: |
+          # Find the Mach-O binary inside the .app bundle
+          APP_BINARY=$(find example/ios/build -path '*.app/OpusAudioExample' -type f | head -1)
+          if [ -z "$APP_BINARY" ]; then
+            APP_BINARY=$(find example/ios/build -name 'OpusAudioExample' -type f | while read f; do
+              file "$f" | grep -q 'Mach-O' && echo "$f" && break
+            done)
+          fi
+          if [ -z "$APP_BINARY" ]; then
+            echo "::error::No app binary found in example/ios/build"
+            find example/ios/build -type f -name 'OpusAudio*' 2>/dev/null || true
+            exit 1
+          fi
+          echo "Scanning: $APP_BINARY"
+          file "$APP_BINARY"
+
+          # --- Check 1: Private framework linkage ---
+          if otool -L "$APP_BINARY" 2>/dev/null | grep -q 'PrivateFrameworks'; then
+            echo "::error::Linked against private frameworks:"
+            otool -L "$APP_BINARY" | grep 'PrivateFrameworks'
+            exit 1
+          fi
+
+          # --- Check 2: Private API symbols in OUR library objects only ---
+          # Scanning the full app binary produces false positives because React Native
+          # references public UIKit symbols (_UIApplicationDidBecomeActiveNotification,
+          # _UIKeyboardWillShowNotification, etc.) that share prefixes with private APIs.
+          # Instead, scan only our library's static archive.
+          LIB_ARCHIVE=$(find example/ios/build -path '*/libopus-native-io.a' -o -path '*/libOpusAudio.a' | head -1)
+          if [ -z "$LIB_ARCHIVE" ]; then
+            # Broadened search for any .a containing our code
+            LIB_ARCHIVE=$(find example/ios/build -name '*.a' -path '*opus*' | head -1)
+          fi
+
+          if [ -n "$LIB_ARCHIVE" ]; then
+            echo "Scanning library archive: $LIB_ARCHIVE"
+            nm -u "$LIB_ARCHIVE" > /tmp/lib-undefined-symbols.txt 2>&1 || true
+          else
+            echo "::warning::Library archive not found, falling back to app binary scan"
+            nm -u "$APP_BINARY" > /tmp/lib-undefined-symbols.txt 2>&1 || true
+          fi
+
+          # Private API prefixes — these match internal/hidden symbols, not public UIKit API.
+          # Symbols like _UIApplicationDidBecomeActiveNotification are public (from UIKit headers)
+          # and are referenced by React Native, not by our library.
+          PRIVATE_PREFIXES='_LSApp\|_CTCall\|_SBApp\|_BKS\|_FBS'
+
+          if grep -q "$PRIVATE_PREFIXES" /tmp/lib-undefined-symbols.txt; then
+            echo "::error::Private API symbols detected in library:"
+            grep "$PRIVATE_PREFIXES" /tmp/lib-undefined-symbols.txt
+            exit 1
+          fi
+
+          echo "iOS API compliance: passed"

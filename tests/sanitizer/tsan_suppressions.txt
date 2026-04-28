@@ -1,0 +1,6 @@
+# TSan suppression file for webm-player sanitizer tests.
+#
+# Add suppressions here for known false positives in lock-free code
+# where TSan cannot model the synchronization protocol.
+#
+# Format: race:ClassName::method

@@ -1,0 +1,132 @@
+{
+  "name": "@heartit/webm-player",
+  "version": "1.0.0",
+  "description": "Native WebM broadcast player for React Native — VP9 video + Opus audio with A/V sync",
+  "main": "./lib/module/index.js",
+  "types": "./lib/typescript/src/index.d.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.tsx",
+      "types": "./lib/typescript/src/index.d.ts",
+      "default": "./lib/module/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "android/build.gradle",
+    "android/consumer-proguard-rules.pro",
+    "android/src/**/*",
+    "!android/src/**/*.md",
+    "ios/*.h",
+    "ios/*.mm",
+    "ios/common/**/*",
+    "ios/playback/**/*",
+    "ios/video/**/*",
+    "ios/opus/build-opus.sh",
+    "ios/whisper/build-whisper.sh",
+    "cpp/**/*",
+    "*.podspec",
+    "react-native.config.js"
+  ],
+  "scripts": {
+    "example": "yarn workspace webm-player-example",
+    "clean": "del-cli android/build example/android/build example/android/app/build example/ios/build lib",
+    "prepare": "bob build",
+    "typecheck": "tsc",
+    "format": "prettier . --write",
+    "test": "prettier . --check && lunte src/ example/src/",
+    "test:asan": "cmake -B tests/sanitizer/build-asan -S tests/sanitizer -DSANITIZER=address && cmake --build tests/sanitizer/build-asan && tests/sanitizer/build-asan/test_lsan",
+    "test:tsan": "cmake -B tests/sanitizer/build-tsan -S tests/sanitizer -DSANITIZER=thread && cmake --build tests/sanitizer/build-tsan && tests/sanitizer/build-tsan/test_tsan",
+    "test:ubsan": "cmake -B tests/sanitizer/build-ubsan -S tests/sanitizer -DSANITIZER=undefined && cmake --build tests/sanitizer/build-ubsan && tests/sanitizer/build-ubsan/test_ubsan",
+    "test:fuzz": "cmake -B tests/sanitizer/build-fuzz -S tests/sanitizer -DSANITIZER=address && cmake --build tests/sanitizer/build-fuzz --target fuzz_demuxer && tests/sanitizer/build-fuzz/fuzz_demuxer",
+    "test:e2e": "cmake -B tests/sanitizer/build-asan -S tests/sanitizer -DSANITIZER=address && cmake --build tests/sanitizer/build-asan --target test_e2e_demux && tests/sanitizer/build-asan/test_e2e_demux",
+    "test:temporal": "cmake -B tests/sanitizer/build-asan -S tests/sanitizer -DSANITIZER=address && cmake --build tests/sanitizer/build-asan --target test_temporal_stress && tests/sanitizer/build-asan/test_temporal_stress",
+    "lint": "lunte src/ example/src/",
+    "lint:size": "node scripts/lint-size.js",
+    "build": "yarn clean && yarn prepare",
+    "pack": "yarn build && npm pack"
+  },
+  "keywords": [
+    "react-native",
+    "ios",
+    "android",
+    "webm",
+    "vp9",
+    "opus",
+    "video",
+    "audio",
+    "broadcast",
+    "player",
+    "jsi"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heart-IT/react-native-webm-player.git"
+  },
+  "author": "Heartit Inc",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/heart-IT/react-native-webm-player/issues"
+  },
+  "homepage": "https://github.com/heart-IT/react-native-webm-player#readme",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "devDependencies": {
+    "@react-native/babel-preset": "0.81.5",
+    "@types/react": "^19.1.0",
+    "del-cli": "^6.0.0",
+    "lunte": "^1.2.0",
+    "prettier": "^3.4.2",
+    "prettier-config-holepunch": "^2.0.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-builder-bob": "^0.40.17",
+    "turbo": "^2.5.6",
+    "typescript": "^5.9.2"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "workspaces": [
+    "example"
+  ],
+  "packageManager": "yarn@4.11.0",
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      [
+        "module",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ]
+    ]
+  },
+  "prettier": "prettier-config-holepunch",
+  "create-react-native-library": {
+    "type": "turbo-module",
+    "languages": "kotlin-objc",
+    "tools": [],
+    "version": "0.57.0"
+  },
+  "codegenConfig": {
+    "name": "RNWebmPlayerSpec",
+    "type": "modules",
+    "jsSrcsDir": "src/specs",
+    "android": {
+      "javaPackageName": "com.heartit.webmplayer"
+    },
+    "includesGeneratedCode": false
+  }
+}

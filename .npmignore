@@ -1,0 +1,25 @@
+# Build artifacts
+ios/opus/build/
+ios/whisper/build/
+ios/whisper/models/
+ios/build/
+android/build/
+example/
+
+# Development files
+*.md
+__tests__/
+__fixtures__/
+__mocks__/
+.github/
+.vscode/
+
+# Config files not needed in package
+.prettierrc*
+tsconfig.json
+tsconfig.build.json
+babel.config.js
+turbo.json
+.nvmrc
+.yarnrc.yml
+.yarn/
