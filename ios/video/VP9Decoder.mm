@@ -67,7 +67,28 @@ void VP9Decoder::shutdown() {
     lastResetTimeUs_ = 0;
 }
 
-bool VP9Decoder::createDecompressionSession(int width, int height) {
+// Build the VP9 codec configuration (vpcC) record that VTDecompressionSession
+// requires as a format description extension. Without it, session creation
+// fails with -8971 (kVTVideoDecoderConfigurationNotPermittedErr) on iOS 26.2+
+// where VP9 is a "supplemental" codec. Layout per ISO/IEC 14496-15 Annex H:
+//   FullBox header (4B) + VPCodecConfigurationRecord (8B) = 12B total.
+// Profile is parsed from the keyframe; everything else uses 8-bit 4:2:0 BT.709
+// limited-range defaults that cover the vast majority of WebM/VP9 streams.
+static NSData* buildVpcCConfig(int profile) {
+    uint8_t buf[12] = {0};
+    buf[0] = 0x01;                             // version=1
+    // buf[1..3] = 0                            // flags=0
+    buf[4] = static_cast<uint8_t>(profile);    // profile (0-3)
+    buf[5] = 30;                               // level 3.0 (covers 720p30)
+    buf[6] = (8u << 4) | (1u << 1) | 0u;       // bit_depth=8, chroma=4:2:0, range=limited
+    buf[7] = 1;                                // colour_primaries=BT.709
+    buf[8] = 1;                                // transfer_characteristics=BT.709
+    buf[9] = 1;                                // matrix_coefficients=BT.709
+    // buf[10..11] = 0 (codec_initialization_data_size, BE 16-bit)
+    return [NSData dataWithBytes:buf length:sizeof(buf)];
+}
+
+bool VP9Decoder::createDecompressionSession(int width, int height, int profile) {
     destroyDecompressionSession();
 
     if (!hwSupported_) {
@@ -75,14 +96,23 @@ bool VP9Decoder::createDecompressionSession(int width, int height) {
         return false;
     }
 
-    // Create format description for VP9 (raw FourCC, see setOutputLayer)
+    // Create format description for VP9. The vpcC atom under
+    // kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms is the
+    // contract VideoToolbox enforces for VP9 since iOS 14, and is mandatory
+    // since the iOS 26.2 supplemental-decoder reclassification.
     constexpr CMVideoCodecType kVP9CodecType = 'vp09';
+    NSData* vpccData = buildVpcCConfig(profile);
+    NSDictionary* extensions = @{
+        (NSString*)kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: @{
+            @"vpcC": vpccData,
+        },
+    };
     OSStatus status = CMVideoFormatDescriptionCreate(
         kCFAllocatorDefault,
         kVP9CodecType,
         width,
         height,
-        nullptr,  // extensions
+        (__bridge CFDictionaryRef)extensions,
         &formatDesc_);
 
     if (status != noErr || !formatDesc_) {
@@ -169,7 +199,7 @@ bool VP9Decoder::submitFrame(const uint8_t* data, size_t size, int64_t ptsUs, bo
 
         // Recreate session if dimensions changed or session doesn't exist
         if (!session_ || info.width != sessionWidth_ || info.height != sessionHeight_) {
-            if (!createDecompressionSession(info.width, info.height)) {
+            if (!createDecompressionSession(info.width, info.height, info.profile)) {
                 return false;
             }
         }

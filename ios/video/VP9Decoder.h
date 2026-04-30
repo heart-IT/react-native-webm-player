@@ -38,7 +38,7 @@ public:
     int lastError() const override { return lastError_.load(std::memory_order_relaxed); }
 
 private:
-    bool createDecompressionSession(int width, int height);
+    bool createDecompressionSession(int width, int height, int profile);
     void destroyDecompressionSession();
     void outputCallback(CVImageBufferRef imageBuffer, int64_t ptsUs);
 
