@@ -3,6 +3,7 @@
 #include <ReactCommon/CallInvoker.h>
 #include "playback/MediaPipelineModule.h"
 #include "video/VideoPipelineModule.h"
+#include "playback_v2/MediaPipelineModuleV2.h"
 
 bool installJSIInstaller(
     facebook::jsi::Runtime& rt,
@@ -28,10 +29,17 @@ bool installJSIInstaller(
         }
     }
 
+    // v2 engine installed alongside v1 during migration. Reachable as
+    // global __MediaPipelineV2. v1 globals stay live so the existing app keeps
+    // working until Phase 6 deletion.
+    mediamodule_v2::installV2JSI(rt, jsCallInvoker);
+
     return pipelineOk && videoPipelineOk;
 }
 
 void uninstallJSIInstaller(facebook::jsi::Runtime& rt) {
+    mediamodule_v2::uninstallV2JSI(rt);
+
     // Audio module dies FIRST so the decode thread (and its HealthWatchdog) is
     // joined before VideoFrameQueue and AVSyncCoordinator are destroyed.
     // The watchdog's readMetrics lambda holds raw videoQueue / syncCoordinator
