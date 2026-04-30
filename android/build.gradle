@@ -108,4 +108,10 @@ android {
 dependencies {
   implementation "com.facebook.react:react-android"
   implementation "androidx.lifecycle:lifecycle-process:2.7.0"
+
+  // v2 architecture: ExoPlayer for WebM/VP9/Opus playback (delegated to platform).
+  def media3Version = "1.4.1"
+  implementation "androidx.media3:media3-exoplayer:${media3Version}"
+  implementation "androidx.media3:media3-ui:${media3Version}"
+  implementation "androidx.media3:media3-extractor:${media3Version}"
 }

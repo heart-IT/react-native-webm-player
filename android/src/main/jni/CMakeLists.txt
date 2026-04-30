@@ -136,6 +136,12 @@ set_target_properties(speexdsp_resampler PROPERTIES LINKER_LANGUAGE C)
 # Common shared C++ sources
 set(COMMON_SOURCES
     ${CPP_ROOT}/common/ClipIndex.cpp
+    ${CPP_ROOT}/common/WebMStreamBuffer.cpp
+)
+
+# v2 architecture: JNI bridge for the WebMStreamBuffer-backed ExoPlayer DataSource.
+set(V2_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/v2/webmstream_jni.cpp
 )
 
 # WebM demuxer — incremental streaming parser using libwebm mkvparser
@@ -158,6 +164,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${DEMUX_SOURCES}
     ${COMMON_SOURCES}
     ${TRANSCRIPT_SOURCES}
+    ${V2_SOURCES}
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
