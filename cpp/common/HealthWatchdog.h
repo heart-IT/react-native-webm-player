@@ -151,7 +151,13 @@ namespace config::health {
     constexpr uint64_t kDegradedUnderrunThreshold = 5;         // underruns in window
     constexpr uint64_t kDegradedDecodeErrorThreshold = 3;      // errors in window
     constexpr uint64_t kStalledGapThreshold = 1;               // any 500ms+ gap
-    constexpr uint64_t kFailedResetThreshold = 3;              // resets in window (audio or video)
+    // Audio decoder resets accumulate naturally on lossy/sparse streams: each
+    // consecutive-error reset is a legitimate Opus signal that doesn't always
+    // mean the pipeline is broken. With kEvalWindowUs=5s and audio at 50 fps,
+    // a 30-resets-in-5s threshold tolerates a 60% packet-loss burst before
+    // declaring the stream failed. Lower than that triggered a recoverStream
+    // loop on real-world libvpx-vp9 + Hypercore streams that were merely slow.
+    constexpr uint64_t kFailedResetThreshold = 30;             // resets in window (audio or video)
     constexpr int64_t kAvSyncDegradedThresholdUs = config::avsync::kEmergencyThresholdUs;  // same 45ms threshold
     constexpr uint64_t kVideoDropRateDenom = 10;              // Degraded if drops > 1/10 of received
     constexpr uint8_t kVideoDecoderStateFailed = 4;           // VideoDecoderState::Failed (avoids video/ include)
