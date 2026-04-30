@@ -8,6 +8,7 @@
 #include "DemuxLimits.h"
 
 #include "common/MediaConfig.h"
+#include "common/MediaLog.h"
 
 #include "mkvparser/mkvparser.h"
 
@@ -16,6 +17,20 @@ namespace media::demux {
 void WebmDemuxer::parseBlocks(DemuxResult& result) {
     if (!segment_) {
         return;
+    }
+
+    // DIAG: log cluster_ state on parseBlocks entry, throttled to first ~30 calls.
+    {
+        static int dbg = 0;
+        if (++dbg <= 30) {
+            MEDIA_LOG_W("parseBlocks#%d: cluster_=%p EOS=%d count=%ld audioT=%d videoT=%d",
+                        dbg,
+                        static_cast<const void*>(cluster_),
+                        cluster_ ? static_cast<int>(cluster_->EOS()) : -1,
+                        static_cast<long>(segment_->GetCount()),
+                        trackInfo_.audioTrackNum,
+                        trackInfo_.videoTrackNum);
+        }
     }
 
     long long latestConsumedPos = compactOffset_;
@@ -27,8 +42,20 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         if (!blockEntry_) {
             long status = cluster_->GetFirst(blockEntry_);
             if (status < 0) {
+                // DIAG
+                static int dbg2 = 0;
+                if (++dbg2 <= 10) {
+                    MEDIA_LOG_W("parseBlocks: GetFirst(blockEntry_) status=%ld (need more data)", status);
+                }
                 // Need more data for this cluster
                 break;
+            }
+            if (!blockEntry_) {
+                // DIAG
+                static int dbg3 = 0;
+                if (++dbg3 <= 10) {
+                    MEDIA_LOG_W("parseBlocks: GetFirst returned status=0 with NULL blockEntry_");
+                }
             }
         }
 
