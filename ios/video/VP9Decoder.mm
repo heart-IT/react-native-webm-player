@@ -16,6 +16,18 @@ VP9Decoder::VP9Decoder() {
     // requirement. VTIsHardwareDecodeSupported is available from iOS 11;
     // VP9 HW decode is available on A12+ chips from iOS 14.
     constexpr CMVideoCodecType kVP9CodecType = 'vp09';
+
+    // iOS 26.2 reclassified VP9 as a "supplemental" video decoder — Apple
+    // ships it but doesn't enable it until the app explicitly opts in via
+    // VTRegisterSupplementalVideoDecoderIfAvailable. Without this call,
+    // VTIsHardwareDecodeSupported('vp09') returns false and
+    // VTDecompressionSessionCreate fails with codec-not-found. Pre-26.2 iOS
+    // (and all macOS 11+) did not require the opt-in, so VP9 just worked.
+    // The function itself is API_AVAILABLE(ios(26.2), macos(11.0), ...).
+    if (@available(iOS 26.2, macOS 11.0, tvOS 26.2, visionOS 26.2, *)) {
+        VTRegisterSupplementalVideoDecoderIfAvailable(kVP9CodecType);
+    }
+
     hwSupported_ = VTIsHardwareDecodeSupported(kVP9CodecType);
     MEDIA_LOG_I("VP9Decoder: HW decode %s", hwSupported_ ? "supported" : "not supported");
 }
