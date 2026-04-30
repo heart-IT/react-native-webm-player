@@ -8,7 +8,6 @@
 #include "DemuxLimits.h"
 
 #include "common/MediaConfig.h"
-#include "common/MediaLog.h"
 
 #include "mkvparser/mkvparser.h"
 
@@ -19,23 +18,26 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         return;
     }
 
-    // DIAG: prove fix v3 is in the binary. Logs once per process at startup,
-    // then again the first 3 times each recovery branch fires.
-    {
-        static int initLog = 0;
-        if (++initLog == 1) {
-            MEDIA_LOG_W("parseBlocks fix v3 ACTIVE (initial+sequential wedge recovery)");
+    // Drain newly available clusters into libwebm's m_clusters list. CRITICAL:
+    // Segment::Load() is one-shot — it returns E_PARSE_FAILED if any cluster
+    // has already been loaded (mkvparser.cc:1451). The granular operation is
+    // Segment::LoadCluster() which has no such guard; calling it in a loop
+    // until non-zero loads everything currently reachable. Both wedge
+    // recoveries below depend on this behaviour to make m_clusterCount grow
+    // as new bytes arrive in Streaming state.
+    auto drainNewClusters = [this]() {
+        for (;;) {
+            long status = segment_->LoadCluster();
+            if (status != 0) break;  // 1=no more, <0=need more bytes, 2=loops internally
         }
-    }
+    };
 
     // Initial wedge recovery — parseTracks() succeeded on a feed that had no
     // cluster bytes yet (e.g. a remuxer that flushes EBML+Segment+Tracks
     // alone), so libwebm's m_clusterCount==0 and Segment::GetFirst() returned
-    // the EOS sentinel. Re-Load()+GetFirst() now that cluster bytes are in.
+    // the EOS sentinel.
     if (cluster_ && cluster_->EOS() && segment_->GetCount() == 0) {
-        static int dbg = 0;
-        if (++dbg <= 3) MEDIA_LOG_W("parseBlocks: INITIAL wedge recovery fired (#%d)", dbg);
-        segment_->Load();
+        drainNewClusters();
         cluster_ = segment_->GetFirst();
         blockEntry_ = nullptr;
         if (!cluster_ || cluster_->EOS()) {
@@ -49,21 +51,14 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
 
     // Sequential wedge recovery — the previous parseBlocks() drained
     // cluster_'s blocks but Segment::GetNext() returned the EOS sentinel
-    // (no more clusters were loaded into m_clusters yet). Load() never runs
-    // by itself in Streaming state, so without this retry m_clusterCount
-    // would stay frozen and every cluster after the first one would be lost.
+    // (no more clusters were loaded into m_clusters yet). LoadCluster()
+    // never runs by itself in Streaming state, so without this retry
+    // m_clusterCount would stay frozen and every cluster after the first
+    // one would be lost.
     if (cluster_ && !cluster_->EOS() && clusterDrained_) {
-        static int dbg = 0;
-        long preCount = static_cast<long>(segment_->GetCount());
-        segment_->Load();
-        long postCount = static_cast<long>(segment_->GetCount());
+        drainNewClusters();
         const mkvparser::Cluster* nextCluster = segment_->GetNext(cluster_);
-        bool advanced = (nextCluster && !nextCluster->EOS());
-        if (++dbg <= 5) {
-            MEDIA_LOG_W("parseBlocks: SEQUENTIAL wedge recovery fired (#%d) preCount=%ld postCount=%ld advanced=%d",
-                        dbg, preCount, postCount, advanced ? 1 : 0);
-        }
-        if (!advanced) {
+        if (!nextCluster || nextCluster->EOS()) {
             return;  // Still no next cluster; retry on the next feedData().
         }
         cluster_ = nextCluster;
@@ -220,12 +215,12 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         }
 
         // Move to the next cluster. parseTracks() was the only place that
-        // ever ran Segment::Load(), so in Streaming state m_clusterCount can
-        // only grow via this path — call Load() before giving up so newly
-        // arrived cluster bytes get parsed.
+        // initially ran Segment::LoadCluster(), so in Streaming state
+        // m_clusterCount can only grow via this path — drain any clusters
+        // that arrived since the last attempt before giving up.
         const mkvparser::Cluster* nextCluster = segment_->GetNext(cluster_);
         if (!nextCluster || nextCluster->EOS()) {
-            segment_->Load();
+            drainNewClusters();
             nextCluster = segment_->GetNext(cluster_);
         }
         if (!nextCluster || nextCluster->EOS()) {

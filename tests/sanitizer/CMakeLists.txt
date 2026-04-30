@@ -155,6 +155,17 @@ add_executable(test_e2e_demux
 target_include_directories(test_e2e_demux PRIVATE ${LIBWEBM_ROOT})
 target_link_libraries(test_e2e_demux PRIVATE ${OPUS_LIBRARY})
 
+# Demuxer wedge regression tests (split out so test_e2e_demux.cpp stays
+# under the 600-line file ceiling).
+add_executable(test_demux_wedge
+    test_demux_wedge.cpp
+    ${CPP_ROOT}/demux/WebmDemuxer.cpp
+    ${CPP_ROOT}/demux/WebmTrackParser.cpp
+    ${CPP_ROOT}/demux/WebmBlockParser.cpp
+    ${LIBWEBM_ROOT}/mkvparser/mkvparser.cc
+)
+target_include_directories(test_demux_wedge PRIVATE ${LIBWEBM_ROOT})
+
 # ---- Temporal stress tests (behavioral verification) ----
 add_executable(test_temporal_stress
     test_temporal_stress.cpp
