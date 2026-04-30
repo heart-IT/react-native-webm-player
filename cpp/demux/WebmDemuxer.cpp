@@ -286,6 +286,7 @@ void WebmDemuxer::reset() {
     }
     cluster_ = nullptr;
     blockEntry_ = nullptr;
+    clusterDrained_ = false;
     {
         std::lock_guard<std::mutex> lk(trackMtx_);
         trackInfo_ = TrackInfo{};

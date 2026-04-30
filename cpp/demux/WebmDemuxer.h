@@ -199,6 +199,11 @@ private:
     std::unique_ptr<mkvparser::Segment> segment_;
     const mkvparser::Cluster* cluster_ = nullptr;
     const mkvparser::BlockEntry* blockEntry_ = nullptr;
+    // True when cluster_'s blocks have been fully iterated but Segment::GetNext()
+    // saw no further loaded clusters yet. parseBlocks() leaves cluster_ pointing
+    // at the last real cluster (rather than overwriting it with the EOS sentinel)
+    // and uses this flag to drive a Load()+GetNext() retry on the next call.
+    bool clusterDrained_ = false;
 
     mutable std::mutex trackMtx_;
     TrackInfo trackInfo_;

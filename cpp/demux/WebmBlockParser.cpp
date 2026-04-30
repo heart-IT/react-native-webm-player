@@ -18,16 +18,10 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         return;
     }
 
-    // Recover from the "first GetFirst() returned EOS sentinel" wedge: when
-    // parseTracks() succeeds on a feed that contained the header but no
-    // cluster bytes (e.g. a remuxer that flushes EBML+Segment+Tracks alone
-    // before any cluster), libwebm's m_clusterCount is 0 and
-    // Segment::GetFirst() returns &m_eos. From then on cluster_ stays the
-    // EOS sentinel — the main loop short-circuits, no packets are emitted,
-    // and the ingest ring grows without bound. Re-call Load()+GetFirst() so
-    // a now-available cluster gets picked up. Guarded on GetCount()==0 to
-    // not reset back to cluster #0 after a normal end-of-loaded-list EOS
-    // (GetNext() returns the EOS sentinel from inside the main loop too).
+    // Initial wedge recovery — parseTracks() succeeded on a feed that had no
+    // cluster bytes yet (e.g. a remuxer that flushes EBML+Segment+Tracks
+    // alone), so libwebm's m_clusterCount==0 and Segment::GetFirst() returned
+    // the EOS sentinel. Re-Load()+GetFirst() now that cluster bytes are in.
     if (cluster_ && cluster_->EOS() && segment_->GetCount() == 0) {
         segment_->Load();
         cluster_ = segment_->GetFirst();
@@ -35,8 +29,26 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         if (!cluster_ || cluster_->EOS()) {
             return;  // Still no clusters loaded; retry on the next feedData().
         }
-        // Mirror the ClipIndex side-effect parseTracks() would have produced
-        // if it had landed on a real cluster originally.
+        if (result.newClusterPositions.size() < kMaxClustersPerFeed) {
+            result.newClusterPositions.push_back(cluster_->GetPosition());
+        }
+        ++result.newClusterCount;
+    }
+
+    // Sequential wedge recovery — the previous parseBlocks() drained
+    // cluster_'s blocks but Segment::GetNext() returned the EOS sentinel
+    // (no more clusters were loaded into m_clusters yet). Load() never runs
+    // by itself in Streaming state, so without this retry m_clusterCount
+    // would stay frozen and every cluster after the first one would be lost.
+    if (cluster_ && !cluster_->EOS() && clusterDrained_) {
+        segment_->Load();
+        const mkvparser::Cluster* nextCluster = segment_->GetNext(cluster_);
+        if (!nextCluster || nextCluster->EOS()) {
+            return;  // Still no next cluster; retry on the next feedData().
+        }
+        cluster_ = nextCluster;
+        blockEntry_ = nullptr;
+        clusterDrained_ = false;
         if (result.newClusterPositions.size() < kMaxClustersPerFeed) {
             result.newClusterPositions.push_back(cluster_->GetPosition());
         }
@@ -187,10 +199,21 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
             blockEntry_ = nextEntry;
         }
 
-        // Move to the next cluster
+        // Move to the next cluster. parseTracks() was the only place that
+        // ever ran Segment::Load(), so in Streaming state m_clusterCount can
+        // only grow via this path — call Load() before giving up so newly
+        // arrived cluster bytes get parsed.
         const mkvparser::Cluster* nextCluster = segment_->GetNext(cluster_);
         if (!nextCluster || nextCluster->EOS()) {
-            cluster_ = nextCluster;
+            segment_->Load();
+            nextCluster = segment_->GetNext(cluster_);
+        }
+        if (!nextCluster || nextCluster->EOS()) {
+            // Still no next cluster. Keep cluster_ pointing at the last real
+            // cluster (NOT the EOS sentinel) so the next parseBlocks() call
+            // can retry advancing once more bytes arrive. The clusterDrained_
+            // flag prevents the outer while from re-iterating its blocks.
+            clusterDrained_ = true;
             blockEntry_ = nullptr;
             break;
         }

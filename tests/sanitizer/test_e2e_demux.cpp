@@ -532,49 +532,68 @@ TEST(demuxer_timeInErrorMs_positive_after_permanent_error) {
     ASSERT_EQ(after.timeInErrorMs, 0);
 }
 
-// Regression: feed#0 = EBML+Segment+Tracks header only (no cluster bytes
-// yet), feed#1+ = clusters. Pre-fix, parseTracks() succeeded with libwebm's
-// m_clusterCount==0, GetFirst() returned the EOS sentinel, and cluster_
-// stayed wedged on it forever — zero packets emitted regardless of how
-// many cluster bytes were fed afterward. Mirrors the production wedge on
-// remuxers that flush the WebM header in its own write.
+// Pre-fix wedges in parseBlocks: (1) parseTracks() runs before any cluster
+// bytes arrive, GetFirst() returns the EOS sentinel, cluster_ stuck there;
+// (2) Load() never re-runs in Streaming, so when GetNext() hits the end of
+// the loaded cluster list cluster_ is overwritten with the EOS sentinel
+// and every later cluster's bytes are lost. Two regression tests below.
 TEST(header_only_first_chunk_then_clusters_does_not_wedge) {
     size_t firstClusterOffset = 0;
     for (size_t i = 0; i + 4 < fixture::kWebmDataSize; ++i) {
-        if (fixture::kWebmData[i] == 0x1F &&
-            fixture::kWebmData[i + 1] == 0x43 &&
-            fixture::kWebmData[i + 2] == 0xB6 &&
-            fixture::kWebmData[i + 3] == 0x75) {
+        if (fixture::kWebmData[i] == 0x1F && fixture::kWebmData[i + 1] == 0x43 &&
+            fixture::kWebmData[i + 2] == 0xB6 && fixture::kWebmData[i + 3] == 0x75) {
             firstClusterOffset = i;
             break;
         }
     }
     ASSERT_TRUE(firstClusterOffset > 0);
-
     constexpr size_t kRingCapacity = 1 << 21;
-    ASSERT_TRUE(fixture::kWebmDataSize <= kRingCapacity);
-
     IngestRingBuffer ring(kRingCapacity);
     WebmDemuxer demuxer;
     demuxer.setRingBuffer(&ring);
 
     ASSERT_TRUE(ring.write(fixture::kWebmData, firstClusterOffset));
     const auto& r1 = demuxer.feedData(nullptr, firstClusterOffset);
-    ASSERT_TRUE(r1.audioPackets.empty());
-    ASSERT_TRUE(r1.videoPackets.empty());
+    ASSERT_TRUE(r1.audioPackets.empty() && r1.videoPackets.empty());
 
-    size_t audio = 0, video = 0;
     const size_t remaining = fixture::kWebmDataSize - firstClusterOffset;
     ASSERT_TRUE(ring.write(fixture::kWebmData + firstClusterOffset, remaining));
     const auto& r2 = demuxer.feedData(nullptr, remaining);
-    audio += r2.audioPackets.size();
-    video += r2.videoPackets.size();
+    size_t total = r2.audioPackets.size() + r2.videoPackets.size();
     ring.setDecodeRetainPos(ring.currentWritePos());
     const auto& r3 = demuxer.feedData(nullptr, 0);
-    audio += r3.audioPackets.size();
-    video += r3.videoPackets.size();
+    total += r3.audioPackets.size() + r3.videoPackets.size();
+    ASSERT_TRUE(total > 0);
+}
 
-    ASSERT_TRUE(audio > 0 || video > 0);
+TEST(later_clusters_emit_after_initial_drain) {
+    WebmDemuxer baseline;
+    auto baselinePkts = feedAll(baseline, fixture::kWebmData,
+                                fixture::kWebmDataSize, fixture::kWebmDataSize);
+    const size_t baselineTotal =
+        baselinePkts.audioData.size() + baselinePkts.videoData.size();
+    ASSERT_GT(baselineTotal, 0u);
+
+    constexpr size_t kRingCapacity = 1 << 21;
+    IngestRingBuffer ring(kRingCapacity);
+    WebmDemuxer demuxer;
+    demuxer.setRingBuffer(&ring);
+
+    size_t emitted = 0;
+    for (size_t offset = 0; offset < fixture::kWebmDataSize; ) {
+        size_t n = std::min<size_t>(1024, fixture::kWebmDataSize - offset);
+        ASSERT_TRUE(ring.write(fixture::kWebmData + offset, n));
+        offset += n;
+        const auto& r = demuxer.feedData(nullptr, n);
+        emitted += r.audioPackets.size() + r.videoPackets.size();
+        ring.setDecodeRetainPos(ring.currentWritePos());
+    }
+    const auto& tail = demuxer.feedData(nullptr, 0);
+    emitted += tail.audioPackets.size() + tail.videoPackets.size();
+
+    // Pre-fix this would max out near cluster #1's packet count. The fix
+    // must recover ~all of the baseline; tail-block tolerance left at 5 %.
+    ASSERT_GT(emitted * 100, baselineTotal * 95);
 }
 
 TEST_MAIN("End-to-End Demux Tests")
