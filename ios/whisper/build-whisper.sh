@@ -90,22 +90,27 @@ build() {
     mkdir -p "${BUILD_DIR}/ios-combined" "${BUILD_DIR}/sim-arm64-combined" \
              "${BUILD_DIR}/sim-x86_64-combined" "${BUILD_DIR}/sim-combined"
 
-    libtool -static -o "${BUILD_DIR}/ios-combined/libwhisper.a" \
-        "${IOS_BUILD}/src/libwhisper.a" \
-        "${IOS_BUILD}/ggml/src/libggml.a" \
-        "${IOS_BUILD}/ggml/src/ggml-cpu/libggml-cpu.a" \
-        "${IOS_BUILD}/ggml/src/ggml-metal/libggml-metal.a" 2>/dev/null || \
-    libtool -static -o "${BUILD_DIR}/ios-combined/libwhisper.a" \
-        "${IOS_BUILD}/src/libwhisper.a" \
-        $(find "${IOS_BUILD}/ggml" -name "*.a" -type f)
-
-    libtool -static -o "${BUILD_DIR}/sim-arm64-combined/libwhisper.a" \
-        "${SIM_ARM64_BUILD}/src/libwhisper.a" \
-        $(find "${SIM_ARM64_BUILD}/ggml" -name "*.a" -type f)
-
-    libtool -static -o "${BUILD_DIR}/sim-x86_64-combined/libwhisper.a" \
-        "${SIM_X86_BUILD}/src/libwhisper.a" \
-        $(find "${SIM_X86_BUILD}/ggml" -name "*.a" -type f)
+    # Combine whisper + every ggml .a (libggml, libggml-base, libggml-cpu,
+    # libggml-metal, ...). Whisper v1.8.4's CMake places libggml-cpu.a at
+    # ggml/src/libggml-cpu.a — earlier versions used ggml/src/ggml-cpu/.
+    # `libtool` returns 0 even when an input path is missing, so a hard-coded
+    # list silently produces a partial archive that link-fails downstream.
+    # find(1) avoids that by enumerating whatever the build actually emitted.
+    combine_ggml() {
+        local build_dir="$1"
+        local out="$2"
+        local archives
+        archives=$(find "${build_dir}/ggml" -name "*.a" -type f)
+        if [ -z "${archives}" ]; then
+            echo "build-whisper.sh: no ggml *.a archives found under ${build_dir}/ggml" >&2
+            return 1
+        fi
+        # shellcheck disable=SC2086 # word splitting on archive list is intentional
+        libtool -static -o "${out}" "${build_dir}/src/libwhisper.a" ${archives}
+    }
+    combine_ggml "${IOS_BUILD}"       "${BUILD_DIR}/ios-combined/libwhisper.a"
+    combine_ggml "${SIM_ARM64_BUILD}" "${BUILD_DIR}/sim-arm64-combined/libwhisper.a"
+    combine_ggml "${SIM_X86_BUILD}"   "${BUILD_DIR}/sim-x86_64-combined/libwhisper.a"
 
     # Lipo the per-arch sim libs into a fat binary so the xcframework slice is
     # named ios-arm64_x86_64-simulator (matches CocoaPods' expectation).
