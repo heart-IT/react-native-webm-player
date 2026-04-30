@@ -132,7 +132,21 @@ export const MediaPipelineV2 = {
   isPaused: (): boolean => Platform.OS === 'ios' ? ios().isPaused() : false,
 
   feedData: (buffer: ArrayBuffer | Uint8Array): Promise<boolean> => {
-    if (Platform.OS === 'ios') return Promise.resolve(ios().feedData(buffer))
+    if (Platform.OS === 'ios') {
+      // JSI ArrayBuffer expects a full buffer (no offset/length view). If the caller
+      // passes a Uint8Array view into a larger buffer, slice into a fresh ArrayBuffer.
+      // SharedArrayBuffer is assertion-cast to ArrayBuffer; in practice RN never gives
+      // us one (no SAB-using JS code paths in the bridge).
+      let ab: ArrayBuffer
+      if (buffer instanceof ArrayBuffer) {
+        ab = buffer
+      } else if (buffer.byteOffset === 0 && buffer.byteLength === buffer.buffer.byteLength) {
+        ab = buffer.buffer as ArrayBuffer
+      } else {
+        ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer
+      }
+      return Promise.resolve(ios().feedData(ab))
+    }
     if (!androidV2) return Promise.resolve(false)
     const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
     return androidV2.feedData(bytesToBase64(bytes))

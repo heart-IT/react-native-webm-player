@@ -179,15 +179,8 @@ static CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
             [self->_synchronizer removeRenderer:previous atTime:kCMTimeInvalid completionHandler:nil];
         }
         self->_displayLayer = layer;
-        if (layer) {
-            // Default: aspect-fit. Caller can override after setDisplayLayer: returns.
-            if (!CGAffineTransformEqualToTransform(layer.affineTransform, CGAffineTransformIdentity) ||
-                ![layer.videoGravity isEqualToString:AVLayerVideoGravityResizeAspect]) {
-                // Respect caller's customization.
-            } else {
-                layer.videoGravity = AVLayerVideoGravityResizeAspect;
-            }
-        }
+        // videoGravity is owned by the view (VideoViewV2 sets it in init / setScaleMode:).
+        // The engine intentionally doesn't touch it here so callers can customize.
         if (self->_videoDecoder) [self->_videoDecoder setOutputLayer:layer];
         if (self->_synchronizer && layer) {
             [self->_synchronizer addRenderer:layer];
@@ -301,12 +294,16 @@ static CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 }
 
 - (void)fireHealth:(NSString*)status detail:(NSString*)detail {
-    void (^cb)(NSString*, NSString*) = _healthCallback;
-    NSString* expected = _lastHealthStatus;
-    if (!cb) return;
-    if ([expected isEqualToString:status]) return;
-    _lastHealthStatus = status;
-    void (^run)(void) = ^{ cb(status, detail ?: @""); };
+    // Both transition-tracking and the callback fire on main, so reads/writes of
+    // _lastHealthStatus are race-free. Cost is one dispatch_async per health event,
+    // which is rare (≤a handful per session).
+    void (^run)(void) = ^{
+        void (^cb)(NSString*, NSString*) = self->_healthCallback;
+        if (!cb) return;
+        if ([self->_lastHealthStatus isEqualToString:status]) return;
+        self->_lastHealthStatus = status;
+        cb(status, detail ?: @"");
+    };
     if ([NSThread isMainThread]) run();
     else dispatch_async(dispatch_get_main_queue(), run);
 }
