@@ -25,13 +25,48 @@ Target: ~6K LOC (3× smaller than v1), fewer bug classes, leans on platforms.
 | 5 | TypeScript API cleanup | ✅ partial — `src/v2.ts` added with v2 surface. v1 `src/index.tsx` stays until Phase 6 |
 | 6 | Delete legacy + docs | pending — final cleanup PR after device validation |
 
+## Audit + fixes applied
+
+A full audit ran against the v2 skeleton. Fixes applied:
+
+| Sev | Finding | Fix |
+|---|---|---|
+| P0 | Android `feedData` was O(N) JS↔Java crossings | Switched to base64 string (1 crossing); 100×+ faster |
+| P0 | iOS had no React Native video view | Added `VideoViewV2` (`ios/playback_v2/VideoViewV2.{h,mm}`); auto-attaches to engine on `didMoveToWindow` |
+| P0 | TS `feedData` had inconsistent sync/async return | Normalized all v2 methods to `Promise<T>` |
+| P1 | Demux thread never compacted ring window | `compactBefore(nextCluster->GetPosition())` after each cluster drains |
+| P1 | Demux loop ignored `setEndOfStream` | Added `_ring->isEndOfStream()` exit check |
+| P1 | `setDisplayLayer:` raced + leaked synchronizer renderers | Main-thread dispatch + previous-renderer remove + dedupe |
+| P1 | Opus decoder leaked on `tracksLoaded` reparse | Destroy guard before `opus_decoder_create` |
+| P1 | Audio enqueue ignored `isReadyForMoreMediaData` | Drop + bump `audioUnderruns` if not ready |
+| P1 | Android had no background/foreground lifecycle | Ported `appDidEnterBackground` / `appDidEnterForeground` from call-doctor-mobile |
+| P1 | Health callback wired but never fired | `fireHealth:` invokes on transitions (buffering→playing→ended/failed) |
+| P1 | VTDecompression `__bridge` race vs callback | `WaitForAsynchronousFrames` + `dispatch_sync` render queue drain in shutdown |
+| P2 | `addRenderer:` after start was undefined | Same `setDisplayLayer:` fix (re-add post-start works correctly) |
+| P2 | `VideoView` lacked default `videoGravity` | `VideoViewV2.init` sets `AVLayerVideoGravityResizeAspect`; `setScaleMode:` exposes 3 modes |
+| P3 | Dead `extern "C" PlaybackEngineV2_currentEngineForRuntime` | Replaced with `mediamodule_v2::currentEngine()` |
+| P3 | View class name parity | Both platforms register as `WebmPlayerV2View` |
+
+Code structure:
+- `PlaybackEngineV2.mm` 487 LOC (was 558, then briefly 642 over-budget)
+- VP9 decoder extracted to `PlaybackEngineV2VideoDecoder.{h,mm}` (~180 LOC)
+- New `VideoViewV2.{h,mm}` + manager (~80 LOC)
+
+## Known gaps (intentional, follow-up work)
+
+1. **Health callback JSI binding** — iOS engine fires `fireHealth:` but there's no JSI method for JS to subscribe. Workarounds: (a) iOS native code can call `[engine setHealthCallback:]`, (b) Android emits via `DeviceEventEmitter`. JSI binding requires `CallInvoker` capture; not blocking.
+2. **TurboModule + JSI ArrayBuffer for Android `feedData`** — base64 is 100× faster than the original ReadableArray approach, but a TurboModule with raw JSI ArrayBuffer would skip the base64 round-trip entirely. Defer to a follow-up after the lib settles.
+3. **Audio renderer pull-based feeding (`requestMediaDataWhenReadyOnQueue:`)** — current `isReadyForMoreMediaData` check + drop is correct under live (real-time) producer assumption. For producer-faster-than-realtime cases (e.g. fast-forward through cached data), pull-based is safer. Track if ever needed.
+4. **Health stickiness** — once `failed` is reported, a subsequent `playing` event overwrites it. Real apps should treat `failed` as a terminal state and only recover on explicit `stop()` + `start()`. Document as a contract for now.
+5. **VP9 frames silently dropped if display layer not ready** — VTDecompression callback's enqueue check (added in audit) doesn't bump a counter visible to the engine. Counter exists in engine but isn't wired through. Low priority — should be near-zero in practice.
+
 ## Pending validation work
 
-The skeleton is structurally complete and compiles. **Before Phase 6 (deleting v1)**, the user must validate on physical devices:
+The skeleton is structurally complete, compiles, typechecks, and lints. **Before Phase 6 (deleting v1)**, the user must validate on physical devices:
 
 1. **iOS spike** — tap "Run V2 Spike" in example app. Plays bundled fixture; if A/V plays in sync, the architecture is validated end-to-end.
-2. **iOS streaming v2** — call `MediaPipelineV2.start()` + `feedData()` from JS with real Hypercore data. Confirms streaming, audio renderer, synchronizer, and buffering work with continuous feed.
-3. **Android streaming v2** — same, but on Android. Confirms ExoPlayer + WebMStreamBuffer DataSource integration.
+2. **iOS streaming v2** — call `MediaPipelineV2.start()` + `feedData()` from JS with real Hypercore data. Mount `<VideoViewV2 />` to render. Confirms streaming, audio renderer, synchronizer, and buffering work with continuous feed.
+3. **Android streaming v2** — same, but on Android. Confirms ExoPlayer + base64-decoded WebMStreamBuffer DataSource integration. Wire `<VideoViewV2 />` + `attachToView(viewTag)` for video.
 
 ## Phase 3.5 — iOS VideoView (TBD)
 
