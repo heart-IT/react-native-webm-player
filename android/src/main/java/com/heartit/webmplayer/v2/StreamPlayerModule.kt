@@ -69,6 +69,11 @@ class StreamPlayerModule(reactContext: ReactApplicationContext) :
     private var focusRequest: AudioFocusRequest? = null
     private var statsRunnable: Runnable? = null
 
+    // Background/foreground state. Player is paused when the app backgrounds and
+    // (optionally) auto-resumed + jumped to live when it foregrounds again.
+    private var isInBackground = false
+    private var wasPlayingBeforeBackground = false
+
     override fun getName(): String = "WebmPlayerV2Module"
 
     // JNI: backed by WebMStreamBuffer singleton in cpp
@@ -162,10 +167,12 @@ class StreamPlayerModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun feedData(data: com.facebook.react.bridge.ReadableArray, promise: Promise) {
+    fun feedData(base64Data: String, promise: Promise) {
         try {
-            val buf = ByteArray(data.size())
-            for (i in 0 until data.size()) buf[i] = data.getInt(i).toByte()
+            // Base64 string from JS is ~4/3 the binary size; decoded once natively.
+            // For a 64KB chunk this is one bridge crossing instead of 65,536 (the previous
+            // ReadableArray-of-int approach). Total time goes from ~hundreds-of-ms to <1ms.
+            val buf = android.util.Base64.decode(base64Data, android.util.Base64.NO_WRAP)
             val wrote = nativeFeedData(buf, 0, buf.size)
             promise.resolve(wrote == buf.size)
         } catch (e: Exception) {
@@ -186,6 +193,50 @@ class StreamPlayerModule(reactContext: ReactApplicationContext) :
         mainHandler.post {
             player?.volume = gain.toFloat().coerceIn(0f, 2f)
             promise.resolve(true)
+        }
+    }
+
+    @ReactMethod
+    fun setPlaybackRate(rate: Double, promise: Promise) {
+        mainHandler.post {
+            try {
+                player?.setPlaybackSpeed(rate.toFloat().coerceIn(0.5f, 2.0f))
+                promise.resolve(true)
+            } catch (e: Exception) {
+                promise.reject("RATE_ERROR", e.message, e)
+            }
+        }
+    }
+
+    @ReactMethod
+    fun appDidEnterBackground(promise: Promise) {
+        mainHandler.post {
+            try {
+                isInBackground = true
+                wasPlayingBeforeBackground = player?.isPlaying == true
+                if (wasPlayingBeforeBackground) player?.pause()
+                promise.resolve(true)
+            } catch (e: Exception) {
+                promise.reject("BACKGROUND_ERROR", e.message, e)
+            }
+        }
+    }
+
+    @ReactMethod
+    fun appDidEnterForeground(promise: Promise) {
+        mainHandler.post {
+            try {
+                isInBackground = false
+                if (wasPlayingBeforeBackground) {
+                    // The buffer may have stale data after a background pause;
+                    // jump to live so playback catches up cleanly.
+                    if (nativeIsBehindLive(LIVE_LAG_THRESHOLD_BYTES)) nativeGoToLive()
+                    player?.play()
+                }
+                promise.resolve(true)
+            } catch (e: Exception) {
+                promise.reject("FOREGROUND_ERROR", e.message, e)
+            }
         }
     }
 

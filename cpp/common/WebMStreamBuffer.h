@@ -78,6 +78,14 @@ public:
         return destroyed_.load(std::memory_order_acquire);
     }
 
+    bool isEndOfStream() const noexcept {
+        return endOfStream_.load(std::memory_order_acquire);
+    }
+
+    bool isShutdown() const noexcept {
+        return shutdown_.load(std::memory_order_acquire);
+    }
+
     size_t write(const uint8_t* data, size_t length, bool isClusterBoundary = true);
     void setEndOfStream(bool eos = true);
     void clear();

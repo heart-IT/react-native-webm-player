@@ -1,17 +1,15 @@
 #import "PlaybackEngineV2.h"
+#import "PlaybackEngineV2VideoDecoder.h"
 
-#import <VideoToolbox/VideoToolbox.h>
 #import <AudioToolbox/AudioToolbox.h>
 #include <atomic>
 #include <thread>
 #include <mutex>
-#include <condition_variable>
 #include <vector>
 #include <opus.h>
 #include "mkvparser/mkvparser.h"
 #include "common/WebMStreamBuffer.h"
 #include "common/MediaLog.h"
-#include "video/VP9HeaderParser.h"
 
 namespace {
 
@@ -123,156 +121,6 @@ static CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
 }  // namespace
 
-#pragma mark - VP9 decoder shim
-
-@interface PlaybackEngineV2VideoDecoder : NSObject
-- (void)setOutputLayer:(AVSampleBufferDisplayLayer*)layer;
-- (BOOL)submitFrame:(const uint8_t*)data length:(size_t)length ptsUs:(int64_t)ptsUs isKey:(BOOL)isKey;
-- (void)shutdown;
-@end
-
-@implementation PlaybackEngineV2VideoDecoder {
-    __weak AVSampleBufferDisplayLayer* _layer;
-    VTDecompressionSessionRef _session;
-    CMVideoFormatDescriptionRef _formatDesc;
-    int _width;
-    int _height;
-    int _profile;
-    BOOL _hwSupported;
-    dispatch_queue_t _renderQueue;
-}
-
-- (instancetype)init {
-    self = [super init];
-    if (!self) return nil;
-    _renderQueue = dispatch_queue_create("playbackv2.video.render", DISPATCH_QUEUE_SERIAL);
-    constexpr CMVideoCodecType kVP9CodecType = 'vp09';
-    if (@available(iOS 26.2, *)) {
-        VTRegisterSupplementalVideoDecoderIfAvailable(kVP9CodecType);
-    }
-    _hwSupported = VTIsHardwareDecodeSupported(kVP9CodecType);
-    return self;
-}
-
-- (void)dealloc { [self shutdown]; }
-
-- (void)setOutputLayer:(AVSampleBufferDisplayLayer*)layer { _layer = layer; }
-
-- (BOOL)ensureSession:(int)width height:(int)height profile:(int)profile {
-    if (_session && width == _width && height == _height && profile == _profile) return YES;
-    [self shutdownSession];
-    if (!_hwSupported) return NO;
-
-    NSData* vpcc = BuildVpcCConfig(profile);
-    NSDictionary* extensions = @{
-        (NSString*)kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: @{ @"vpcC": vpcc }
-    };
-    constexpr CMVideoCodecType kVP9CodecType = 'vp09';
-    OSStatus s = CMVideoFormatDescriptionCreate(kCFAllocatorDefault, kVP9CodecType,
-                                                width, height,
-                                                (__bridge CFDictionaryRef)extensions, &_formatDesc);
-    if (s != noErr || !_formatDesc) return NO;
-
-    NSDictionary* destAttrs = @{
-        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-        (NSString*)kCVPixelBufferWidthKey: @(width),
-        (NSString*)kCVPixelBufferHeightKey: @(height),
-        (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{}
-    };
-    VTDecompressionOutputCallbackRecord cb = {0};
-    cb.decompressionOutputCallback = &OutputCallback;
-    cb.decompressionOutputRefCon = (__bridge void*)self;
-    s = VTDecompressionSessionCreate(kCFAllocatorDefault, _formatDesc, nullptr,
-                                     (__bridge CFDictionaryRef)destAttrs, &cb, &_session);
-    if (s != noErr || !_session) {
-        CFRelease(_formatDesc); _formatDesc = nullptr;
-        return NO;
-    }
-    _width = width; _height = height; _profile = profile;
-    return YES;
-}
-
-- (BOOL)submitFrame:(const uint8_t*)data length:(size_t)length ptsUs:(int64_t)ptsUs isKey:(BOOL)isKey {
-    if (!data || length == 0) return NO;
-
-    if (isKey) {
-        auto info = media::vp9::parseHeader(data, length);
-        if (info.valid && info.width > 0 && info.height > 0) {
-            if (![self ensureSession:info.width height:info.height profile:info.profile]) return NO;
-        }
-    }
-    if (!_session) return NO;
-
-    CMBlockBufferRef block = nullptr;
-    OSStatus s = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, nullptr, length,
-                                                    kCFAllocatorDefault, nullptr, 0, length,
-                                                    kCMBlockBufferAssureMemoryNowFlag, &block);
-    if (s != noErr || !block) return NO;
-    CMBlockBufferReplaceDataBytes(data, block, 0, length);
-
-    size_t sampleSize = length;
-    CMSampleTimingInfo timing;
-    timing.duration = CMTimeMake(1, 30);
-    timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
-    timing.decodeTimeStamp = kCMTimeInvalid;
-
-    CMSampleBufferRef sample = nullptr;
-    s = CMSampleBufferCreateReady(kCFAllocatorDefault, block, _formatDesc, 1, 1, &timing,
-                                  1, &sampleSize, &sample);
-    CFRelease(block);
-    if (s != noErr || !sample) return NO;
-
-    void* ptsCtx = reinterpret_cast<void*>(static_cast<uintptr_t>(ptsUs));
-    VTDecodeInfoFlags out = 0;
-    s = VTDecompressionSessionDecodeFrame(_session, sample, kVTDecodeFrame_EnableAsynchronousDecompression,
-                                          ptsCtx, &out);
-    CFRelease(sample);
-    return s == noErr;
-}
-
-static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus status,
-                            VTDecodeInfoFlags flags, CVImageBufferRef imageBuffer,
-                            CMTime, CMTime) {
-    if (status != noErr || !imageBuffer || (flags & kVTDecodeInfo_FrameDropped)) return;
-    auto* self_ = (__bridge PlaybackEngineV2VideoDecoder*)refCon;
-    int64_t ptsUs = static_cast<int64_t>(reinterpret_cast<uintptr_t>(sourceFrameRefCon));
-
-    CMVideoFormatDescriptionRef outFmt = nullptr;
-    if (CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &outFmt) != noErr) return;
-
-    CMSampleTimingInfo timing;
-    timing.duration = CMTimeMake(1, 30);
-    timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
-    timing.decodeTimeStamp = kCMTimeInvalid;
-
-    CMSampleBufferRef sample = nullptr;
-    OSStatus s = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, imageBuffer, outFmt, &timing, &sample);
-    CFRelease(outFmt);
-    if (s != noErr || !sample) return;
-
-    AVSampleBufferDisplayLayer* layer = self_->_layer;
-    CFRetain(sample);
-    dispatch_async(self_->_renderQueue, ^{
-        if (layer) [layer enqueueSampleBuffer:sample];
-        CFRelease(sample);
-    });
-    CFRelease(sample);
-}
-
-- (void)shutdownSession {
-    if (_session) {
-        VTDecompressionSessionWaitForAsynchronousFrames(_session);
-        VTDecompressionSessionInvalidate(_session);
-        CFRelease(_session); _session = nullptr;
-    }
-    if (_formatDesc) { CFRelease(_formatDesc); _formatDesc = nullptr; }
-    _width = _height = _profile = 0;
-}
-
-- (void)shutdown { [self shutdownSession]; }
-
-@end
-
 #pragma mark - Engine
 
 @implementation PlaybackEngineV2 {
@@ -296,11 +144,14 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     std::atomic<uint64_t> _bytesFed;
     std::atomic<uint64_t> _audioPacketsDecoded;
     std::atomic<uint64_t> _videoPacketsDecoded;
+    std::atomic<uint64_t> _audioUnderruns;
+    std::atomic<uint64_t> _videoFramesDropped;
     std::atomic<float> _gain;
     std::atomic<bool> _muted;
     std::atomic<float> _playbackRate;
 
     void (^_healthCallback)(NSString*, NSString*);
+    NSString* _lastHealthStatus;  // Main-thread only: last status fired so we don't spam the callback.
 }
 
 - (instancetype)init {
@@ -308,19 +159,42 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     if (!self) return nil;
     _running = NO; _paused = NO; _stop = NO;
     _bytesFed = 0; _audioPacketsDecoded = 0; _videoPacketsDecoded = 0;
+    _audioUnderruns = 0; _videoFramesDropped = 0;
     _gain = 1.0f; _muted = NO; _playbackRate = 1.0f;
+    _lastHealthStatus = @"idle";
     return self;
 }
 
 - (void)dealloc { [self stop]; }
 
 - (void)setDisplayLayer:(AVSampleBufferDisplayLayer*)layer {
-    _displayLayer = layer;
-    if (_videoDecoder) [_videoDecoder setOutputLayer:layer];
-    if (_synchronizer && layer) {
-        // Attach if not already a renderer
-        @try { [_synchronizer addRenderer:layer]; } @catch (...) {}
-    }
+    // Layer attach must happen on main: AVSampleBufferRenderSynchronizer's renderer set is
+    // observed for KVO, and CALayer parenting is main-thread-only. Dispatch unconditionally
+    // so callers from any thread (including the demux thread or RN view manager) are safe.
+    void (^apply)(void) = ^{
+        AVSampleBufferDisplayLayer* previous = self->_displayLayer;
+        if (previous == layer) return;
+
+        if (self->_synchronizer && previous) {
+            [self->_synchronizer removeRenderer:previous atTime:kCMTimeInvalid completionHandler:nil];
+        }
+        self->_displayLayer = layer;
+        if (layer) {
+            // Default: aspect-fit. Caller can override after setDisplayLayer: returns.
+            if (!CGAffineTransformEqualToTransform(layer.affineTransform, CGAffineTransformIdentity) ||
+                ![layer.videoGravity isEqualToString:AVLayerVideoGravityResizeAspect]) {
+                // Respect caller's customization.
+            } else {
+                layer.videoGravity = AVLayerVideoGravityResizeAspect;
+            }
+        }
+        if (self->_videoDecoder) [self->_videoDecoder setOutputLayer:layer];
+        if (self->_synchronizer && layer) {
+            [self->_synchronizer addRenderer:layer];
+        }
+    };
+    if ([NSThread isMainThread]) apply();
+    else dispatch_async(dispatch_get_main_queue(), apply);
 }
 
 - (BOOL)start {
@@ -414,6 +288,8 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     m.bytesFedTotal = _bytesFed.load();
     m.audioPacketsDecoded = _audioPacketsDecoded.load();
     m.videoPacketsDecoded = _videoPacketsDecoded.load();
+    m.audioUnderruns = _audioUnderruns.load();
+    m.videoFramesDropped = _videoFramesDropped.load();
     m.gain = _gain.load();
     m.muted = _muted.load();
     m.playbackRate = _playbackRate.load();
@@ -422,6 +298,17 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
         if (CMTIME_IS_VALID(t)) m.currentTimeSeconds = CMTimeGetSeconds(t);
     }
     return m;
+}
+
+- (void)fireHealth:(NSString*)status detail:(NSString*)detail {
+    void (^cb)(NSString*, NSString*) = _healthCallback;
+    NSString* expected = _lastHealthStatus;
+    if (!cb) return;
+    if ([expected isEqualToString:status]) return;
+    _lastHealthStatus = status;
+    void (^run)(void) = ^{ cb(status, detail ?: @""); };
+    if ([NSThread isMainThread]) run();
+    else dispatch_async(dispatch_get_main_queue(), run);
 }
 
 - (void)setHealthCallback:(void (^)(NSString*, NSString*))callback {
@@ -450,6 +337,8 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     bool tracksLoaded = false;
     const mkvparser::Cluster* cluster = nullptr;
     const mkvparser::BlockEntry* blockEntry = nullptr;
+    bool firstAudioSeen = false;
+    bool firstVideoSeen = false;
 
     auto pumpReader = [&](uint64_t timeoutMs) -> bool {
         return reader.pumpFromRing(timeoutMs) > 0;
@@ -458,10 +347,16 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     constexpr int kMaxOpusFrames = 5760;
     std::vector<float> pcm(static_cast<size_t>(kMaxOpusFrames) * 2);
 
+    [self fireHealth:@"buffering" detail:@"waiting for stream data"];
+
     while (!_stop.load()) {
-        // Pump some data
+        // Pump some data; if nothing available, exit cleanly when the stream is done.
         if (!pumpReader(50)) {
-            if (_ring->isDestroyed()) break;
+            if (_ring->isDestroyed() || _ring->isShutdown()) break;
+            if (_ring->isEndOfStream() && _ring->sizeBytes() == 0) {
+                [self fireHealth:@"ended" detail:@"end of stream"];
+                break;
+            }
             continue;
         }
 
@@ -479,7 +374,8 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
             segment.reset(segmentRaw);
         }
 
-        // Parse tracks once
+        // Parse tracks once. Guard opus_decoder_create against re-entry: tracksLoaded may flip
+        // false if resetStream is called, but the existing decoder must be torn down first.
         if (!tracksLoaded) {
             long s = segment->ParseHeaders();
             if (s < 0) continue;
@@ -493,8 +389,16 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
                     _audioTrackNum = at->GetNumber();
                     _opusSampleRate = static_cast<int>(at->GetSamplingRate());
                     _opusChannels = static_cast<int>(at->GetChannels());
+                    if (_opusDecoder) {
+                        opus_decoder_destroy(_opusDecoder);
+                        _opusDecoder = nullptr;
+                    }
                     int err = 0;
                     _opusDecoder = opus_decoder_create(_opusSampleRate, _opusChannels, &err);
+                    if (err != OPUS_OK) {
+                        MEDIA_LOG_E("PlaybackEngineV2: opus_decoder_create failed: %d", err);
+                        [self fireHealth:@"failed" detail:@"opus init failed"];
+                    }
                 } else if (tr->GetType() == mkvparser::Track::kVideo) {
                     _videoTrackNum = static_cast<const mkvparser::VideoTrack*>(tr)->GetNumber();
                 }
@@ -509,7 +413,8 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
             if (s != 0) break;
         }
 
-        // Iterate clusters → blocks → frames → packets
+        // Iterate clusters → blocks → frames → packets. Compact the reader window after
+        // each cluster fully drains so the in-memory window doesn't grow unbounded.
         if (!cluster || cluster->EOS()) cluster = segment->GetFirst();
         while (cluster && !cluster->EOS()) {
             if (!blockEntry) (void)cluster->GetFirst(blockEntry);
@@ -529,19 +434,37 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
                             int frames = opus_decode_float(_opusDecoder, bytes.data(),
                                                             static_cast<int>(bytes.size()),
                                                             pcm.data(), kMaxOpusFrames, 0);
-                            if (frames > 0) {
-                                CMSampleBufferRef sb = BuildLPCMSampleBuffer(pcm.data(), frames,
-                                                                              _opusSampleRate, _opusChannels, ptsUs);
-                                if (sb) {
-                                    [_audioRenderer enqueueSampleBuffer:sb];
-                                    CFRelease(sb);
-                                    _audioPacketsDecoded.fetch_add(1);
+                            if (frames <= 0) continue;
+                            CMSampleBufferRef sb = BuildLPCMSampleBuffer(pcm.data(), frames,
+                                                                          _opusSampleRate, _opusChannels, ptsUs);
+                            if (!sb) continue;
+
+                            // Drop if renderer can't accept now. Live producer arrives at real-time
+                            // pace; sustained drops mean upstream is faster than realtime, which
+                            // signals a route/session interruption rather than a queue depth issue.
+                            if (_audioRenderer.isReadyForMoreMediaData) {
+                                [_audioRenderer enqueueSampleBuffer:sb];
+                                _audioPacketsDecoded.fetch_add(1);
+                                if (!firstAudioSeen) {
+                                    firstAudioSeen = true;
+                                    [self fireHealth:@"playing" detail:@"first audio frame"];
                                 }
+                            } else {
+                                _audioUnderruns.fetch_add(1);
                             }
+                            CFRelease(sb);
                         } else if (trackNum == _videoTrackNum) {
-                            [_videoDecoder submitFrame:bytes.data() length:bytes.size()
-                                                  ptsUs:ptsUs isKey:block->IsKey() ? YES : NO];
-                            _videoPacketsDecoded.fetch_add(1);
+                            BOOL ok = [_videoDecoder submitFrame:bytes.data() length:bytes.size()
+                                                            ptsUs:ptsUs isKey:block->IsKey() ? YES : NO];
+                            if (ok) {
+                                _videoPacketsDecoded.fetch_add(1);
+                                if (!firstVideoSeen) {
+                                    firstVideoSeen = true;
+                                    [self fireHealth:@"playing" detail:@"first video frame"];
+                                }
+                            } else {
+                                _videoFramesDropped.fetch_add(1);
+                            }
                         }
                     }
                 }
@@ -550,7 +473,16 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
                 blockEntry = next;
             }
             blockEntry = nullptr;
-            cluster = segment->GetNext(cluster);
+
+            // After draining the entire cluster, advance and compact the byte window up to
+            // the next cluster's start. mkvparser only references already-read bytes for
+            // backwards seeks (cues) which this lib doesn't perform, so this is safe.
+            const mkvparser::Cluster* nextCluster = segment->GetNext(cluster);
+            if (nextCluster && !nextCluster->EOS()) {
+                long long compactTo = nextCluster->GetPosition();
+                if (compactTo > 0) reader.compactBefore(compactTo);
+            }
+            cluster = nextCluster;
         }
     }
 }

@@ -10,6 +10,7 @@ namespace mediamodule_v2 {
 // One engine per runtime. Most apps have a single RN runtime; map keeps it tidy.
 static std::unordered_map<uintptr_t, PlaybackEngineV2*> g_engines;
 static std::mutex g_enginesMutex;
+static PlaybackEngineV2* g_currentEngine = nil;  // Most recently installed; used by VideoViewV2.
 
 static PlaybackEngineV2* engineFor(jsi::Runtime& rt) {
     std::lock_guard<std::mutex> lock(g_enginesMutex);
@@ -145,8 +146,13 @@ bool installV2JSI(jsi::Runtime& rt,
     {
         std::lock_guard<std::mutex> lock(g_enginesMutex);
         uintptr_t rtId = reinterpret_cast<uintptr_t>(&rt);
-        if (g_engines.count(rtId)) return true;
-        g_engines[rtId] = [[PlaybackEngineV2 alloc] init];
+        if (g_engines.count(rtId)) {
+            g_currentEngine = g_engines[rtId];
+            return true;
+        }
+        PlaybackEngineV2* engine = [[PlaybackEngineV2 alloc] init];
+        g_engines[rtId] = engine;
+        g_currentEngine = engine;
     }
     rt.global().setProperty(rt, "__MediaPipelineV2", createApiObject(rt));
     return true;
@@ -158,17 +164,18 @@ void uninstallV2JSI(jsi::Runtime& rt) {
     uintptr_t rtId = reinterpret_cast<uintptr_t>(&rt);
     auto it = g_engines.find(rtId);
     if (it != g_engines.end()) {
+        if (g_currentEngine == it->second) g_currentEngine = nil;
         [it->second stop];
         g_engines.erase(it);
     }
+    if (!g_currentEngine && !g_engines.empty()) {
+        g_currentEngine = g_engines.begin()->second;
+    }
+}
+
+PlaybackEngineV2* currentEngine() {
+    std::lock_guard<std::mutex> lock(g_enginesMutex);
+    return g_currentEngine;
 }
 
 }  // namespace mediamodule_v2
-
-#pragma mark - Engine accessor for native code (e.g. VideoView)
-
-extern "C" PlaybackEngineV2* PlaybackEngineV2_currentEngineForRuntime(uintptr_t rtId) {
-    std::lock_guard<std::mutex> lock(mediamodule_v2::g_enginesMutex);
-    auto it = mediamodule_v2::g_engines.find(rtId);
-    return (it != mediamodule_v2::g_engines.end()) ? it->second : nil;
-}
