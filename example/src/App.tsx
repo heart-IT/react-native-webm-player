@@ -7,7 +7,9 @@ import {
   ScrollView,
   SafeAreaView,
   AppRegistry,
-  StatusBar
+  StatusBar,
+  NativeModules,
+  Platform
 } from 'react-native'
 import {
   MediaPipeline,
@@ -135,6 +137,24 @@ function App(): React.ReactElement {
   const [clipCapturing, setClipCapturing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const metricsTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const runV2Spike = useCallback(async () => {
+    if (Platform.OS !== 'ios') {
+      setError('V2 spike is iOS-only')
+      return
+    }
+    const bridge = (NativeModules as { V2SpikeBridge?: { runV2Spike: () => Promise<{ result: string; error?: string }> } }).V2SpikeBridge
+    if (!bridge?.runV2Spike) {
+      setError('V2SpikeBridge not available — rebuild iOS pods')
+      return
+    }
+    try {
+      const r = await bridge.runV2Spike()
+      setError(r.error ? `Spike ${r.result}: ${r.error}` : `Spike result: ${r.result}`)
+    } catch (e) {
+      setError(`Spike threw: ${String(e)}`)
+    }
+  }, [])
 
   const doInstall = useCallback(() => {
     try {
@@ -328,6 +348,20 @@ function App(): React.ReactElement {
             <Text style={styles.healthText}>
               {healthLabel(healthStatus)}
               {healthDetail ? ` — ${healthDetail}` : ''}
+            </Text>
+          </View>
+        )}
+
+        {/* V2 spike (iOS only — validates AVSampleBufferRenderSynchronizer architecture) */}
+        {Platform.OS === 'ios' && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>V2 Architecture Spike</Text>
+            <TouchableOpacity style={styles.button} onPress={runV2Spike}>
+              <Text style={styles.buttonText}>Run V2 Spike</Text>
+            </TouchableOpacity>
+            <Text style={styles.metricText}>
+              Plays bbb_480p_vp9_opus_1second.webm via libwebm + libopus + VTDecompression →
+              AVSampleBufferRenderSynchronizer. Independent of v1 pipeline.
             </Text>
           </View>
         )}

@@ -31,7 +31,7 @@ Pod::Spec.new do |s|
   # libwebm mkvparser sources vendored under cpp/third_party/libwebm/
   # SpeexDSP resampler sources vendored under cpp/third_party/speexdsp/
   s.source_files = [
-    "ios/**/*.{h,m,mm,cpp}",
+    "ios/**/*.{h,m,mm,cpp,inc}",
     "cpp/**/*.{h,hpp,cpp}",
     "cpp/third_party/libwebm/mkvparser/*.{cc,h}",
     "cpp/third_party/libwebm/common/*.h",
