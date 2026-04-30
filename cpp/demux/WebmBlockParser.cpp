@@ -18,6 +18,31 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         return;
     }
 
+    // Recover from the "first GetFirst() returned EOS sentinel" wedge: when
+    // parseTracks() succeeds on a feed that contained the header but no
+    // cluster bytes (e.g. a remuxer that flushes EBML+Segment+Tracks alone
+    // before any cluster), libwebm's m_clusterCount is 0 and
+    // Segment::GetFirst() returns &m_eos. From then on cluster_ stays the
+    // EOS sentinel — the main loop short-circuits, no packets are emitted,
+    // and the ingest ring grows without bound. Re-call Load()+GetFirst() so
+    // a now-available cluster gets picked up. Guarded on GetCount()==0 to
+    // not reset back to cluster #0 after a normal end-of-loaded-list EOS
+    // (GetNext() returns the EOS sentinel from inside the main loop too).
+    if (cluster_ && cluster_->EOS() && segment_->GetCount() == 0) {
+        segment_->Load();
+        cluster_ = segment_->GetFirst();
+        blockEntry_ = nullptr;
+        if (!cluster_ || cluster_->EOS()) {
+            return;  // Still no clusters loaded; retry on the next feedData().
+        }
+        // Mirror the ClipIndex side-effect parseTracks() would have produced
+        // if it had landed on a real cluster originally.
+        if (result.newClusterPositions.size() < kMaxClustersPerFeed) {
+            result.newClusterPositions.push_back(cluster_->GetPosition());
+        }
+        ++result.newClusterCount;
+    }
+
     long long latestConsumedPos = compactOffset_;
     int consecutiveBlockErrors = 0;
     scratchCursor_ = 0;
