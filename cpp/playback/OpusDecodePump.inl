@@ -86,13 +86,14 @@ inline bool AudioDecodeChannel::generatePLC() noexcept {
 
     // After kMaxConsecutivePLC frames, Opus PLC quality degrades badly.
     // Reset decoder and return false to let the mixer's CNG handle it.
-    // Bump decoderResets so triage sees this reset path; the counter is left
-    // non-zero so subsequent cycles keep returning false here — letting the
-    // audioRecv/audioOutput-delta watchdog surface the stuck state rather
-    // than hiding it behind continuously regenerated PLC frames.
+    // NOTE: this path is data-starvation, not a decoder fault — do NOT bump
+    // decoderResets, which the HealthWatchdog interprets as a fatal failure
+    // signal (kFailedResetThreshold=3 in 5s). Sparse upstream delivery would
+    // otherwise pin the decoder reset count to "failed" and force endless
+    // recoverStream loops. Real decode-error resets (decodeFrameWithToken
+    // path) still count toward the watchdog threshold.
     if (consecutivePLCFrames_ >= config::plc::kMaxConsecutivePLC) {
         decoder_->reset();
-        metrics_.decoderResets.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
