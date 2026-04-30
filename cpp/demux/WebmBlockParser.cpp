@@ -8,6 +8,7 @@
 #include "DemuxLimits.h"
 
 #include "common/MediaConfig.h"
+#include "common/MediaLog.h"
 
 #include "mkvparser/mkvparser.h"
 
@@ -18,11 +19,22 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         return;
     }
 
+    // DIAG: prove fix v3 is in the binary. Logs once per process at startup,
+    // then again the first 3 times each recovery branch fires.
+    {
+        static int initLog = 0;
+        if (++initLog == 1) {
+            MEDIA_LOG_W("parseBlocks fix v3 ACTIVE (initial+sequential wedge recovery)");
+        }
+    }
+
     // Initial wedge recovery — parseTracks() succeeded on a feed that had no
     // cluster bytes yet (e.g. a remuxer that flushes EBML+Segment+Tracks
     // alone), so libwebm's m_clusterCount==0 and Segment::GetFirst() returned
     // the EOS sentinel. Re-Load()+GetFirst() now that cluster bytes are in.
     if (cluster_ && cluster_->EOS() && segment_->GetCount() == 0) {
+        static int dbg = 0;
+        if (++dbg <= 3) MEDIA_LOG_W("parseBlocks: INITIAL wedge recovery fired (#%d)", dbg);
         segment_->Load();
         cluster_ = segment_->GetFirst();
         blockEntry_ = nullptr;
@@ -41,9 +53,17 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
     // by itself in Streaming state, so without this retry m_clusterCount
     // would stay frozen and every cluster after the first one would be lost.
     if (cluster_ && !cluster_->EOS() && clusterDrained_) {
+        static int dbg = 0;
+        long preCount = static_cast<long>(segment_->GetCount());
         segment_->Load();
+        long postCount = static_cast<long>(segment_->GetCount());
         const mkvparser::Cluster* nextCluster = segment_->GetNext(cluster_);
-        if (!nextCluster || nextCluster->EOS()) {
+        bool advanced = (nextCluster && !nextCluster->EOS());
+        if (++dbg <= 5) {
+            MEDIA_LOG_W("parseBlocks: SEQUENTIAL wedge recovery fired (#%d) preCount=%ld postCount=%ld advanced=%d",
+                        dbg, preCount, postCount, advanced ? 1 : 0);
+        }
+        if (!advanced) {
             return;  // Still no next cluster; retry on the next feedData().
         }
         cluster_ = nextCluster;
