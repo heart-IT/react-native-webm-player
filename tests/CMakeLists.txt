@@ -40,11 +40,36 @@ endif()
 include_directories(
     ${CPP_ROOT}
     ${CPP_ROOT}/common
+    ${CPP_ROOT}/demux
+    ${CPP_ROOT}/playback
+    ${CPP_ROOT}/video
+    ${CPP_ROOT}/third_party/libwebm
 )
 
+find_package(Threads REQUIRED)
+
+# ---- Shared byte ring ----
 add_executable(test_stream_buffer
     test_stream_buffer.cpp
     ${CPP_ROOT}/common/WebMStreamBuffer.cpp
 )
-find_package(Threads REQUIRED)
 target_link_libraries(test_stream_buffer PRIVATE Threads::Threads)
+
+# ---- WebM demuxer end-to-end (real VP9+Opus fixture) ----
+# Opus is only needed to prove the demuxed audio packets actually decode.
+find_path(OPUS_INCLUDE_DIR opus/opus.h HINTS /opt/homebrew/include /usr/local/include)
+find_library(OPUS_LIBRARY opus HINTS /opt/homebrew/lib /usr/local/lib)
+
+if(OPUS_INCLUDE_DIR AND OPUS_LIBRARY)
+    add_executable(test_e2e_demux
+        test_e2e_demux.cpp
+        ${CPP_ROOT}/demux/WebmDemuxer.cpp
+        ${CPP_ROOT}/demux/WebmTrackParser.cpp
+        ${CPP_ROOT}/demux/WebmBlockParser.cpp
+        ${CPP_ROOT}/third_party/libwebm/mkvparser/mkvparser.cc
+    )
+    target_include_directories(test_e2e_demux PRIVATE ${OPUS_INCLUDE_DIR}/opus)
+    target_link_libraries(test_e2e_demux PRIVATE ${OPUS_LIBRARY} Threads::Threads)
+else()
+    message(WARNING "Opus not found (brew install opus) — skipping test_e2e_demux")
+endif()

@@ -20,9 +20,19 @@ Pod::Spec.new do |s|
     "ios/**/*.{m,mm}",
     # Implementation (C++ objects). `.h` is included deliberately: the shared
     # C++ uses .h headers, and omitting them here keeps CocoaPods from exposing
-    # them to the compiler.
-    "cpp/**/*.{h,hpp,cpp}",
+    # them to the compiler. `.cc` is required for vendored libwebm mkvparser,
+    # which would otherwise be silently skipped and fail at link time.
+    "cpp/**/*.{h,hpp,cpp,cc}",
   ]
+
+  # The shared C++ includes are rooted at cpp/ ("common/MediaLog.h",
+  # "demux/WebmDemuxer.h") and at the libwebm root ("mkvparser/mkvparser.h").
+  s.pod_target_xcconfig = {
+    'HEADER_SEARCH_PATHS' => [
+      '"$(PODS_TARGET_SRCROOT)/cpp"',
+      '"$(PODS_TARGET_SRCROOT)/cpp/third_party/libwebm"',
+    ].join(' '),
+  }
 
   load 'nitrogen/generated/ios/WebmPlayer+autolinking.rb'
   add_nitrogen_files(s)

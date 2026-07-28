@@ -31,6 +31,7 @@ const NATIVE_EXTS = new Set(['.h', '.hpp', '.cpp', '.cc', '.mm', '.m', '.inc'])
 const INCLUDE_ROOTS = [
   '',
   'cpp',
+  'cpp/third_party/libwebm',
   'ios',
   'nitrogen/generated/shared/c++',
   'nitrogen/generated/ios',

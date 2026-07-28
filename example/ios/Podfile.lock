@@ -2258,7 +2258,7 @@ SPEC CHECKSUMS:
   ReactCodegen: 1973e629fe2614a7b2cf72919cb9935b6c34675f
   ReactCommon: d5c1bb4427bf51c443de5926aac332c89ddd9363
   ReactNativeDependencies: fa0a54b3f5319ae0e3b9aff32bfee7a424b88e66
-  WebmPlayer: e959fa34a1275a1fc67bbf5743b1cb3fbb165bf6
+  WebmPlayer: c59714ec7d4ec38933e0bc2af0350c191d683b7f
   Yoga: fe50ab299e578f397fef753cf309c6703a4db29b
 
 PODFILE CHECKSUM: 87165524078e21ebf88fe18c9b80d8c9a93e417b

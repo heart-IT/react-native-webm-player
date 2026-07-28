@@ -65,11 +65,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only needed to prove demuxed audio packets actually decode.
+      - name: Install Opus
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev
+
       - name: Configure
         run: cmake -B tests/build -S tests -DSANITIZER=${{ matrix.sanitizer }}
 
       - name: Build
         run: cmake --build tests/build
 
-      - name: Run
+      - name: Shared byte ring
         run: ./tests/build/test_stream_buffer
+
+      - name: WebM demuxer end-to-end
+        run: ./tests/build/test_e2e_demux
