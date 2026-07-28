@@ -20,8 +20,7 @@ def isNewArchitectureEnabled() {
 
 apply plugin: "com.android.library"
 apply plugin: 'org.jetbrains.kotlin.android'
-// Restored when the WebmPlayer HybridObject gains an Android implementation.
-// apply from: '../nitrogen/generated/android/WebmPlayer+autolinking.gradle'
+apply from: '../nitrogen/generated/android/WebmPlayer+autolinking.gradle'
 apply from: "./fix-prefab.gradle"
 
 if (isNewArchitectureEnabled()) {
@@ -138,6 +137,14 @@ dependencies {
 
   // Add a dependency on NitroModules
   implementation project(":react-native-nitro-modules")
+
+  // ExoPlayer owns demux, decode and A/V sync on Android. media3-extractor
+  // supplies MatroskaExtractor, which reads the same muxed WebM bytes that
+  // libwebm parses on iOS. media3-ui provides PlayerView for the video surface.
+  def media3Version = "1.8.0"
+  implementation "androidx.media3:media3-exoplayer:${media3Version}"
+  implementation "androidx.media3:media3-extractor:${media3Version}"
+  implementation "androidx.media3:media3-ui:${media3Version}"
 }
 
 if (isNewArchitectureEnabled()) {

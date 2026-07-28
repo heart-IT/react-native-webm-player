@@ -28,10 +28,14 @@ export interface WebmPlayerMetrics {
  * JS forwards muxed WebM bytes; native demuxes, decodes and presents. Platform
  * frameworks own A/V sync — there is no timing authority on the JS side.
  *
- * Android (`android: 'kotlin'`) arrives with its ExoPlayer implementation. The
- * spec stays iOS-only until then so codegen never demands a stub to satisfy it.
+ * iOS demuxes with libwebm and presents through AVSampleBufferRenderSynchronizer;
+ * Android hands the same bytes to ExoPlayer. Declaring both platforms here makes
+ * nitrogen enforce that neither side silently drops a member.
  */
-export interface WebmPlayer extends HybridObject<{ ios: 'swift' }> {
+export interface WebmPlayer extends HybridObject<{
+  ios: 'swift'
+  android: 'kotlin'
+}> {
   start(): boolean
   stop(): boolean
   pause(): boolean

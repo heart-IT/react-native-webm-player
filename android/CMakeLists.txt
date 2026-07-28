@@ -8,18 +8,15 @@ set (CMAKE_CXX_STANDARD 20)
 # Enable Raw Props parsing in react-native (for Nitro Views)
 add_compile_options(-DRN_SERIALIZABLE_STATE=1)
 
-# Define C++ library and add all sources.
-# src/main/cpp/cpp-adapter.cpp is the fbjni entry point for the Android
-# HybridObject; it is compiled back in alongside the ExoPlayer implementation.
-# Until then this library exists to build the shared C++ for every Android ABI.
+# Define C++ library and add all sources
 add_library(${PACKAGE_NAME} SHARED
+        src/main/cpp/cpp-adapter.cpp
+        src/main/cpp/webmstream_jni.cpp
         ../cpp/common/WebMStreamBuffer.cpp
 )
 
-# Nitrogen's Android autolinking is generated only when the spec declares
-# `android: 'kotlin'`. The WebmPlayer HybridObject is iOS-only until the
-# ExoPlayer implementation lands; restore this include with it.
-# include(${CMAKE_SOURCE_DIR}/../nitrogen/generated/android/WebmPlayer+autolinking.cmake)
+# Add Nitrogen specs :)
+include(${CMAKE_SOURCE_DIR}/../nitrogen/generated/android/WebmPlayer+autolinking.cmake)
 
 # Set up local includes
 include_directories(

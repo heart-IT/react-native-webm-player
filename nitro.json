@@ -13,6 +13,10 @@
       "ios": {
         "language": "swift",
         "implementationClassName": "HybridWebmPlayer"
+      },
+      "android": {
+        "language": "kotlin",
+        "implementationClassName": "HybridWebmPlayer"
       }
     }
   },
