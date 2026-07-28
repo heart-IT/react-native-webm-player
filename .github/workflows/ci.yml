@@ -80,3 +80,11 @@ jobs:
 
       - name: WebM demuxer end-to-end
         run: ./tests/build/test_e2e_demux
+
+      # Regression tests for confirmed P0s: the ring's all-or-nothing write
+      # contract, and destroying the ring under an in-flight consumer.
+      - name: Audit regressions
+        run: ./tests/build/test_audit_proof
+
+      - name: Ring lifetime under concurrent destroy
+        run: ./tests/build/test_ring_lifetime

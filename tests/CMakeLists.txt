@@ -55,6 +55,22 @@ add_executable(test_stream_buffer
 )
 target_link_libraries(test_stream_buffer PRIVATE Threads::Threads)
 
+# ---- Audit proof tests ----
+# These assert the behaviour the system is supposed to have, so they fail
+# against unfixed code. Verdicts recorded in docs/AUDIT.md.
+add_executable(test_audit_proof
+    test_audit_proof.cpp
+    ${CPP_ROOT}/common/WebMStreamBuffer.cpp
+)
+target_link_libraries(test_audit_proof PRIVATE Threads::Threads)
+
+# Separate binary: ASan aborts on first error, which would mask later tests.
+add_executable(test_ring_lifetime
+    test_ring_lifetime.cpp
+    ${CPP_ROOT}/common/WebMStreamBuffer.cpp
+)
+target_link_libraries(test_ring_lifetime PRIVATE Threads::Threads)
+
 # ---- WebM demuxer end-to-end (real VP9+Opus fixture) ----
 # Opus is only needed to prove the demuxed audio packets actually decode.
 find_path(OPUS_INCLUDE_DIR opus/opus.h HINTS /opt/homebrew/include /usr/local/include)

@@ -93,11 +93,15 @@ void WebMStreamBuffer::updateBitrate(size_t bytes) {
 }
 
 WebMStreamBuffer::ConsumerActiveGuard::ConsumerActiveGuard(WebMStreamBuffer& owner) : owner_(owner) {
-    owner_.consumerActiveCount_.fetch_add(1, std::memory_order_relaxed);
+    owner_.consumerActiveCount_.fetch_add(1, std::memory_order_acquire);
 }
 
 WebMStreamBuffer::ConsumerActiveGuard::~ConsumerActiveGuard() {
-    owner_.consumerActiveCount_.fetch_sub(1, std::memory_order_relaxed);
+    // Release, paired with the destructor's acquire load. Counting alone is not
+    // enough: without this edge the consumer's reads of buffer_ are not ordered
+    // before the destructor observes zero and frees it, so the wait would still
+    // be a data race even though it waits correctly.
+    owner_.consumerActiveCount_.fetch_sub(1, std::memory_order_release);
 }
 
 WebMStreamBuffer::WebMStreamBuffer(size_t capacityBytes, const Config& cfg)
@@ -126,11 +130,29 @@ WebMStreamBuffer::~WebMStreamBuffer() {
         std::lock_guard<std::mutex> lock(cvMutex_);
         cv_.notify_all();
     }
-    uint64_t grace = cfg_.shutdownGraceMs;
-    if (grace > 0) {
+    // Wait out any consumer currently inside read(). shutdown_ is already set
+    // above, so a blocked reader wakes immediately and one in the copy path is
+    // bounded by a single memcpy — this drains in bounded time.
+    //
+    // It does NOT time out. Giving up here means freeing the object while a
+    // consumer is executing inside it, which is silent memory corruption;
+    // shutdownGraceMs is the threshold past which we say so, not a deadline
+    // after which we proceed anyway. A destructor that blocks is a visible bug;
+    // one that frees under a live reader is not.
+    {
         uint64_t start = nowMs();
         uint64_t waitTime = 1;
-        while (consumerActiveCount_.load(std::memory_order_relaxed) > 0 && (nowMs() - start) < grace) {
+        bool warned = false;
+        while (consumerActiveCount_.load(std::memory_order_acquire) > 0) {
+            if (!warned && cfg_.shutdownGraceMs > 0 &&
+                (nowMs() - start) >= cfg_.shutdownGraceMs) {
+                warned = true;
+                MEDIA_LOG_E("WebMStreamBuffer destroyed with %u consumer(s) still "
+                            "active after %llums — the owner must join consumers "
+                            "before destroying the ring",
+                            consumerActiveCount_.load(std::memory_order_relaxed),
+                            static_cast<unsigned long long>(cfg_.shutdownGraceMs));
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(waitTime));
             if (waitTime < 16) waitTime *= 2;
         }
@@ -159,40 +181,31 @@ size_t WebMStreamBuffer::write(const uint8_t* data, size_t length, bool isCluste
     uint64_t tail = tailBytes_.load(std::memory_order_acquire);
     uint64_t used = (head >= tail) ? (head - tail) : 0;
 
-    if (used >= capacityBytes_) {
+    // All-or-nothing. These bytes feed a container parser, so accepting only
+    // part of a chunk leaves a truncated element in the stream: the next write
+    // concatenates straight onto the fragment and the demuxer misparses from
+    // there. Rejecting the chunk keeps the stream on a boundary the parser can
+    // still make sense of, at the cost of a clean, counted gap.
+    uint64_t freeSpace = (used >= capacityBytes_) ? 0 : (capacityBytes_ - used);
+    if (freeSpace < static_cast<uint64_t>(length)) {
         bufferOverflows_.fetch_add(1, std::memory_order_relaxed);
         droppedBytes_.fetch_add(length, std::memory_order_relaxed);
         producerLocalDroppedBytes_.fetch_add(length, std::memory_order_relaxed);
         producerLocalBufferOverflows_.fetch_add(1, std::memory_order_relaxed);
-        uint64_t now = nowMs();
-        if (producerLocalDroppedBytes_ >= cfg_.statsFlushMinBytes || producerLocalBufferOverflows_ > 10) {
-            flushProducerStatsIfNeeded(now);
-        }
         consumerLagEvents_.fetch_add(1, std::memory_order_relaxed);
+        if (producerLocalDroppedBytes_ >= cfg_.statsFlushMinBytes ||
+            producerLocalBufferOverflows_ > 10) {
+            flushProducerStatsIfNeeded(nowMs());
+        }
         if (shouldLog(cfg_.logMinIntervalMs)) {
-            MEDIA_LOG_W("WebMStreamBuffer overflow: dropped %zub used=%llu/%zu",
+            MEDIA_LOG_W("WebMStreamBuffer overflow: rejected %zub used=%llu/%zu",
                         length, static_cast<unsigned long long>(used), capacityBytes_);
         }
         return 0;
     }
 
-    uint64_t freeSpace = (used >= capacityBytes_) ? 0 : (capacityBytes_ - used);
-    size_t toWrite = static_cast<size_t>(std::min<uint64_t>(freeSpace, static_cast<uint64_t>(length)));
-    if (toWrite == 0) {
-        consumerLagEvents_.fetch_add(1, std::memory_order_relaxed);
-        return 0;
-    }
-
+    const size_t toWrite = length;
     bool wasEmpty = (used == 0);
-
-    if (toWrite < length) {
-        size_t dropped = length - toWrite;
-        droppedBytes_.fetch_add(dropped, std::memory_order_relaxed);
-        bufferOverflows_.fetch_add(1, std::memory_order_relaxed);
-        producerLocalDroppedBytes_.fetch_add(dropped, std::memory_order_relaxed);
-        producerLocalBufferOverflows_.fetch_add(1, std::memory_order_relaxed);
-        consumerLagEvents_.fetch_add(1, std::memory_order_relaxed);
-    }
 
     size_t writePos = indexFor(head);
     size_t first = std::min(toWrite, capacityBytes_ - writePos);
@@ -306,6 +319,12 @@ void WebMStreamBuffer::flushConsumerStatsIfNeeded(uint64_t now) const {
 int WebMStreamBuffer::read(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
     (void)validateThread("read");
     if (!dst || maxLen == 0) return 0;
+
+    // Taken before any buffer access, and held for the whole call. The fast path
+    // below copies straight out of buffer_, so leaving it unguarded made an
+    // in-flight reader invisible to the destructor's drain loop.
+    ConsumerActiveGuard guard(*this);
+
     if (destroyed_.load(std::memory_order_acquire)) return -1;
     if (shutdown_.load(std::memory_order_acquire)) {
         uint64_t head = headBytes_.load(std::memory_order_acquire);
@@ -345,10 +364,10 @@ int WebMStreamBuffer::read(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
     return readSlow(dst, maxLen, timeoutMs);
 }
 
+// Callers must hold a ConsumerActiveGuard; read() and readBatch() both do.
 int WebMStreamBuffer::readSlow(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
     if (!dst || maxLen == 0) return 0;
 
-    ConsumerActiveGuard guard(*this);
     if (destroyed_.load(std::memory_order_acquire)) return -1;
     if (shutdown_.load(std::memory_order_acquire)) {
         uint64_t head = headBytes_.load(std::memory_order_acquire);
@@ -411,6 +430,9 @@ int WebMStreamBuffer::readSlow(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) 
 }
 
 int WebMStreamBuffer::readBatch(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
+    (void)validateThread("readBatch");
+    if (!dst || maxLen == 0) return 0;
+    ConsumerActiveGuard guard(*this);
     return readSlow(dst, maxLen, timeoutMs);
 }
 

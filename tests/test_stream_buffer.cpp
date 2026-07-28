@@ -198,16 +198,21 @@ TEST(write_at_capacity_drops_the_whole_chunk_and_counts_it) {
   ASSERT_GT(stats.consumerLagEvents, uint64_t(0));
 }
 
-TEST(write_with_partial_space_writes_what_fits_and_drops_the_rest) {
+// Writes are all-or-nothing. An earlier version of this test asserted the
+// opposite — that a short write truncates the caller's chunk — which encoded a
+// defect as a contract: the fragment left a truncated element in the byte stream
+// for the demuxer to misparse. See tests/test_audit_proof.cpp.
+TEST(write_with_partial_space_rejects_the_chunk_whole) {
   auto buf = makeBuffer();
   ASSERT_EQ(fill(buf, kCapacity - 10), kCapacity - 10);
 
   auto src = pattern(100);
-  ASSERT_EQ(put(buf, src), size_t(10));  // only 10 bytes of room left
-  ASSERT_EQ(buf.sizeBytes(), uint64_t(kCapacity));
+  ASSERT_EQ(put(buf, src), size_t(0));  // 10 bytes free, 100 requested
+  ASSERT_EQ(buf.sizeBytes(), uint64_t(kCapacity - 10));  // nothing accepted
 
   auto stats = buf.getStats();
-  ASSERT_GE(stats.droppedBytes, uint64_t(90));
+  ASSERT_GE(stats.droppedBytes, uint64_t(100));  // the whole chunk is counted
+  ASSERT_GT(stats.bufferOverflows, uint64_t(0));
 }
 
 TEST(is_consumer_lagging_trips_above_eighty_percent) {

@@ -83,3 +83,7 @@ tests/build-*/
 # Vendored Opus build tree (XCFramework is rebuilt by pod install)
 ios/opus/build/
 ios/opus/lib/
+
+# Local agent guidance — never committed (see CLAUDE.md TL;DR)
+CLAUDE.md
+.claude/
