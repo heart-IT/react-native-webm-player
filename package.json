@@ -1,7 +1,7 @@
 {
-  "name": "react-native-webm-player",
-  "version": "0.1.0",
-  "description": "react-native-webm-player is a react native package built with Nitro",
+  "name": "@heartit/webm-player",
+  "version": "2.0.0",
+  "description": "Native WebM broadcast player for React Native — VP9 video + Opus audio with platform-owned A/V sync",
   "main": "./lib/commonjs/index.js",
   "module": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
@@ -9,6 +9,11 @@
   "source": "src/index",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "format": "prettier . --write",
+    "test": "prettier . --check && npm run lint",
+    "lint:size": "node scripts/lint-size.js",
+    "lint:pack": "node scripts/lint-pack.js",
     "clean": "git clean -dfX",
     "release": "semantic-release",
     "build": "npm run typecheck && bob build",
@@ -16,7 +21,12 @@
   },
   "keywords": [
     "react-native",
-    "react-native-webm-player"
+    "webm",
+    "vp9",
+    "opus",
+    "nitro",
+    "broadcast",
+    "streaming"
   ],
   "files": [
     "src",
@@ -42,11 +52,14 @@
   "workspaces": [
     "example"
   ],
-  "repository": "https://github.com/rahulgarg/react-native-webm-player.git",
-  "author": "Rahul Garg",
-  "license": "MIT",
-  "bugs": "https://github.com/rahulgarg/react-native-webm-player/issues",
-  "homepage": "https://github.com/rahulgarg/react-native-webm-player#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heart-IT/react-native-webm-player.git"
+  },
+  "author": "Heartit Inc",
+  "license": "Apache-2.0",
+  "bugs": "https://github.com/heart-IT/react-native-webm-player/issues",
+  "homepage": "https://github.com/heart-IT/react-native-webm-player#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -64,39 +77,17 @@
     "react-native-nitro-modules": "^0.36.1",
     "conventional-changelog-conventionalcommits": "^10.2.1",
     "semantic-release": "^25.0.7",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "typescript-eslint": "^8.0.0",
+    "prettier": "^3.0.0"
   },
   "peerDependencies": {
     "react": "*",
     "react-native": "*",
     "react-native-nitro-modules": "*"
   },
-  "eslintConfig": {
-    "root": true,
-    "extends": [
-      "@react-native",
-      "prettier"
-    ],
-    "plugins": [
-      "prettier"
-    ],
-    "rules": {
-      "prettier/prettier": [
-        "warn",
-        {
-          "quoteProps": "consistent",
-          "singleQuote": true,
-          "tabWidth": 2,
-          "trailingComma": "es5",
-          "useTabs": false
-        }
-      ]
-    }
-  },
-  "eslintIgnore": [
-    "node_modules/",
-    "lib/"
-  ],
   "prettier": {
     "quoteProps": "consistent",
     "singleQuote": true,

@@ -1,0 +1,13 @@
+lib/
+nitrogen/
+node_modules/
+example/ios/Pods/
+example/android/build/
+example/android/app/build/
+android/build/
+cpp/third_party/
+tests/fixtures/
+*.webm
+
+# Xcode regenerates these; formatting them creates churn on every pod install.
+*.xcassets/

@@ -1,0 +1,56 @@
+name: CI
+
+permissions:
+  contents: read
+
+# Runs on every branch, not just main. The predecessor of this package gated CI
+# on `branches: [main]`, so a 23-commit rewrite branch accumulated with zero
+# signal and landed with a broken package and failing format check.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, typecheck, package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format check
+        run: npx prettier . --check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: File size discipline
+        run: npm run lint:size
+
+      # Regenerating must be a no-op. Catches a spec edited without re-running
+      # nitrogen, which would otherwise fail natively on a contributor's machine.
+      - name: Codegen is committed and current
+        run: |
+          npx nitrogen
+          git diff --exit-code -- nitrogen/ \
+            || { echo "::error::nitrogen output is stale — run 'npm run codegen' and commit."; exit 1; }
+
+      # Every quoted #include in a packaged source must also ship. This is the
+      # check that would have caught the predecessor's release blocker.
+      - name: Published package is self-contained
+        run: npm run lint:pack
