@@ -29,18 +29,13 @@
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeCreateRing(
-    JNIEnv*, jobject, jlong capacityBytes) {
-  media::WebMStreamBuffer::Config cfg;
-  cfg.minCapacityBytes = 4 * 1024 * 1024;
-  cfg.producerStallMs = 2000;
-  cfg.consumerStallMs = 2000;
-  cfg.severeBackpressureRatio = 0.7;
-  cfg.batchReadThreshold = 1024;
-  cfg.shutdownGraceMs = 100;
-  cfg.logMinIntervalMs = 30000;
+Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeCreateRing(JNIEnv*,
+                                                                    jobject) {
+  // Capacity and tuning both come from the shared config so the two platforms
+  // cannot drift apart.
   return static_cast<jlong>(media::RingRegistry::instance().create(
-      static_cast<size_t>(capacityBytes), cfg));
+      media::WebMStreamBuffer::broadcastCapacityBytes(),
+      media::WebMStreamBuffer::broadcastConfig()));
 }
 
 JNIEXPORT void JNICALL

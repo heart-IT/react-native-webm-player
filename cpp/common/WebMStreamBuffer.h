@@ -68,6 +68,32 @@ public:
 
     static size_t getDefaultCapacity();
 
+    /// Capacity and tuning for broadcast playback, shared by both platforms.
+    ///
+    /// These were previously set only on Android, with iOS silently taking the
+    /// generic defaults — so the same stream buffered to a different depth and
+    /// reported backpressure at a different threshold depending on the platform.
+    /// Both now call this.
+    static size_t broadcastCapacityBytes() { return 16u * 1024 * 1024; }
+
+    static Config broadcastConfig() {
+        Config cfg;
+        cfg.minCapacityBytes = 4 * 1024 * 1024;
+        // A live feed that goes quiet for 2s is already a visible stall; the
+        // generic 10s is far too slow to be useful as a health signal here.
+        cfg.producerStallMs = 2000;
+        cfg.consumerStallMs = 2000;
+        // Report backpressure with headroom left to recover, rather than at 95%
+        // where the next chunk is already being rejected.
+        cfg.severeBackpressureRatio = 0.7;
+        cfg.batchReadThreshold = 1024;
+        // Only a warning threshold: the destructor waits for consumers to drain
+        // regardless of this value.
+        cfg.shutdownGraceMs = 500;
+        cfg.logMinIntervalMs = 30000;
+        return cfg;
+    }
+
     explicit WebMStreamBuffer(size_t capacityBytes, const Config& cfg = Config());
     ~WebMStreamBuffer();
 

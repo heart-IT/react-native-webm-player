@@ -79,6 +79,25 @@ add_executable(test_ring_registry
 )
 target_link_libraries(test_ring_registry PRIVATE Threads::Threads)
 
+# ---- Demuxer fuzzing (the untrusted-input boundary) ----
+# WebM bytes arrive from remote peers, so cpp/demux/ is the primary attack
+# surface. -DFUZZ=ON builds under libFuzzer; the default is a standalone
+# corpus-replay + mutation harness that runs unattended in CI.
+option(FUZZ "Build with libFuzzer instrumentation (requires clang)" OFF)
+
+add_executable(fuzz_demuxer
+    fuzz_demuxer.cpp
+    ${CPP_ROOT}/demux/WebmDemuxer.cpp
+    ${CPP_ROOT}/demux/WebmTrackParser.cpp
+    ${CPP_ROOT}/demux/WebmBlockParser.cpp
+    ${CPP_ROOT}/third_party/libwebm/mkvparser/mkvparser.cc
+)
+if(FUZZ)
+    target_compile_options(fuzz_demuxer PRIVATE -fsanitize=fuzzer)
+    target_link_options(fuzz_demuxer PRIVATE -fsanitize=fuzzer)
+    target_compile_definitions(fuzz_demuxer PRIVATE FUZZING_BUILD_MODE_INSTRUMENTATION)
+endif()
+
 # ---- WebM demuxer end-to-end (real VP9+Opus fixture) ----
 # Opus is only needed to prove the demuxed audio packets actually decode.
 find_path(OPUS_INCLUDE_DIR opus/opus.h HINTS /opt/homebrew/include /usr/local/include)

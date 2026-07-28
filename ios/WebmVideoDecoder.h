@@ -18,6 +18,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// previous layer until the VT callback drains; new frames target the new one.
 - (void)setOutputLayer:(nullable AVSampleBufferDisplayLayer*)layer;
 
+/// Frame size as declared by the WebM container. Used when a keyframe's VP9
+/// uncompressed header cannot be parsed — without it a single unparseable
+/// keyframe means the session is never created and no video ever plays.
+- (void)setContainerWidth:(int)width height:(int)height;
+
 /// Submit a VP9 packet. Returns NO if the session can't be created or if the
 /// frame is rejected (no keyframe seen yet, dimensions unparseable, etc.).
 /// Decode is asynchronous; output is enqueued onto the layer in the VT callback.

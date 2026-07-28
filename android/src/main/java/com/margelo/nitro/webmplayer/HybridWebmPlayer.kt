@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicLong
 @UnstableApi
 class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
-  private external fun nativeCreateRing(capacityBytes: Long): Long
+  private external fun nativeCreateRing(): Long
   private external fun nativeDestroyRing(handle: Long)
   private external fun nativeWrite(
     handle: Long,
@@ -95,7 +95,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   override fun start(): Boolean {
     if (running.get()) return true
     // Created synchronously so feedData() can buffer while ExoPlayer spins up.
-    ringHandle = nativeCreateRing(RING_CAPACITY_BYTES)
+    ringHandle = nativeCreateRing()
     if (ringHandle == 0L) return false
     running.set(true)
     paused.set(false)
@@ -363,7 +363,6 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     private const val TAG = "WebmPlayer"
     private const val STATS_INTERVAL_MS = 750L
     private const val READ_TIMEOUT_MS = 50
-    private const val RING_CAPACITY_BYTES = 16L * 1024 * 1024
     private const val DUCK_VOLUME = 0.2f
   }
 }

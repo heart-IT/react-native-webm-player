@@ -91,3 +91,8 @@ jobs:
 
       - name: Ring lifetime under concurrent destroy
         run: ./tests/build/test_ring_lifetime
+
+      # The demuxer is the untrusted-input boundary: these bytes come from
+      # remote peers.
+      - name: Demuxer fuzzing
+        run: ./tests/build/fuzz_demuxer

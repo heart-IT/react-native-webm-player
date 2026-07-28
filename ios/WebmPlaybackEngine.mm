@@ -1,4 +1,5 @@
 #import "WebmPlaybackEngine.h"
+#import "WebmAudioDecoder.h"
 #import "WebmVideoDecoder.h"
 
 #import <AudioToolbox/AudioToolbox.h>
@@ -7,64 +8,14 @@
 #include <thread>
 #include <vector>
 
-#include <opus.h>
-
 #include "common/MediaLog.h"
 #include "common/WebMStreamBuffer.h"
 #include "demux/WebmDemuxer.h"
 
 namespace {
 
-// Opus tops out at 120ms per packet: 5760 frames at 48 kHz.
-constexpr int kMaxOpusFrames = 5760;
-
 // Bytes pulled from the ring per demux pass.
 constexpr size_t kPumpChunkBytes = 64 * 1024;
-
-CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
-                                        int sampleRate, int channels,
-                                        int64_t ptsUs) {
-  AudioStreamBasicDescription asbd = {0};
-  asbd.mSampleRate = sampleRate;
-  asbd.mFormatID = kAudioFormatLinearPCM;
-  asbd.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-  asbd.mBytesPerPacket = static_cast<UInt32>(sizeof(float) * channels);
-  asbd.mFramesPerPacket = 1;
-  asbd.mBytesPerFrame = static_cast<UInt32>(sizeof(float) * channels);
-  asbd.mChannelsPerFrame = static_cast<UInt32>(channels);
-  asbd.mBitsPerChannel = 32;
-
-  CMAudioFormatDescriptionRef fmt = nullptr;
-  if (CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd, 0, nullptr, 0,
-                                     nullptr, nullptr, &fmt) != noErr) {
-    return nullptr;
-  }
-
-  size_t dataSize =
-      sizeof(float) * static_cast<size_t>(frameCount) * static_cast<size_t>(channels);
-  CMBlockBufferRef block = nullptr;
-  if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, nullptr, dataSize,
-                                         kCFAllocatorDefault, nullptr, 0, dataSize,
-                                         kCMBlockBufferAssureMemoryNowFlag,
-                                         &block) != noErr) {
-    CFRelease(fmt);
-    return nullptr;
-  }
-  CMBlockBufferReplaceDataBytes(pcm, block, 0, dataSize);
-
-  CMSampleTimingInfo timing;
-  timing.duration = CMTimeMake(frameCount, sampleRate);
-  timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
-  timing.decodeTimeStamp = kCMTimeInvalid;
-
-  CMSampleBufferRef sb = nullptr;
-  OSStatus s = CMSampleBufferCreate(kCFAllocatorDefault, block, true, nullptr,
-                                    nullptr, fmt, frameCount, 1, &timing, 0,
-                                    nullptr, &sb);
-  CFRelease(block);
-  CFRelease(fmt);
-  return s == noErr ? sb : nullptr;
-}
 
 }  // namespace
 
@@ -74,15 +25,16 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   AVSampleBufferAudioRenderer* _audioRenderer;
   AVSampleBufferRenderSynchronizer* _synchronizer;
   WebmVideoDecoder* _videoDecoder;
-
-  OpusDecoder* _opusDecoder;
-  int _opusSampleRate;
-  int _opusChannels;
+  WebmAudioDecoder* _audioDecoder;
 
   std::thread _demuxThread;
   std::atomic<bool> _running;
   std::atomic<bool> _paused;
   std::atomic<bool> _stop;
+  // Set by resetStream() on the JS thread, consumed by the demux thread. The
+  // demuxer is owned by that thread, so it cannot be reset from here directly.
+  std::atomic<bool> _resetRequested;
+  std::atomic<bool> _failed;
 
   std::atomic<uint64_t> _bytesFed;
   std::atomic<uint64_t> _audioPacketsDecoded;
@@ -105,6 +57,8 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   _running = false;
   _paused = false;
   _stop = false;
+  _resetRequested = false;
+  _failed = false;
   _bytesFed = 0;
   _audioPacketsDecoded = 0;
   _videoPacketsDecoded = 0;
@@ -151,7 +105,8 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 - (BOOL)start {
   if (_running) return YES;
   _ring = std::make_unique<media::WebMStreamBuffer>(
-      media::WebMStreamBuffer::getDefaultCapacity());
+      media::WebMStreamBuffer::broadcastCapacityBytes(),
+      media::WebMStreamBuffer::broadcastConfig());
 
   _audioRenderer = [[AVSampleBufferAudioRenderer alloc] init];
   _audioRenderer.muted = _muted.load();
@@ -162,11 +117,14 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
   _videoDecoder = [[WebmVideoDecoder alloc] init];
   [_videoDecoder setOutputLayer:_displayLayer];
+  _audioDecoder = [[WebmAudioDecoder alloc] init];
+  [_audioDecoder setRenderer:_audioRenderer];
 
   [self setupAudioSession];
 
   _stop = false;
   _paused = false;
+  _failed = false;
   _running = true;
   _demuxThread = std::thread([self] { [self demuxLoop]; });
 
@@ -196,10 +154,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   }
   [_videoDecoder shutdown];
   _videoDecoder = nil;
-  if (_opusDecoder) {
-    opus_decoder_destroy(_opusDecoder);
-    _opusDecoder = nullptr;
-  }
+  _audioDecoder = nil;
   _audioRenderer = nil;
   _synchronizer = nil;
   _ring.reset();
@@ -240,7 +195,12 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 }
 
 - (BOOL)resetStream {
+  // Ring first, so anything the demux thread reads after it observes the flag is
+  // already post-clear. The demuxer itself lives on that thread and keeps parse
+  // state across feeds; without resetting it, the next stream's EBML header is
+  // appended to a demuxer still mid-cluster and every subsequent parse fails.
   if (_ring) _ring->clear();
+  _resetRequested.store(true, std::memory_order_release);
   return YES;
 }
 
@@ -263,6 +223,9 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 }
 
 - (WebmPlaybackState)playbackState {
+  // Checked before _running so a failure survives stop(), as it does on Android.
+  // start() clears it.
+  if (_failed.load()) return WebmPlaybackStateFailed;
   if (!_running) return WebmPlaybackStateIdle;
   if (_paused) return WebmPlaybackStatePaused;
   if (_videoPacketsDecoded.load() == 0 && _audioPacketsDecoded.load() == 0) {
@@ -327,33 +290,6 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   }
 }
 
-#pragma mark - Opus
-
-// Creates or recreates the Opus decoder for the container's track parameters.
-// Guarded against re-entry so a track re-parse cannot leak the previous decoder.
-- (BOOL)ensureOpusDecoder:(int)sampleRate channels:(int)channels {
-  if (_opusDecoder && sampleRate == _opusSampleRate &&
-      channels == _opusChannels) {
-    return YES;
-  }
-  if (_opusDecoder) {
-    opus_decoder_destroy(_opusDecoder);
-    _opusDecoder = nullptr;
-  }
-  if (sampleRate <= 0 || channels <= 0) return NO;
-
-  int err = OPUS_OK;
-  _opusDecoder = opus_decoder_create(sampleRate, channels, &err);
-  if (err != OPUS_OK || !_opusDecoder) {
-    _opusDecoder = nullptr;
-    MEDIA_LOG_E("WebmPlaybackEngine: opus_decoder_create failed: %d", err);
-    return NO;
-  }
-  _opusSampleRate = sampleRate;
-  _opusChannels = channels;
-  return YES;
-}
-
 #pragma mark - Demux loop
 
 - (void)demuxLoop {
@@ -362,13 +298,23 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
   media::demux::WebmDemuxer demuxer;
   std::vector<uint8_t> chunk(kPumpChunkBytes);
-  std::vector<float> pcm(static_cast<size_t>(kMaxOpusFrames) * 2);
   bool firstAudioSeen = false;
   bool firstVideoSeen = false;
 
   [self fireHealth:@"buffering" detail:@"waiting for stream data"];
 
   while (!_stop.load()) {
+    // Observed before reading, so every byte taken afterwards belongs to the new
+    // stream. resetStream() clears the ring before raising this.
+    if (_resetRequested.exchange(false, std::memory_order_acquire)) {
+      demuxer.reset();
+      [_audioDecoder reset];
+      firstAudioSeen = false;
+      firstVideoSeen = false;
+      _failed.store(false);
+      [self fireHealth:@"buffering" detail:@"stream reset"];
+    }
+
     int got = _ring->read(chunk.data(), chunk.size(), 50);
     if (got <= 0) {
       // read() returns -1 once the ring is shut down or drained at EOS.
@@ -386,32 +332,21 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
     if (!result.audioPackets.empty()) {
       auto info = demuxer.trackInfoSnapshot();
-      if ([self ensureOpusDecoder:info.audioSampleRate
-                         channels:info.audioChannels]) {
+      if ([_audioDecoder configureWithSampleRate:info.audioSampleRate
+                                        channels:info.audioChannels]) {
         for (const auto& pkt : result.audioPackets) {
-          int frames = opus_decode_float(_opusDecoder, pkt.data,
-                                         static_cast<int>(pkt.size), pcm.data(),
-                                         kMaxOpusFrames, 0);
-          if (frames <= 0) continue;
-          CMSampleBufferRef sb =
-              BuildLPCMSampleBuffer(pcm.data(), frames, _opusSampleRate,
-                                    _opusChannels, pkt.ptsUs);
-          if (!sb) continue;
-          // A live producer arrives at real-time pace, so a renderer that is
-          // not ready means the session was interrupted, not that the queue is
-          // merely deep. Drop and count rather than block the demux thread.
-          if (_audioRenderer.isReadyForMoreMediaData) {
-            [_audioRenderer enqueueSampleBuffer:sb];
-            _audioPacketsDecoded.fetch_add(1);
+          if ([_audioDecoder submitPacket:pkt.data
+                                   length:pkt.size
+                                    ptsUs:pkt.ptsUs
+                               durationUs:pkt.durationUs]) {
             if (!firstAudioSeen) {
               firstAudioSeen = true;
               [self fireHealth:@"playing" detail:@"first audio frame"];
             }
-          } else {
-            _audioUnderruns.fetch_add(1);
           }
-          CFRelease(sb);
         }
+        _audioPacketsDecoded.store(_audioDecoder.packetsDecoded);
+        _audioUnderruns.store(_audioDecoder.underruns);
       }
     }
 
@@ -419,6 +354,9 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
       auto info = demuxer.trackInfoSnapshot();
       _videoWidth.store(info.videoWidth);
       _videoHeight.store(info.videoHeight);
+      // The container knows the frame size, so a VP9 header the parser cannot
+      // read no longer means no video at all.
+      [_videoDecoder setContainerWidth:info.videoWidth height:info.videoHeight];
       for (const auto& pkt : result.videoPackets) {
         BOOL ok = [_videoDecoder submitFrame:pkt.data
                                       length:pkt.size
@@ -438,6 +376,16 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
     if (!result.error.empty()) {
       MEDIA_LOG_W("WebmPlaybackEngine: demux error: %s", result.error.c_str());
+    }
+
+    // A transient parse error is normal on a lossy feed and is logged above.
+    // The demuxer's terminal state is not: nothing downstream recovers from it,
+    // so surface it instead of looping silently.
+    if (demuxer.parseState() == media::demux::ParseState::Error) {
+      if (!_failed.exchange(true)) {
+        MEDIA_LOG_E("WebmPlaybackEngine: demuxer entered a terminal parse error");
+        [self fireHealth:@"failed" detail:@"demuxer parse failure"];
+      }
     }
   }
 }

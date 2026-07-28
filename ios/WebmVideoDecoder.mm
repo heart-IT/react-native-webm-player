@@ -28,6 +28,8 @@ NSData* BuildVpcCConfig(int profile) {
     int _width;
     int _height;
     int _profile;
+    int _containerWidth;
+    int _containerHeight;
     BOOL _hwSupported;
     dispatch_queue_t _renderQueue;
 }
@@ -47,6 +49,11 @@ NSData* BuildVpcCConfig(int profile) {
 - (void)dealloc { [self shutdown]; }
 
 - (void)setOutputLayer:(AVSampleBufferDisplayLayer*)layer { _layer = layer; }
+
+- (void)setContainerWidth:(int)width height:(int)height {
+    _containerWidth = width;
+    _containerHeight = height;
+}
 
 - (BOOL)ensureSession:(int)width height:(int)height profile:(int)profile {
     if (_session && width == _width && height == _height && profile == _profile) return YES;
@@ -93,6 +100,14 @@ NSData* BuildVpcCConfig(int profile) {
         auto info = media::vp9::parseHeader(data, length);
         if (info.valid && info.width > 0 && info.height > 0) {
             if (![self ensureSession:info.width height:info.height profile:info.profile]) return NO;
+        } else if (!_session && _containerWidth > 0 && _containerHeight > 0) {
+            // Header unreadable. The container already declared the frame size,
+            // so fall back to it rather than never creating a session. Profile 0
+            // is the only one WebM/VP9 mandates support for, and a wrong guess
+            // surfaces as a decode error rather than silence.
+            MEDIA_LOG_W("WebmVideoDecoder: VP9 header unparseable, using container %dx%d",
+                        _containerWidth, _containerHeight);
+            if (![self ensureSession:_containerWidth height:_containerHeight profile:0]) return NO;
         }
     }
     if (!_session) return NO;
