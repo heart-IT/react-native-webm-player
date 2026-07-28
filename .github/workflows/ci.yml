@@ -54,3 +54,22 @@ jobs:
       # check that would have caught the predecessor's release blocker.
       - name: Published package is self-contained
         run: npm run lint:pack
+
+  sanitizers:
+    name: Shared C++ (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread, undefined]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B tests/build -S tests -DSANITIZER=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build tests/build
+
+      - name: Run
+        run: ./tests/build/test_stream_buffer

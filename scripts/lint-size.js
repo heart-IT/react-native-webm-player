@@ -23,7 +23,6 @@ const HARD = 600
 
 const SOURCE_DIRS = ['cpp', 'ios', 'android/src', 'src', 'tests']
 const EXCLUDE_DIRS = new Set([
-  'build',
   '.cxx',
   'node_modules',
   'lib',
@@ -33,6 +32,17 @@ const EXCLUDE_DIRS = new Set([
   'fixtures',
   '.git',
 ])
+
+// Any build tree, however suffixed: build/, build-asan/, build-tsan/, ...
+// CMake drops a 900-line generated compiler-probe source in each one.
+const EXCLUDE_DIR_PREFIXES = ['build']
+
+function isExcludedDir(name) {
+  return (
+    EXCLUDE_DIRS.has(name) ||
+    EXCLUDE_DIR_PREFIXES.some((p) => name.startsWith(p))
+  )
+}
 const SOURCE_EXTS = new Set([
   '.h',
   '.hpp',
@@ -48,7 +58,7 @@ const SOURCE_EXTS = new Set([
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (EXCLUDE_DIRS.has(entry.name)) continue
+    if (entry.isDirectory() && isExcludedDir(entry.name)) continue
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) walk(full, out)
     else if (SOURCE_EXTS.has(path.extname(entry.name))) out.push(full)

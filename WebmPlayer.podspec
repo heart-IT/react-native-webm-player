@@ -18,8 +18,10 @@ Pod::Spec.new do |s|
     "ios/**/*.{swift}",
     # Autolinking/Registration (Objective-C++)
     "ios/**/*.{m,mm}",
-    # Implementation (C++ objects)
-    "cpp/**/*.{hpp,cpp}",
+    # Implementation (C++ objects). `.h` is included deliberately: the shared
+    # C++ uses .h headers, and omitting them here keeps CocoaPods from exposing
+    # them to the compiler.
+    "cpp/**/*.{h,hpp,cpp}",
   ]
 
   load 'nitrogen/generated/ios/WebmPlayer+autolinking.rb'
