@@ -10,9 +10,16 @@
 // Forward declarations of C++ defined types
 // Forward declaration of `HybridWebmPlayerSpec` to properly resolve imports.
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerSpec; }
+// Forward declaration of `WebmPlaybackState` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
+// Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
+namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 
 // Include C++ defined types
 #include "HybridWebmPlayerSpec.hpp"
+#include "WebmPlaybackState.hpp"
+#include "WebmPlayerMetrics.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
 #include <NitroModules/Result.hpp>
 #include <exception>
 #include <memory>

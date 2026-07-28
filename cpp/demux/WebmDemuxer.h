@@ -56,6 +56,10 @@ struct TrackInfo {
     int videoTrackNum = -1;
     int videoWidth = 0;
     int videoHeight = 0;
+    // From the container's AudioTrack. WebM/Opus mandates 48 kHz, but the
+    // decoder is configured from these rather than a hardcoded constant.
+    int audioSampleRate = 0;
+    int audioChannels = 0;
     std::string audioCodecId;
     std::string videoCodecId;
     std::vector<uint8_t> audioCodecPrivate;  // OpusHead

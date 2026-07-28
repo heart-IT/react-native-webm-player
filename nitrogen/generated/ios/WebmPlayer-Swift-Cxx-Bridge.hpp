@@ -10,6 +10,8 @@
 // Forward declarations of C++ defined types
 // Forward declaration of `HybridWebmPlayerSpec` to properly resolve imports.
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerSpec; }
+// Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
+namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 
 // Forward declarations of Swift defined types
 // Forward declaration of `HybridWebmPlayerSpec_cxx` to properly resolve imports.
@@ -17,6 +19,7 @@ namespace WebmPlayer { class HybridWebmPlayerSpec_cxx; }
 
 // Include C++ defined types
 #include "HybridWebmPlayerSpec.hpp"
+#include "WebmPlayerMetrics.hpp"
 #include <NitroModules/Result.hpp>
 #include <exception>
 #include <memory>
@@ -39,13 +42,31 @@ namespace margelo::nitro::webmplayer::bridge::swift {
   using std__weak_ptr_HybridWebmPlayerSpec_ = std::weak_ptr<HybridWebmPlayerSpec>;
   inline std__weak_ptr_HybridWebmPlayerSpec_ weakify_std__shared_ptr_HybridWebmPlayerSpec_(const std::shared_ptr<HybridWebmPlayerSpec>& strong) noexcept { return strong; }
   
-  // pragma MARK: Result<double>
-  using Result_double_ = Result<double>;
-  inline Result_double_ create_Result_double_(double value) noexcept {
-    return Result<double>::withValue(std::move(value));
+  // pragma MARK: Result<bool>
+  using Result_bool_ = Result<bool>;
+  inline Result_bool_ create_Result_bool_(bool value) noexcept {
+    return Result<bool>::withValue(std::move(value));
   }
-  inline Result_double_ create_Result_double_(const std::exception_ptr& error) noexcept {
-    return Result<double>::withError(error);
+  inline Result_bool_ create_Result_bool_(const std::exception_ptr& error) noexcept {
+    return Result<bool>::withError(error);
+  }
+  
+  // pragma MARK: Result<void>
+  using Result_void_ = Result<void>;
+  inline Result_void_ create_Result_void_() noexcept {
+    return Result<void>::withValue();
+  }
+  inline Result_void_ create_Result_void_(const std::exception_ptr& error) noexcept {
+    return Result<void>::withError(error);
+  }
+  
+  // pragma MARK: Result<WebmPlayerMetrics>
+  using Result_WebmPlayerMetrics_ = Result<WebmPlayerMetrics>;
+  inline Result_WebmPlayerMetrics_ create_Result_WebmPlayerMetrics_(const WebmPlayerMetrics& value) noexcept {
+    return Result<WebmPlayerMetrics>::withValue(value);
+  }
+  inline Result_WebmPlayerMetrics_ create_Result_WebmPlayerMetrics_(const std::exception_ptr& error) noexcept {
+    return Result<WebmPlayerMetrics>::withError(error);
   }
 
 } // namespace margelo::nitro::webmplayer::bridge::swift

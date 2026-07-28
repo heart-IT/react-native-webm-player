@@ -94,6 +94,10 @@ TEST(track_info_correct) {
     ASSERT_EQ(info.videoHeight, 240);
     ASSERT_TRUE(info.audioTrackNum >= 0);
     ASSERT_TRUE(info.videoTrackNum >= 0);
+    // The iOS engine configures the Opus decoder from these, so a silent zero
+    // here would mean opus_decoder_create fails at runtime.
+    ASSERT_EQ(info.audioSampleRate, 48000);
+    ASSERT_EQ(info.audioChannels, 2);
 }
 
 TEST(produces_audio_packets) {

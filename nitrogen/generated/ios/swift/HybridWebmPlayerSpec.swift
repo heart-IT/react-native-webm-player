@@ -10,10 +10,22 @@ import NitroModules
 /// See ``HybridWebmPlayerSpec``
 public protocol HybridWebmPlayerSpec_protocol: HybridObject {
   // Properties
-  
+  var isRunning: Bool { get }
+  var isPaused: Bool { get }
+  var playbackState: WebmPlaybackState { get }
+  var muted: Bool { get set }
+  var gain: Double { get set }
+  var playbackRate: Double { get set }
 
   // Methods
-  func sum(num1: Double, num2: Double) throws -> Double
+  func start() throws -> Bool
+  func stop() throws -> Bool
+  func pause() throws -> Bool
+  func resume() throws -> Bool
+  func feedData(data: ArrayBuffer) throws -> Bool
+  func setEndOfStream() throws -> Void
+  func resetStream() throws -> Void
+  func getMetrics() throws -> WebmPlayerMetrics
 }
 
 public extension HybridWebmPlayerSpec_protocol {

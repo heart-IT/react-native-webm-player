@@ -69,6 +69,12 @@ bool WebmDemuxer::parseTracks() {
                 trackInfo_.audioCodecPrivate.assign(
                     codecPrivate, codecPrivate + codecPrivateSize);
             }
+            const mkvparser::AudioTrack* audioTrack =
+                static_cast<const mkvparser::AudioTrack*>(track);
+            trackInfo_.audioSampleRate =
+                static_cast<int>(audioTrack->GetSamplingRate());
+            trackInfo_.audioChannels =
+                static_cast<int>(audioTrack->GetChannels());
         } else if (trackType == mkvparser::Track::kVideo &&
                    codecId && std::strcmp(codecId, "V_VP9") == 0) {
             trackInfo_.videoTrackNum = static_cast<int>(track->GetNumber());

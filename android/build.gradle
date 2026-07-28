@@ -20,7 +20,8 @@ def isNewArchitectureEnabled() {
 
 apply plugin: "com.android.library"
 apply plugin: 'org.jetbrains.kotlin.android'
-apply from: '../nitrogen/generated/android/WebmPlayer+autolinking.gradle'
+// Restored when the WebmPlayer HybridObject gains an Android implementation.
+// apply from: '../nitrogen/generated/android/WebmPlayer+autolinking.gradle'
 apply from: "./fix-prefab.gradle"
 
 if (isNewArchitectureEnabled()) {

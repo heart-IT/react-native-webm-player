@@ -12,9 +12,17 @@
 // Forward declaration of `HybridWebmPlayerSpec_cxx` to properly resolve imports.
 namespace WebmPlayer { class HybridWebmPlayerSpec_cxx; }
 
+// Forward declaration of `WebmPlaybackState` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
+// Forward declaration of `ArrayBufferHolder` to properly resolve imports.
+namespace NitroModules { class ArrayBufferHolder; }
+// Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
+namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 
-
-
+#include "WebmPlaybackState.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
+#include <NitroModules/ArrayBufferHolder.hpp>
+#include "WebmPlayerMetrics.hpp"
 
 #include "WebmPlayer-Swift-Cxx-Umbrella.hpp"
 
@@ -62,12 +70,91 @@ namespace margelo::nitro::webmplayer {
 
   public:
     // Properties
-    
+    inline bool getIsRunning() noexcept override {
+      return _swiftPart.isRunning();
+    }
+    inline bool getIsPaused() noexcept override {
+      return _swiftPart.isPaused();
+    }
+    inline WebmPlaybackState getPlaybackState() noexcept override {
+      auto __result = _swiftPart.getPlaybackState();
+      return static_cast<WebmPlaybackState>(__result);
+    }
+    inline bool getMuted() noexcept override {
+      return _swiftPart.getMuted();
+    }
+    inline void setMuted(bool muted) noexcept override {
+      _swiftPart.setMuted(std::forward<decltype(muted)>(muted));
+    }
+    inline double getGain() noexcept override {
+      return _swiftPart.getGain();
+    }
+    inline void setGain(double gain) noexcept override {
+      _swiftPart.setGain(std::forward<decltype(gain)>(gain));
+    }
+    inline double getPlaybackRate() noexcept override {
+      return _swiftPart.getPlaybackRate();
+    }
+    inline void setPlaybackRate(double playbackRate) noexcept override {
+      _swiftPart.setPlaybackRate(std::forward<decltype(playbackRate)>(playbackRate));
+    }
 
   public:
     // Methods
-    inline double sum(double num1, double num2) override {
-      auto __result = _swiftPart.sum(std::forward<decltype(num1)>(num1), std::forward<decltype(num2)>(num2));
+    inline bool start() override {
+      auto __result = _swiftPart.start();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline bool stop() override {
+      auto __result = _swiftPart.stop();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline bool pause() override {
+      auto __result = _swiftPart.pause();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline bool resume() override {
+      auto __result = _swiftPart.resume();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline bool feedData(const std::shared_ptr<ArrayBuffer>& data) override {
+      auto __result = _swiftPart.feedData(ArrayBufferHolder(data));
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline void setEndOfStream() override {
+      auto __result = _swiftPart.setEndOfStream();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline void resetStream() override {
+      auto __result = _swiftPart.resetStream();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline WebmPlayerMetrics getMetrics() override {
+      auto __result = _swiftPart.getMetrics();
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

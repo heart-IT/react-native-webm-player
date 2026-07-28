@@ -79,3 +79,7 @@ tsconfig.tsbuildinfo
 
 # Sanitizer test build trees
 tests/build-*/
+
+# Vendored Opus build tree (XCFramework is rebuilt by pod install)
+ios/opus/build/
+ios/opus/lib/
