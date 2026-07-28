@@ -1,0 +1,30 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": [
+    "webmplayer"
+  ],
+  "ios": {
+    "iosModuleName": "WebmPlayer"
+  },
+  "android": {
+    "androidNamespace": [
+      "webmplayer"
+    ],
+    "androidCxxLibName": "WebmPlayer"
+  },
+  "autolinking": {
+    "WebmPlayer": {
+      "ios": {
+        "language": "swift",
+        "implementationClassName": "HybridWebmPlayer"
+      },
+      "android": {
+        "language": "kotlin",
+        "implementationClassName": "HybridWebmPlayer"
+      }
+    }
+  },
+  "ignorePaths": [
+    "**/node_modules"
+  ]
+}
