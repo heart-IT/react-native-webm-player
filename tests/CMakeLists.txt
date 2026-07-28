@@ -71,6 +71,14 @@ add_executable(test_ring_lifetime
 )
 target_link_libraries(test_ring_lifetime PRIVATE Threads::Threads)
 
+# Handle-lifetime registry backing the JNI boundary (finding P0-3).
+add_executable(test_ring_registry
+    test_ring_registry.cpp
+    ${CPP_ROOT}/common/RingRegistry.cpp
+    ${CPP_ROOT}/common/WebMStreamBuffer.cpp
+)
+target_link_libraries(test_ring_registry PRIVATE Threads::Threads)
+
 # ---- WebM demuxer end-to-end (real VP9+Opus fixture) ----
 # Opus is only needed to prove the demuxed audio packets actually decode.
 find_path(OPUS_INCLUDE_DIR opus/opus.h HINTS /opt/homebrew/include /usr/local/include)

@@ -86,5 +86,8 @@ jobs:
       - name: Audit regressions
         run: ./tests/build/test_audit_proof
 
+      - name: Ring handle registry
+        run: ./tests/build/test_ring_registry
+
       - name: Ring lifetime under concurrent destroy
         run: ./tests/build/test_ring_lifetime

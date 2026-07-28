@@ -12,6 +12,7 @@ add_compile_options(-DRN_SERIALIZABLE_STATE=1)
 add_library(${PACKAGE_NAME} SHARED
         src/main/cpp/cpp-adapter.cpp
         src/main/cpp/webmstream_jni.cpp
+        ../cpp/common/RingRegistry.cpp
         ../cpp/common/WebMStreamBuffer.cpp
 )
 
