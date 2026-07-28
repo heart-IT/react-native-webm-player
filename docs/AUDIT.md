@@ -75,7 +75,30 @@ and by the Android build linking all 9 symbols.
 
 ---
 
-## Open findings
+## Findings resolved after the report
+
+All eight open findings were fixed in `51b6fda`. What changed, and what is still
+only inspected rather than executed:
+
+| ID   | Fix                                                                                                                                                                         | Verified by                                              |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| P1-1 | `resetStream()` raises an atomic the demux thread consumes, resetting `WebmDemuxer` and the audio decoder at the same stream boundary                                       | iOS build; behaviour needs P6                            |
+| P1-2 | `_failed` set when `demuxer.parseState()` reaches `Error`; `playbackState` checks it first, matching Android's precedence                                                   | iOS build; behaviour needs P6                            |
+| P1-3 | Audio path extracted to `ios/WebmAudioDecoder.{h,mm}`, now driving `OpusDecoderAdapter` — OSCE complexity 7, FEC recovery of a single missing frame, PLC fallback           | iOS build + symbols linked; concealment quality needs P6 |
+| P2-1 | `WebmVideoDecoder` falls back to container dimensions when the VP9 header will not parse                                                                                    | iOS build; needs P6                                      |
+| P2-2 | `WebMStreamBuffer::broadcastConfig()` / `broadcastCapacityBytes()` — both platforms call the same source, and the JNI capacity parameter was removed so Kotlin cannot drift | both builds                                              |
+| P2-3 | `createWebmPlayer()` factory replaces module-scope instantiation                                                                                                            | typecheck                                                |
+| P2-4 | Fuzz harness ported; 100,000 iterations across 4 phases, clean under ASan, wired into CI                                                                                    | run                                                      |
+| P2-5 | README rewritten to describe this player                                                                                                                                    | —                                                        |
+
+`ios/WebmPlaybackEngine.mm` went 445 → 392 lines: the audio extraction (required
+by the line budget before adding to it) more than paid for the two new features.
+
+**Unchanged by any of this:** the engines still have no execution coverage. Every
+fix above is verified to compile, link and pass the host suites; none has run in a
+real playback session. P6 remains the gate.
+
+## Original open findings
 
 ### Correctness · Reliability
 
@@ -216,13 +239,15 @@ deferred to P6.
 
 ---
 
-## Recommended order
+## What remains
 
-1. **P1-1** `resetStream` — a documented API that corrupts state.
-2. **P1-2** iOS `Failed` path — failures are currently invisible to JS.
-3. **P1-3** wire `OpusDecoderAdapter` in — removes dead code and restores concealment.
-4. **P2-1** VP9 dimension fallback — a parse failure currently means no video at all.
-5. **P2-3** `src/index.ts` factory — import should not be fatal.
-6. **P2-2** ring config parity.
-7. **P2-4** port the fuzz harness.
-8. **P2-5** README.
+Not findings — audit coverage that was never completed, carried forward:
+
+- **Performance** — unaudited; needs a device.
+- **P2P compliance** — unaudited. No P2P code lives here, but the contract with
+  the Bare feeding layer (backpressure signalling, EOS, reconnect) is undefined
+  and should be specified before P6.
+- **Security** — attack surface identified and now fuzzed; no threat model.
+- Systematic sweeps of `WebmBlockParser` internals, observability, and RN
+  render/bridge profiling.
+- **Execution coverage of the engines** — the dominant risk, closed only by P6.
