@@ -35,6 +35,9 @@ data class WebmPlayerMetrics(
   val videoFramesDropped: Double,
   @DoNotStrip
   @Keep
+  val audioFramesRecovered: Double,
+  @DoNotStrip
+  @Keep
   val videoWidth: Double,
   @DoNotStrip
   @Keep
@@ -62,6 +65,7 @@ data class WebmPlayerMetrics(
       && Objects.deepEquals(this.videoPacketsDecoded, other.videoPacketsDecoded)
       && Objects.deepEquals(this.audioUnderruns, other.audioUnderruns)
       && Objects.deepEquals(this.videoFramesDropped, other.videoFramesDropped)
+      && Objects.deepEquals(this.audioFramesRecovered, other.audioFramesRecovered)
       && Objects.deepEquals(this.videoWidth, other.videoWidth)
       && Objects.deepEquals(this.videoHeight, other.videoHeight)
       && Objects.deepEquals(this.currentTimeSeconds, other.currentTimeSeconds)
@@ -77,6 +81,7 @@ data class WebmPlayerMetrics(
       videoPacketsDecoded,
       audioUnderruns,
       videoFramesDropped,
+      audioFramesRecovered,
       videoWidth,
       videoHeight,
       currentTimeSeconds,
@@ -94,8 +99,8 @@ data class WebmPlayerMetrics(
     @Keep
     @Suppress("unused")
     @JvmStatic
-    private fun fromCpp(bytesFedTotal: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double, playbackRate: Double, muted: Boolean, gain: Double): WebmPlayerMetrics {
-      return WebmPlayerMetrics(bytesFedTotal, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, videoWidth, videoHeight, currentTimeSeconds, playbackRate, muted, gain)
+    private fun fromCpp(bytesFedTotal: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double, playbackRate: Double, muted: Boolean, gain: Double): WebmPlayerMetrics {
+      return WebmPlayerMetrics(bytesFedTotal, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds, playbackRate, muted, gain)
     }
   }
 }

@@ -46,5 +46,21 @@ namespace margelo::nitro::webmplayer::bridge::swift {
     WebmPlayer::HybridWebmPlayerViewSpec_cxx& swiftPart = swiftWrapper->getSwiftPart();
     return swiftPart.toUnsafe();
   }
+  
+  // pragma MARK: std::function<void(const WebmHealthEvent& /* event */)>
+  Func_void_WebmHealthEvent create_Func_void_WebmHealthEvent(void* NON_NULL swiftClosureWrapper) noexcept {
+    auto swiftClosure = WebmPlayer::Func_void_WebmHealthEvent::fromUnsafe(swiftClosureWrapper);
+    return [swiftClosure = std::move(swiftClosure)](const WebmHealthEvent& event) mutable -> void {
+      swiftClosure.call(event);
+    };
+  }
+  
+  // pragma MARK: std::function<void(WebmAudioRoute /* route */)>
+  Func_void_WebmAudioRoute create_Func_void_WebmAudioRoute(void* NON_NULL swiftClosureWrapper) noexcept {
+    auto swiftClosure = WebmPlayer::Func_void_WebmAudioRoute::fromUnsafe(swiftClosureWrapper);
+    return [swiftClosure = std::move(swiftClosure)](WebmAudioRoute route) mutable -> void {
+      swiftClosure.call(static_cast<int>(route));
+    };
+  }
 
 } // namespace margelo::nitro::webmplayer::bridge::swift

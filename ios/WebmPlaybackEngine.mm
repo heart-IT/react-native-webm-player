@@ -253,6 +253,7 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   m.videoPacketsDecoded = _videoPacketsDecoded.load();
   m.audioUnderruns = _audioUnderruns.load();
   m.videoFramesDropped = _videoFramesDropped.load();
+  m.audioFramesRecovered = _audioDecoder ? _audioDecoder.framesRecovered : 0;
   m.videoWidth = _videoWidth.load();
   m.videoHeight = _videoHeight.load();
   m.gain = _gain.load();

@@ -15,12 +15,20 @@
 
 // Forward declaration of `WebmPlaybackState` to properly resolve imports.
 namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
+// Forward declaration of `WebmAudioRoute` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmAudioRoute; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
+// Forward declaration of `WebmHealthEvent` to properly resolve imports.
+namespace margelo::nitro::webmplayer { struct WebmHealthEvent; }
 
 #include "WebmPlaybackState.hpp"
+#include "WebmAudioRoute.hpp"
 #include <NitroModules/ArrayBuffer.hpp>
 #include "WebmPlayerMetrics.hpp"
+#include "WebmHealthEvent.hpp"
+#include <functional>
+#include <vector>
 
 namespace margelo::nitro::webmplayer {
 
@@ -58,6 +66,7 @@ namespace margelo::nitro::webmplayer {
       virtual void setGain(double gain) = 0;
       virtual double getPlaybackRate() = 0;
       virtual void setPlaybackRate(double playbackRate) = 0;
+      virtual WebmAudioRoute getCurrentAudioRoute() = 0;
 
     public:
       // Methods
@@ -69,6 +78,9 @@ namespace margelo::nitro::webmplayer {
       virtual void setEndOfStream() = 0;
       virtual void resetStream() = 0;
       virtual WebmPlayerMetrics getMetrics() = 0;
+      virtual void setHealthCallback(const std::function<void(const WebmHealthEvent& /* event */)>& callback) = 0;
+      virtual std::vector<WebmAudioRoute> getAvailableAudioRoutes() = 0;
+      virtual void setRouteChangeCallback(const std::function<void(WebmAudioRoute /* route */)>& callback) = 0;
 
     protected:
       // Hybrid Setup

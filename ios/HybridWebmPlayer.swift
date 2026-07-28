@@ -9,6 +9,7 @@ import NitroModules
 /// hand-off in `feedData`.
 final class HybridWebmPlayer: HybridWebmPlayerSpec {
   private let engine = WebmPlaybackEngine()
+  private let routes = WebmAudioRouteMonitor()
 
   // MARK: - Lifecycle
 
@@ -83,6 +84,35 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
     engine.detachDisplayLayer(layer)
   }
 
+  // MARK: - Health and routing
+
+  func setHealthCallback(callback: @escaping (WebmHealthEvent) -> Void) throws {
+    // The engine reports transitions as strings; Nitro marshals the call onto
+    // the JS thread itself, so no hop is needed here.
+    engine.setHealthCallback { status, detail in
+      callback(WebmHealthEvent(status: Self.healthStatus(status), detail: detail))
+    }
+  }
+
+  var currentAudioRoute: WebmAudioRoute { routes.currentRoute }
+
+  func getAvailableAudioRoutes() throws -> [WebmAudioRoute] {
+    routes.availableRoutes
+  }
+
+  func setRouteChangeCallback(callback: @escaping (WebmAudioRoute) -> Void) throws {
+    routes.setCallback(callback)
+  }
+
+  private static func healthStatus(_ raw: String) -> WebmHealthStatus {
+    switch raw {
+    case "playing": return .playing
+    case "ended": return .ended
+    case "failed": return .failed
+    default: return .buffering
+    }
+  }
+
   // MARK: - Metrics
 
   func getMetrics() throws -> WebmPlayerMetrics {
@@ -93,6 +123,7 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
       videoPacketsDecoded: Double(m.videoPacketsDecoded),
       audioUnderruns: Double(m.audioUnderruns),
       videoFramesDropped: Double(m.videoFramesDropped),
+      audioFramesRecovered: Double(m.audioFramesRecovered),
       videoWidth: Double(m.videoWidth),
       videoHeight: Double(m.videoHeight),
       currentTimeSeconds: m.currentTimeSeconds,

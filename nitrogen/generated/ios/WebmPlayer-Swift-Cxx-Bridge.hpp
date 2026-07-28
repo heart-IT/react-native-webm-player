@@ -12,6 +12,12 @@
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerSpec; }
 // Forward declaration of `HybridWebmPlayerViewSpec` to properly resolve imports.
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerViewSpec; }
+// Forward declaration of `WebmAudioRoute` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmAudioRoute; }
+// Forward declaration of `WebmHealthEvent` to properly resolve imports.
+namespace margelo::nitro::webmplayer { struct WebmHealthEvent; }
+// Forward declaration of `WebmHealthStatus` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmHealthStatus; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 
@@ -24,11 +30,17 @@ namespace WebmPlayer { class HybridWebmPlayerViewSpec_cxx; }
 // Include C++ defined types
 #include "HybridWebmPlayerSpec.hpp"
 #include "HybridWebmPlayerViewSpec.hpp"
+#include "WebmAudioRoute.hpp"
+#include "WebmHealthEvent.hpp"
+#include "WebmHealthStatus.hpp"
 #include "WebmPlayerMetrics.hpp"
 #include <NitroModules/Result.hpp>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 /**
  * Contains specialized versions of C++ templated types so they can be accessed from Swift,
@@ -75,6 +87,61 @@ namespace margelo::nitro::webmplayer::bridge::swift {
   using std__weak_ptr_HybridWebmPlayerViewSpec_ = std::weak_ptr<HybridWebmPlayerViewSpec>;
   inline std__weak_ptr_HybridWebmPlayerViewSpec_ weakify_std__shared_ptr_HybridWebmPlayerViewSpec_(const std::shared_ptr<HybridWebmPlayerViewSpec>& strong) noexcept { return strong; }
   
+  // pragma MARK: std::function<void(const WebmHealthEvent& /* event */)>
+  /**
+   * Specialized version of `std::function<void(const WebmHealthEvent&)>`.
+   */
+  using Func_void_WebmHealthEvent = std::function<void(const WebmHealthEvent& /* event */)>;
+  /**
+   * Wrapper class for a `std::function<void(const WebmHealthEvent& / * event * /)>`, this can be used from Swift.
+   */
+  class Func_void_WebmHealthEvent_Wrapper final {
+  public:
+    explicit Func_void_WebmHealthEvent_Wrapper(std::function<void(const WebmHealthEvent& /* event */)>&& func): _function(std::make_unique<std::function<void(const WebmHealthEvent& /* event */)>>(std::move(func))) {}
+    inline void call(WebmHealthEvent event) const noexcept {
+      _function->operator()(event);
+    }
+  private:
+    std::unique_ptr<std::function<void(const WebmHealthEvent& /* event */)>> _function;
+  } SWIFT_NONCOPYABLE;
+  Func_void_WebmHealthEvent create_Func_void_WebmHealthEvent(void* NON_NULL swiftClosureWrapper) noexcept;
+  inline Func_void_WebmHealthEvent_Wrapper wrap_Func_void_WebmHealthEvent(Func_void_WebmHealthEvent value) noexcept {
+    return Func_void_WebmHealthEvent_Wrapper(std::move(value));
+  }
+  
+  // pragma MARK: std::vector<WebmAudioRoute>
+  /**
+   * Specialized version of `std::vector<WebmAudioRoute>`.
+   */
+  using std__vector_WebmAudioRoute_ = std::vector<WebmAudioRoute>;
+  inline std::vector<WebmAudioRoute> create_std__vector_WebmAudioRoute_(size_t size) noexcept {
+    std::vector<WebmAudioRoute> vector;
+    vector.reserve(size);
+    return vector;
+  }
+  
+  // pragma MARK: std::function<void(WebmAudioRoute /* route */)>
+  /**
+   * Specialized version of `std::function<void(WebmAudioRoute)>`.
+   */
+  using Func_void_WebmAudioRoute = std::function<void(WebmAudioRoute /* route */)>;
+  /**
+   * Wrapper class for a `std::function<void(WebmAudioRoute / * route * /)>`, this can be used from Swift.
+   */
+  class Func_void_WebmAudioRoute_Wrapper final {
+  public:
+    explicit Func_void_WebmAudioRoute_Wrapper(std::function<void(WebmAudioRoute /* route */)>&& func): _function(std::make_unique<std::function<void(WebmAudioRoute /* route */)>>(std::move(func))) {}
+    inline void call(int route) const noexcept {
+      _function->operator()(static_cast<WebmAudioRoute>(route));
+    }
+  private:
+    std::unique_ptr<std::function<void(WebmAudioRoute /* route */)>> _function;
+  } SWIFT_NONCOPYABLE;
+  Func_void_WebmAudioRoute create_Func_void_WebmAudioRoute(void* NON_NULL swiftClosureWrapper) noexcept;
+  inline Func_void_WebmAudioRoute_Wrapper wrap_Func_void_WebmAudioRoute(Func_void_WebmAudioRoute value) noexcept {
+    return Func_void_WebmAudioRoute_Wrapper(std::move(value));
+  }
+  
   // pragma MARK: Result<bool>
   using Result_bool_ = Result<bool>;
   inline Result_bool_ create_Result_bool_(bool value) noexcept {
@@ -100,6 +167,15 @@ namespace margelo::nitro::webmplayer::bridge::swift {
   }
   inline Result_WebmPlayerMetrics_ create_Result_WebmPlayerMetrics_(const std::exception_ptr& error) noexcept {
     return Result<WebmPlayerMetrics>::withError(error);
+  }
+  
+  // pragma MARK: Result<std::vector<WebmAudioRoute>>
+  using Result_std__vector_WebmAudioRoute__ = Result<std::vector<WebmAudioRoute>>;
+  inline Result_std__vector_WebmAudioRoute__ create_Result_std__vector_WebmAudioRoute__(const std::vector<WebmAudioRoute>& value) noexcept {
+    return Result<std::vector<WebmAudioRoute>>::withValue(value);
+  }
+  inline Result_std__vector_WebmAudioRoute__ create_Result_std__vector_WebmAudioRoute__(const std::exception_ptr& error) noexcept {
+    return Result<std::vector<WebmAudioRoute>>::withError(error);
   }
 
 } // namespace margelo::nitro::webmplayer::bridge::swift

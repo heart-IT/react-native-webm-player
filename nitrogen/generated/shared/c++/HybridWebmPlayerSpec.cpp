@@ -23,6 +23,7 @@ namespace margelo::nitro::webmplayer {
       prototype.registerHybridSetter("gain", &HybridWebmPlayerSpec::setGain);
       prototype.registerHybridGetter("playbackRate", &HybridWebmPlayerSpec::getPlaybackRate);
       prototype.registerHybridSetter("playbackRate", &HybridWebmPlayerSpec::setPlaybackRate);
+      prototype.registerHybridGetter("currentAudioRoute", &HybridWebmPlayerSpec::getCurrentAudioRoute);
       prototype.registerHybridMethod("start", &HybridWebmPlayerSpec::start);
       prototype.registerHybridMethod("stop", &HybridWebmPlayerSpec::stop);
       prototype.registerHybridMethod("pause", &HybridWebmPlayerSpec::pause);
@@ -31,6 +32,9 @@ namespace margelo::nitro::webmplayer {
       prototype.registerHybridMethod("setEndOfStream", &HybridWebmPlayerSpec::setEndOfStream);
       prototype.registerHybridMethod("resetStream", &HybridWebmPlayerSpec::resetStream);
       prototype.registerHybridMethod("getMetrics", &HybridWebmPlayerSpec::getMetrics);
+      prototype.registerHybridMethod("setHealthCallback", &HybridWebmPlayerSpec::setHealthCallback);
+      prototype.registerHybridMethod("getAvailableAudioRoutes", &HybridWebmPlayerSpec::getAvailableAudioRoutes);
+      prototype.registerHybridMethod("setRouteChangeCallback", &HybridWebmPlayerSpec::setRouteChangeCallback);
     });
   }
 

@@ -30,6 +30,7 @@ typedef struct {
   uint64_t videoPacketsDecoded;
   uint64_t audioUnderruns;
   uint64_t videoFramesDropped;
+  uint64_t audioFramesRecovered;
   int videoWidth;
   int videoHeight;
   double currentTimeSeconds;

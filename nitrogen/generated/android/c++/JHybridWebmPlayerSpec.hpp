@@ -59,6 +59,7 @@ namespace margelo::nitro::webmplayer {
     void setGain(double gain) override;
     double getPlaybackRate() override;
     void setPlaybackRate(double playbackRate) override;
+    WebmAudioRoute getCurrentAudioRoute() override;
 
   public:
     // Methods
@@ -70,6 +71,9 @@ namespace margelo::nitro::webmplayer {
     void setEndOfStream() override;
     void resetStream() override;
     WebmPlayerMetrics getMetrics() override;
+    void setHealthCallback(const std::function<void(const WebmHealthEvent& /* event */)>& callback) override;
+    std::vector<WebmAudioRoute> getAvailableAudioRoutes() override;
+    void setRouteChangeCallback(const std::function<void(WebmAudioRoute /* route */)>& callback) override;
 
   private:
     jni::global_ref<JHybridWebmPlayerSpec::JavaPart> _javaPart;

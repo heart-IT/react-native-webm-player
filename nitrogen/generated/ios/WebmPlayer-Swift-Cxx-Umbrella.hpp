@@ -12,6 +12,12 @@
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerSpec; }
 // Forward declaration of `HybridWebmPlayerViewSpec` to properly resolve imports.
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerViewSpec; }
+// Forward declaration of `WebmAudioRoute` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmAudioRoute; }
+// Forward declaration of `WebmHealthEvent` to properly resolve imports.
+namespace margelo::nitro::webmplayer { struct WebmHealthEvent; }
+// Forward declaration of `WebmHealthStatus` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmHealthStatus; }
 // Forward declaration of `WebmPlaybackState` to properly resolve imports.
 namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
@@ -22,14 +28,20 @@ namespace margelo::nitro::webmplayer { enum class WebmScaleMode; }
 // Include C++ defined types
 #include "HybridWebmPlayerSpec.hpp"
 #include "HybridWebmPlayerViewSpec.hpp"
+#include "WebmAudioRoute.hpp"
+#include "WebmHealthEvent.hpp"
+#include "WebmHealthStatus.hpp"
 #include "WebmPlaybackState.hpp"
 #include "WebmPlayerMetrics.hpp"
 #include "WebmScaleMode.hpp"
 #include <NitroModules/ArrayBuffer.hpp>
 #include <NitroModules/Result.hpp>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 // C++ helpers for Swift
 #include "WebmPlayer-Swift-Cxx-Bridge.hpp"

@@ -41,6 +41,8 @@ namespace margelo::nitro::webmplayer {
       double audioUnderruns = this->getFieldValue(fieldAudioUnderruns);
       static const auto fieldVideoFramesDropped = clazz->getField<double>("videoFramesDropped");
       double videoFramesDropped = this->getFieldValue(fieldVideoFramesDropped);
+      static const auto fieldAudioFramesRecovered = clazz->getField<double>("audioFramesRecovered");
+      double audioFramesRecovered = this->getFieldValue(fieldAudioFramesRecovered);
       static const auto fieldVideoWidth = clazz->getField<double>("videoWidth");
       double videoWidth = this->getFieldValue(fieldVideoWidth);
       static const auto fieldVideoHeight = clazz->getField<double>("videoHeight");
@@ -59,6 +61,7 @@ namespace margelo::nitro::webmplayer {
         videoPacketsDecoded,
         audioUnderruns,
         videoFramesDropped,
+        audioFramesRecovered,
         videoWidth,
         videoHeight,
         currentTimeSeconds,
@@ -74,7 +77,7 @@ namespace margelo::nitro::webmplayer {
      */
     [[maybe_unused]]
     static jni::local_ref<JWebmPlayerMetrics::javaobject> fromCpp(const WebmPlayerMetrics& value) {
-      using JSignature = JWebmPlayerMetrics(double, double, double, double, double, double, double, double, double, jboolean, double);
+      using JSignature = JWebmPlayerMetrics(double, double, double, double, double, double, double, double, double, double, jboolean, double);
       static const auto clazz = javaClassStatic();
       static const auto create = clazz->getStaticMethod<JSignature>("fromCpp");
       return create(
@@ -84,6 +87,7 @@ namespace margelo::nitro::webmplayer {
         value.videoPacketsDecoded,
         value.audioUnderruns,
         value.videoFramesDropped,
+        value.audioFramesRecovered,
         value.videoWidth,
         value.videoHeight,
         value.currentTimeSeconds,

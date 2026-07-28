@@ -174,6 +174,13 @@ open class HybridWebmPlayerSpec_cxx {
       self.__implementation.playbackRate = newValue
     }
   }
+  
+  public final var currentAudioRoute: Int32 {
+    @inline(__always)
+    get {
+      return self.__implementation.currentAudioRoute.rawValue
+    }
+  }
 
   // Methods
   @inline(__always)
@@ -267,6 +274,56 @@ open class HybridWebmPlayerSpec_cxx {
     } catch (let __error) {
       let __exceptionPtr = __error.toCpp()
       return bridge.create_Result_WebmPlayerMetrics_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
+  public final func setHealthCallback(callback: bridge.Func_void_WebmHealthEvent) -> bridge.Result_void_ {
+    do {
+      try self.__implementation.setHealthCallback(callback: { () -> (WebmHealthEvent) -> Void in
+        let __wrappedFunction = bridge.wrap_Func_void_WebmHealthEvent(callback)
+        return { (__event: WebmHealthEvent) -> Void in
+          __wrappedFunction.call(__event)
+        }
+      }())
+      return bridge.create_Result_void_()
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_void_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
+  public final func getAvailableAudioRoutes() -> bridge.Result_std__vector_WebmAudioRoute__ {
+    do {
+      let __result = try self.__implementation.getAvailableAudioRoutes()
+      let __resultCpp = { () -> bridge.std__vector_WebmAudioRoute_ in
+        var __vector = bridge.create_std__vector_WebmAudioRoute_(__result.count)
+        for __item in __result {
+          __vector.push_back(__item)
+        }
+        return __vector
+      }()
+      return bridge.create_Result_std__vector_WebmAudioRoute__(__resultCpp)
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_std__vector_WebmAudioRoute__(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
+  public final func setRouteChangeCallback(callback: bridge.Func_void_WebmAudioRoute) -> bridge.Result_void_ {
+    do {
+      try self.__implementation.setRouteChangeCallback(callback: { () -> (WebmAudioRoute) -> Void in
+        let __wrappedFunction = bridge.wrap_Func_void_WebmAudioRoute(callback)
+        return { (__route: WebmAudioRoute) -> Void in
+          __wrappedFunction.call(__route.rawValue)
+        }
+      }())
+      return bridge.create_Result_void_()
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_void_(__exceptionPtr)
     }
   }
 }

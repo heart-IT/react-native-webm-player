@@ -16,6 +16,7 @@ public protocol HybridWebmPlayerSpec_protocol: HybridObject {
   var muted: Bool { get set }
   var gain: Double { get set }
   var playbackRate: Double { get set }
+  var currentAudioRoute: WebmAudioRoute { get }
 
   // Methods
   func start() throws -> Bool
@@ -26,6 +27,9 @@ public protocol HybridWebmPlayerSpec_protocol: HybridObject {
   func setEndOfStream() throws -> Void
   func resetStream() throws -> Void
   func getMetrics() throws -> WebmPlayerMetrics
+  func setHealthCallback(callback: @escaping (_ event: WebmHealthEvent) -> Void) throws -> Void
+  func getAvailableAudioRoutes() throws -> [WebmAudioRoute]
+  func setRouteChangeCallback(callback: @escaping (_ route: WebmAudioRoute) -> Void) throws -> Void
 }
 
 public extension HybridWebmPlayerSpec_protocol {

@@ -55,6 +55,10 @@ abstract class HybridWebmPlayerSpec: HybridObject() {
   @set:DoNotStrip
   @set:Keep
   abstract var playbackRate: Double
+  
+  @get:DoNotStrip
+  @get:Keep
+  abstract val currentAudioRoute: WebmAudioRoute
 
   // Methods
   @DoNotStrip
@@ -88,6 +92,28 @@ abstract class HybridWebmPlayerSpec: HybridObject() {
   @DoNotStrip
   @Keep
   abstract fun getMetrics(): WebmPlayerMetrics
+  
+  abstract fun setHealthCallback(callback: (event: WebmHealthEvent) -> Unit): Unit
+  
+  @DoNotStrip
+  @Keep
+  private fun setHealthCallback_cxx(callback: Func_void_WebmHealthEvent): Unit {
+    val __result = setHealthCallback(callback)
+    return __result
+  }
+  
+  @DoNotStrip
+  @Keep
+  abstract fun getAvailableAudioRoutes(): Array<WebmAudioRoute>
+  
+  abstract fun setRouteChangeCallback(callback: (route: WebmAudioRoute) -> Unit): Unit
+  
+  @DoNotStrip
+  @Keep
+  private fun setRouteChangeCallback_cxx(callback: Func_void_WebmAudioRoute): Unit {
+    val __result = setRouteChangeCallback(callback)
+    return __result
+  }
 
   // Default implementation of `HybridObject.toString()`
   override fun toString(): String {

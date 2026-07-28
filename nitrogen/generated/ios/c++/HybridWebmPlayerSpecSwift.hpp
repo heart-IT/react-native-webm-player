@@ -14,15 +14,27 @@ namespace WebmPlayer { class HybridWebmPlayerSpec_cxx; }
 
 // Forward declaration of `WebmPlaybackState` to properly resolve imports.
 namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
+// Forward declaration of `WebmAudioRoute` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmAudioRoute; }
 // Forward declaration of `ArrayBufferHolder` to properly resolve imports.
 namespace NitroModules { class ArrayBufferHolder; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
+// Forward declaration of `WebmHealthEvent` to properly resolve imports.
+namespace margelo::nitro::webmplayer { struct WebmHealthEvent; }
+// Forward declaration of `WebmHealthStatus` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmHealthStatus; }
 
 #include "WebmPlaybackState.hpp"
+#include "WebmAudioRoute.hpp"
 #include <NitroModules/ArrayBuffer.hpp>
 #include <NitroModules/ArrayBufferHolder.hpp>
 #include "WebmPlayerMetrics.hpp"
+#include "WebmHealthEvent.hpp"
+#include <functional>
+#include "WebmHealthStatus.hpp"
+#include <string>
+#include <vector>
 
 #include "WebmPlayer-Swift-Cxx-Umbrella.hpp"
 
@@ -98,6 +110,10 @@ namespace margelo::nitro::webmplayer {
     inline void setPlaybackRate(double playbackRate) noexcept override {
       _swiftPart.setPlaybackRate(std::forward<decltype(playbackRate)>(playbackRate));
     }
+    inline WebmAudioRoute getCurrentAudioRoute() noexcept override {
+      auto __result = _swiftPart.getCurrentAudioRoute();
+      return static_cast<WebmAudioRoute>(__result);
+    }
 
   public:
     // Methods
@@ -160,6 +176,26 @@ namespace margelo::nitro::webmplayer {
       }
       auto __value = std::move(__result.value());
       return __value;
+    }
+    inline void setHealthCallback(const std::function<void(const WebmHealthEvent& /* event */)>& callback) override {
+      auto __result = _swiftPart.setHealthCallback(callback);
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline std::vector<WebmAudioRoute> getAvailableAudioRoutes() override {
+      auto __result = _swiftPart.getAvailableAudioRoutes();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline void setRouteChangeCallback(const std::function<void(WebmAudioRoute /* route */)>& callback) override {
+      auto __result = _swiftPart.setRouteChangeCallback(callback);
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
     }
 
   private:

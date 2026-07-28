@@ -8,12 +8,38 @@ export enum WebmPlaybackState {
   Failed = 4,
 }
 
+/** Where audio is currently coming out. Read-only: for a media-playback
+ * session the user chooses the output through system UI on both platforms. */
+export enum WebmAudioRoute {
+  Unknown = 0,
+  Earpiece = 1,
+  Speaker = 2,
+  WiredHeadset = 3,
+  Bluetooth = 4,
+  Usb = 5,
+}
+
+export enum WebmHealthStatus {
+  Buffering = 0,
+  Playing = 1,
+  Ended = 2,
+  Failed = 3,
+}
+
+export interface WebmHealthEvent {
+  status: WebmHealthStatus
+  /** Human-readable cause, for logs and triage. Not a stable identifier. */
+  detail: string
+}
+
 export interface WebmPlayerMetrics {
   bytesFedTotal: number
   audioPacketsDecoded: number
   videoPacketsDecoded: number
   audioUnderruns: number
   videoFramesDropped: number
+  /** Audio frames rebuilt from Opus FEC, or concealed by PLC, after a gap. */
+  audioFramesRecovered: number
   videoWidth: number
   videoHeight: number
   currentTimeSeconds: number
@@ -60,4 +86,17 @@ export interface WebmPlayer extends HybridObject<{
   playbackRate: number
 
   getMetrics(): WebmPlayerMetrics
+
+  /**
+   * Subscribe to playback health transitions. Fires only on change, so a
+   * stalled stream does not spam the callback.
+   */
+  setHealthCallback(callback: (event: WebmHealthEvent) => void): void
+
+  /** Where audio is currently routed. */
+  readonly currentAudioRoute: WebmAudioRoute
+  /** Output routes the system currently reports as available. */
+  getAvailableAudioRoutes(): WebmAudioRoute[]
+  /** Fires when the system changes the output route. */
+  setRouteChangeCallback(callback: (route: WebmAudioRoute) => void): void
 }

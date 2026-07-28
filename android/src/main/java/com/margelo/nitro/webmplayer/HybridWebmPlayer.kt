@@ -1,9 +1,5 @@
 package com.margelo.nitro.webmplayer
 
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -67,11 +63,13 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   @Volatile private var ringHandle: Long = 0L
   @Volatile private var player: ExoPlayer? = null
-  private var focusRequest: AudioFocusRequest? = null
-  private var audioManager: AudioManager? = null
+  private var focus: AudioFocusController? = null
   private var statsRunnable: Runnable? = null
   // Main-thread only, like everything else that touches ExoPlayer.
   private var surface: PlayerView? = null
+  private var routes: AudioRouteMonitor? = null
+  private var healthCallback: ((WebmHealthEvent) -> Unit)? = null
+  @Volatile private var lastHealth: WebmHealthStatus? = null
 
   private val running = AtomicBoolean(false)
   private val paused = AtomicBoolean(false)
@@ -97,6 +95,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   override fun start(): Boolean {
     if (running.get()) return true
+    lastHealth = null
     // Created synchronously so feedData() can buffer while ExoPlayer spins up.
     ringHandle = nativeCreateRing()
     if (ringHandle == 0L) return false
@@ -114,8 +113,6 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       return
     }
     try {
-      audioManager = context.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
-
       val loadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(50, 120, 30, 50)
         .setBackBuffer(50, true)
@@ -150,7 +147,16 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
           .createMediaSource(mediaItem)
 
       attachListeners(exo)
-      requestAudioFocus()
+      focus = AudioFocusController(context, mainHandler).also { controller ->
+        controller.acquire { change ->
+          when (change) {
+            AudioFocusController.Change.PAUSE -> player?.pause()
+            AudioFocusController.Change.DUCK -> player?.volume = DUCK_VOLUME
+            AudioFocusController.Change.RESTORE ->
+              player?.volume = if (currentMuted) 0f else currentGain.toFloat()
+          }
+        }
+      }
 
       exo.setMediaSource(mediaSource)
       exo.prepare()
@@ -284,6 +290,38 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     }
   }
 
+  // MARK: - Health and routing
+
+  override fun setHealthCallback(callback: (event: WebmHealthEvent) -> Unit) {
+    healthCallback = callback
+  }
+
+  /** Fires only on transition, so a stalled stream does not spam the callback. */
+  private fun fireHealth(status: WebmHealthStatus, detail: String) {
+    if (lastHealth == status) return
+    lastHealth = status
+    healthCallback?.invoke(WebmHealthEvent(status, detail))
+  }
+
+  override val currentAudioRoute: WebmAudioRoute
+    get() = routeMonitor().currentRoute()
+
+  override fun getAvailableAudioRoutes(): Array<WebmAudioRoute> =
+    routeMonitor().availableRoutes().toTypedArray()
+
+  override fun setRouteChangeCallback(callback: (route: WebmAudioRoute) -> Unit) {
+    routeMonitor().setCallback(callback)
+  }
+
+  /** Created lazily: routing is queryable before start() and after stop(). */
+  private fun routeMonitor(): AudioRouteMonitor {
+    routes?.let { return it }
+    val context = requireNotNull(NitroModules.applicationContext) {
+      "no application context; cannot query audio routes"
+    }
+    return AudioRouteMonitor(context, mainHandler).also { routes = it }
+  }
+
   // MARK: - Metrics
 
   override fun getMetrics(): WebmPlayerMetrics = WebmPlayerMetrics(
@@ -292,6 +330,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     videoPacketsDecoded = videoPackets.get().toDouble(),
     audioUnderruns = audioUnderruns.get().toDouble(),
     videoFramesDropped = videoDropped.get().toDouble(),
+    // ExoPlayer conceals internally and does not report recovered frames, so
+    // this stays 0 on Android rather than inventing a number.
+    audioFramesRecovered = 0.0,
     videoWidth = videoW.get().toDouble(),
     videoHeight = videoH.get().toDouble(),
     currentTimeSeconds = positionMs.get() / 1000.0,
@@ -306,11 +347,18 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     exo.addListener(object : Player.Listener {
       override fun onPlaybackStateChanged(state: Int) {
         exoState.set(state)
+        when (state) {
+          Player.STATE_READY -> fireHealth(WebmHealthStatus.PLAYING, "ready")
+          Player.STATE_BUFFERING -> fireHealth(WebmHealthStatus.BUFFERING, "buffering")
+          Player.STATE_ENDED -> fireHealth(WebmHealthStatus.ENDED, "end of stream")
+          else -> Unit
+        }
       }
 
       override fun onPlayerError(error: PlaybackException) {
         Log.e(TAG, "player error: ${error.errorCodeName}", error)
         failed.set(true)
+        fireHealth(WebmHealthStatus.FAILED, error.errorCodeName)
       }
 
       override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -351,30 +399,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     mainHandler.post(tick)
   }
 
-  private fun requestAudioFocus() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-    val attrs = AudioAttributes.Builder()
-      .setUsage(AudioAttributes.USAGE_MEDIA)
-      .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-      .build()
-    val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-      .setAudioAttributes(attrs)
-      .setWillPauseWhenDucked(true)
-      .setOnAudioFocusChangeListener({ change -> mainHandler.post { handleFocus(change) } }, mainHandler)
-      .build()
-    focusRequest = request
-    audioManager?.requestAudioFocus(request)
-  }
 
-  private fun handleFocus(change: Int) {
-    when (change) {
-      AudioManager.AUDIOFOCUS_LOSS,
-      AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> player?.pause()
-      AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> player?.volume = DUCK_VOLUME
-      AudioManager.AUDIOFOCUS_GAIN ->
-        player?.volume = if (currentMuted) 0f else currentGain.toFloat()
-    }
-  }
 
   private fun releaseOnMain() {
     statsRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -382,11 +407,8 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     surface?.player = null
     player?.release()
     player = null
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      focusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
-    }
-    focusRequest = null
-    audioManager = null
+    focus?.release()
+    focus = null
   }
 
   companion object {
