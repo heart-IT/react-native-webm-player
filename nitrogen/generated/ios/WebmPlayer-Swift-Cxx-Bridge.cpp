@@ -9,6 +9,7 @@
 
 // Include C++ implementation defined types
 #include "HybridWebmPlayerSpecSwift.hpp"
+#include "HybridWebmPlayerViewSpecSwift.hpp"
 #include "WebmPlayer-Swift-Cxx-Umbrella.hpp"
 #include <NitroModules/NitroDefines.hpp>
 
@@ -27,6 +28,22 @@ namespace margelo::nitro::webmplayer::bridge::swift {
     }
     #endif
     WebmPlayer::HybridWebmPlayerSpec_cxx& swiftPart = swiftWrapper->getSwiftPart();
+    return swiftPart.toUnsafe();
+  }
+  
+  // pragma MARK: std::shared_ptr<HybridWebmPlayerViewSpec>
+  std::shared_ptr<HybridWebmPlayerViewSpec> create_std__shared_ptr_HybridWebmPlayerViewSpec_(void* NON_NULL swiftUnsafePointer) noexcept {
+    WebmPlayer::HybridWebmPlayerViewSpec_cxx swiftPart = WebmPlayer::HybridWebmPlayerViewSpec_cxx::fromUnsafe(swiftUnsafePointer);
+    return std::make_shared<margelo::nitro::webmplayer::HybridWebmPlayerViewSpecSwift>(swiftPart);
+  }
+  void* NON_NULL get_std__shared_ptr_HybridWebmPlayerViewSpec_(std__shared_ptr_HybridWebmPlayerViewSpec_ cppType) {
+    std::shared_ptr<margelo::nitro::webmplayer::HybridWebmPlayerViewSpecSwift> swiftWrapper = std::dynamic_pointer_cast<margelo::nitro::webmplayer::HybridWebmPlayerViewSpecSwift>(cppType);
+    #ifdef NITRO_DEBUG
+    if (swiftWrapper == nullptr) [[unlikely]] {
+      throw std::runtime_error("Class \"HybridWebmPlayerViewSpec\" is not implemented in Swift!");
+    }
+    #endif
+    WebmPlayer::HybridWebmPlayerViewSpec_cxx& swiftPart = swiftWrapper->getSwiftPart();
     return swiftPart.toUnsafe();
   }
 

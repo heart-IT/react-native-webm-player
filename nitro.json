@@ -18,6 +18,16 @@
         "language": "kotlin",
         "implementationClassName": "HybridWebmPlayer"
       }
+    },
+    "WebmPlayerView": {
+      "ios": {
+        "language": "swift",
+        "implementationClassName": "HybridWebmPlayerView"
+      },
+      "android": {
+        "language": "kotlin",
+        "implementationClassName": "HybridWebmPlayerView"
+      }
     }
   },
   "ignorePaths": ["**/node_modules"]

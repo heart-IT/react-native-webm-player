@@ -23,4 +23,16 @@ public final class WebmPlayerAutolinking {
   public static func isWebmPlayerRecyclable() -> Bool {
     return HybridWebmPlayer.self is any RecyclableView.Type
   }
+  
+  public static func createWebmPlayerView() -> bridge.std__shared_ptr_HybridWebmPlayerViewSpec_ {
+    let hybridObject = HybridWebmPlayerView()
+    return { () -> bridge.std__shared_ptr_HybridWebmPlayerViewSpec_ in
+      let __cxxWrapped = hybridObject.getCxxWrapper()
+      return __cxxWrapped.getCxxPart()
+    }()
+  }
+  
+  public static func isWebmPlayerViewRecyclable() -> Bool {
+    return HybridWebmPlayerView.self is any RecyclableView.Type
+  }
 }

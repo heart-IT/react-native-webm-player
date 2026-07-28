@@ -10,19 +10,26 @@
 // Forward declarations of C++ defined types
 // Forward declaration of `HybridWebmPlayerSpec` to properly resolve imports.
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerSpec; }
+// Forward declaration of `HybridWebmPlayerViewSpec` to properly resolve imports.
+namespace margelo::nitro::webmplayer { class HybridWebmPlayerViewSpec; }
 // Forward declaration of `WebmPlaybackState` to properly resolve imports.
 namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
+// Forward declaration of `WebmScaleMode` to properly resolve imports.
+namespace margelo::nitro::webmplayer { enum class WebmScaleMode; }
 
 // Include C++ defined types
 #include "HybridWebmPlayerSpec.hpp"
+#include "HybridWebmPlayerViewSpec.hpp"
 #include "WebmPlaybackState.hpp"
 #include "WebmPlayerMetrics.hpp"
+#include "WebmScaleMode.hpp"
 #include <NitroModules/ArrayBuffer.hpp>
 #include <NitroModules/Result.hpp>
 #include <exception>
 #include <memory>
+#include <optional>
 
 // C++ helpers for Swift
 #include "WebmPlayer-Swift-Cxx-Bridge.hpp"
@@ -36,6 +43,8 @@ namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 // Forward declarations of Swift defined types
 // Forward declaration of `HybridWebmPlayerSpec_cxx` to properly resolve imports.
 namespace WebmPlayer { class HybridWebmPlayerSpec_cxx; }
+// Forward declaration of `HybridWebmPlayerViewSpec_cxx` to properly resolve imports.
+namespace WebmPlayer { class HybridWebmPlayerViewSpec_cxx; }
 
 // Include Swift defined types
 #if __has_include("WebmPlayer-Swift.h")

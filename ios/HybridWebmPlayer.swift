@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import NitroModules
 
@@ -64,6 +65,22 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
   var playbackRate: Double {
     get { engine.metrics().playbackRate }
     set { _ = engine.setPlaybackRate(Float(newValue)) }
+  }
+
+  // MARK: - Video surface
+
+  /// Called by `HybridWebmPlayerView`. Not on the spec: the spec is the parity
+  /// contract with Android, and an `AVSampleBufferDisplayLayer` has no meaning
+  /// there.
+  func attachDisplayLayer(_ layer: AVSampleBufferDisplayLayer) {
+    engine.setDisplayLayer(layer)
+  }
+
+  /// Detaching only clears the engine's layer if it is still the one passed in,
+  /// so a view being torn down after another has already attached cannot pull
+  /// the surface out from under the newer one.
+  func detachDisplayLayer(_ layer: AVSampleBufferDisplayLayer) {
+    engine.detachDisplayLayer(layer)
   }
 
   // MARK: - Metrics

@@ -10,19 +10,25 @@
 // Forward declarations of C++ defined types
 // Forward declaration of `HybridWebmPlayerSpec` to properly resolve imports.
 namespace margelo::nitro::webmplayer { class HybridWebmPlayerSpec; }
+// Forward declaration of `HybridWebmPlayerViewSpec` to properly resolve imports.
+namespace margelo::nitro::webmplayer { class HybridWebmPlayerViewSpec; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 
 // Forward declarations of Swift defined types
 // Forward declaration of `HybridWebmPlayerSpec_cxx` to properly resolve imports.
 namespace WebmPlayer { class HybridWebmPlayerSpec_cxx; }
+// Forward declaration of `HybridWebmPlayerViewSpec_cxx` to properly resolve imports.
+namespace WebmPlayer { class HybridWebmPlayerViewSpec_cxx; }
 
 // Include C++ defined types
 #include "HybridWebmPlayerSpec.hpp"
+#include "HybridWebmPlayerViewSpec.hpp"
 #include "WebmPlayerMetrics.hpp"
 #include <NitroModules/Result.hpp>
 #include <exception>
 #include <memory>
+#include <optional>
 
 /**
  * Contains specialized versions of C++ templated types so they can be accessed from Swift,
@@ -41,6 +47,33 @@ namespace margelo::nitro::webmplayer::bridge::swift {
   // pragma MARK: std::weak_ptr<HybridWebmPlayerSpec>
   using std__weak_ptr_HybridWebmPlayerSpec_ = std::weak_ptr<HybridWebmPlayerSpec>;
   inline std__weak_ptr_HybridWebmPlayerSpec_ weakify_std__shared_ptr_HybridWebmPlayerSpec_(const std::shared_ptr<HybridWebmPlayerSpec>& strong) noexcept { return strong; }
+  
+  // pragma MARK: std::optional<std::shared_ptr<HybridWebmPlayerSpec>>
+  /**
+   * Specialized version of `std::optional<std::shared_ptr<HybridWebmPlayerSpec>>`.
+   */
+  using std__optional_std__shared_ptr_HybridWebmPlayerSpec__ = std::optional<std::shared_ptr<HybridWebmPlayerSpec>>;
+  inline std::optional<std::shared_ptr<HybridWebmPlayerSpec>> create_std__optional_std__shared_ptr_HybridWebmPlayerSpec__(const std::shared_ptr<HybridWebmPlayerSpec>& value) noexcept {
+    return std::optional<std::shared_ptr<HybridWebmPlayerSpec>>(value);
+  }
+  inline bool has_value_std__optional_std__shared_ptr_HybridWebmPlayerSpec__(const std::optional<std::shared_ptr<HybridWebmPlayerSpec>>& optional) noexcept {
+    return optional.has_value();
+  }
+  inline std::shared_ptr<HybridWebmPlayerSpec> get_std__optional_std__shared_ptr_HybridWebmPlayerSpec__(const std::optional<std::shared_ptr<HybridWebmPlayerSpec>>& optional) noexcept {
+    return optional.value();
+  }
+  
+  // pragma MARK: std::shared_ptr<HybridWebmPlayerViewSpec>
+  /**
+   * Specialized version of `std::shared_ptr<HybridWebmPlayerViewSpec>`.
+   */
+  using std__shared_ptr_HybridWebmPlayerViewSpec_ = std::shared_ptr<HybridWebmPlayerViewSpec>;
+  std::shared_ptr<HybridWebmPlayerViewSpec> create_std__shared_ptr_HybridWebmPlayerViewSpec_(void* NON_NULL swiftUnsafePointer) noexcept;
+  void* NON_NULL get_std__shared_ptr_HybridWebmPlayerViewSpec_(std__shared_ptr_HybridWebmPlayerViewSpec_ cppType);
+  
+  // pragma MARK: std::weak_ptr<HybridWebmPlayerViewSpec>
+  using std__weak_ptr_HybridWebmPlayerViewSpec_ = std::weak_ptr<HybridWebmPlayerViewSpec>;
+  inline std__weak_ptr_HybridWebmPlayerViewSpec_ weakify_std__shared_ptr_HybridWebmPlayerViewSpec_(const std::shared_ptr<HybridWebmPlayerViewSpec>& strong) noexcept { return strong; }
   
   // pragma MARK: Result<bool>
   using Result_bool_ = Result<bool>;

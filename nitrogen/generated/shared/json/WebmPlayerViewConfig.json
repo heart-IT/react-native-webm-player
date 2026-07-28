@@ -1,0 +1,11 @@
+{
+  "uiViewClassName": "WebmPlayerView",
+  "supportsRawText": false,
+  "bubblingEventTypes": {},
+  "directEventTypes": {},
+  "validAttributes": {
+    "player": true,
+    "scaleMode": true,
+    "hybridRef": true
+  }
+}

@@ -33,8 +33,12 @@ target_sources(
   # Autolinking Setup
   ../nitrogen/generated/android/WebmPlayerOnLoad.cpp
   # Shared Nitrogen C++ sources
+  ../nitrogen/generated/shared/c++/HybridWebmPlayerViewSpec.cpp
+  ../nitrogen/generated/shared/c++/views/HybridWebmPlayerViewComponent.cpp
   ../nitrogen/generated/shared/c++/HybridWebmPlayerSpec.cpp
   # Android-specific Nitrogen C++ sources
+  ../nitrogen/generated/android/c++/JHybridWebmPlayerViewSpec.cpp
+  ../nitrogen/generated/android/c++/views/JHybridWebmPlayerViewStateUpdater.cpp
   ../nitrogen/generated/android/c++/JHybridWebmPlayerSpec.cpp
 )
 

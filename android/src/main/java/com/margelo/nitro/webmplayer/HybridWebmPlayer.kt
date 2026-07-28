@@ -22,6 +22,7 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.mkv.MatroskaExtractor
+import androidx.media3.ui.PlayerView
 import com.margelo.nitro.NitroModules
 import com.margelo.nitro.core.ArrayBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -69,6 +70,8 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   private var focusRequest: AudioFocusRequest? = null
   private var audioManager: AudioManager? = null
   private var statsRunnable: Runnable? = null
+  // Main-thread only, like everything else that touches ExoPlayer.
+  private var surface: PlayerView? = null
 
   private val running = AtomicBoolean(false)
   private val paused = AtomicBoolean(false)
@@ -153,6 +156,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       exo.prepare()
       exo.playWhenReady = true
       player = exo
+      surface?.player = exo
       startStatsPolling()
     } catch (e: Exception) {
       Log.e(TAG, "start failed", e)
@@ -255,6 +259,31 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       mainHandler.post { player?.setPlaybackSpeed(clamped.toFloat()) }
     }
 
+  // MARK: - Video surface
+
+  /**
+   * Called by HybridWebmPlayerView. Not on the spec: the spec is the parity
+   * contract with iOS, and a PlayerView has no meaning there.
+   *
+   * ExoPlayer is main-thread confined, and the surface may be attached before
+   * start() has finished creating the player, so binding is posted and also
+   * re-applied when the player appears.
+   */
+  fun attachSurface(target: PlayerView) {
+    mainHandler.post {
+      surface = target
+      target.player = player
+    }
+  }
+
+  fun detachSurface(target: PlayerView) {
+    mainHandler.post {
+      if (surface !== target) return@post  // a newer view already took over
+      target.player = null
+      surface = null
+    }
+  }
+
   // MARK: - Metrics
 
   override fun getMetrics(): WebmPlayerMetrics = WebmPlayerMetrics(
@@ -350,6 +379,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   private fun releaseOnMain() {
     statsRunnable?.let { mainHandler.removeCallbacks(it) }
     statsRunnable = null
+    surface?.player = null
     player?.release()
     player = null
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

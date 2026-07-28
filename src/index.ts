@@ -1,8 +1,14 @@
-import { NitroModules } from 'react-native-nitro-modules'
+import { getHostComponent, NitroModules } from 'react-native-nitro-modules'
 import type { WebmPlayer } from './specs/webm-player.nitro'
+import type { WebmPlayerViewProps } from './specs/webm-player-view.nitro'
+import WebmPlayerViewConfig from '../nitrogen/generated/shared/json/WebmPlayerViewConfig.json'
 
 export type { WebmPlayer, WebmPlayerMetrics } from './specs/webm-player.nitro'
 export { WebmPlaybackState } from './specs/webm-player.nitro'
+export type {
+  WebmPlayerViewProps,
+  WebmScaleMode,
+} from './specs/webm-player-view.nitro'
 
 /**
  * Create a player.
@@ -19,3 +25,15 @@ export { WebmPlaybackState } from './specs/webm-player.nitro'
 export function createWebmPlayer(): WebmPlayer {
   return NitroModules.createHybridObject<WebmPlayer>('WebmPlayer')
 }
+
+/**
+ * Renders a player's video.
+ *
+ * ```tsx
+ * <WebmPlayerView player={player} scaleMode="contain" style={{ flex: 1 }} />
+ * ```
+ */
+export const WebmPlayerView = getHostComponent<WebmPlayerViewProps, {}>(
+  'WebmPlayerView',
+  () => WebmPlayerViewConfig
+)

@@ -102,6 +102,18 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   }
 }
 
+- (void)detachDisplayLayer:(AVSampleBufferDisplayLayer*)layer {
+  void (^apply)(void) = ^{
+    if (self->_displayLayer != layer) return;
+    [self setDisplayLayer:nil];
+  };
+  if ([NSThread isMainThread]) {
+    apply();
+  } else {
+    dispatch_async(dispatch_get_main_queue(), apply);
+  }
+}
+
 - (BOOL)start {
   if (_running) return YES;
   _ring = std::make_unique<media::WebMStreamBuffer>(

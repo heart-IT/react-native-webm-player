@@ -15,6 +15,8 @@
 #include <fbjni/fbjni.h>
 #include <NitroModules/HybridObjectRegistry.hpp>
 
+#include "JHybridWebmPlayerViewSpec.hpp"
+#include "views/JHybridWebmPlayerViewStateUpdater.hpp"
 #include "JHybridWebmPlayerSpec.hpp"
 #include <NitroModules/DefaultConstructableObject.hpp>
 
@@ -34,12 +36,22 @@ struct JHybridWebmPlayerSpecImpl: public jni::JavaClass<JHybridWebmPlayerSpecImp
     return javaPart->getJHybridWebmPlayerSpec();
   }
 };
+struct JHybridWebmPlayerViewSpecImpl: public jni::JavaClass<JHybridWebmPlayerViewSpecImpl, JHybridWebmPlayerViewSpec::JavaPart> {
+  static constexpr auto kJavaDescriptor = "Lcom/margelo/nitro/webmplayer/HybridWebmPlayerView;";
+  static std::shared_ptr<JHybridWebmPlayerViewSpec> create() {
+    static const auto constructorFn = javaClassStatic()->getConstructor<JHybridWebmPlayerViewSpecImpl::javaobject()>();
+    jni::local_ref<JHybridWebmPlayerViewSpec::JavaPart> javaPart = javaClassStatic()->newObject(constructorFn);
+    return javaPart->getJHybridWebmPlayerViewSpec();
+  }
+};
 
 void registerAllNatives() {
   using namespace margelo::nitro;
   using namespace margelo::nitro::webmplayer;
 
   // Register native JNI methods
+  margelo::nitro::webmplayer::JHybridWebmPlayerViewSpec::CxxPart::registerNatives();
+  margelo::nitro::webmplayer::views::JHybridWebmPlayerViewStateUpdater::registerNatives();
   margelo::nitro::webmplayer::JHybridWebmPlayerSpec::CxxPart::registerNatives();
 
   // Register Nitro Hybrid Objects
@@ -47,6 +59,12 @@ void registerAllNatives() {
     "WebmPlayer",
     []() -> std::shared_ptr<HybridObject> {
       return JHybridWebmPlayerSpecImpl::create();
+    }
+  );
+  HybridObjectRegistry::registerHybridObjectConstructor(
+    "WebmPlayerView",
+    []() -> std::shared_ptr<HybridObject> {
+      return JHybridWebmPlayerViewSpecImpl::create();
     }
   );
 }

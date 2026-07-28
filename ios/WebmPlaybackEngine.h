@@ -45,6 +45,14 @@ typedef struct {
 /// Attach the layer the decoded video is presented on. Safe from any thread.
 - (void)setDisplayLayer:(nullable AVSampleBufferDisplayLayer*)layer;
 
+/// Clear the layer, but only if it is still the attached one. A view torn down
+/// after a newer one attached must not detach the newer surface.
+///
+/// NS_SWIFT_NAME because the importer otherwise strips the redundant type name
+/// and exposes this as `detach(_:)`, which reads as if it detached the engine.
+- (void)detachDisplayLayer:(AVSampleBufferDisplayLayer*)layer
+    NS_SWIFT_NAME(detachDisplayLayer(_:));
+
 - (BOOL)start;
 - (BOOL)stop;
 - (BOOL)pause;

@@ -11,6 +11,7 @@
 #import <type_traits>
 
 #include "HybridWebmPlayerSpecSwift.hpp"
+#include "HybridWebmPlayerViewSpecSwift.hpp"
 
 @interface WebmPlayerAutolinking : NSObject
 @end
@@ -25,6 +26,13 @@
     "WebmPlayer",
     []() -> std::shared_ptr<HybridObject> {
       std::shared_ptr<HybridWebmPlayerSpec> hybridObject = WebmPlayer::WebmPlayerAutolinking::createWebmPlayer();
+      return hybridObject;
+    }
+  );
+  HybridObjectRegistry::registerHybridObjectConstructor(
+    "WebmPlayerView",
+    []() -> std::shared_ptr<HybridObject> {
+      std::shared_ptr<HybridWebmPlayerViewSpec> hybridObject = WebmPlayer::WebmPlayerAutolinking::createWebmPlayerView();
       return hybridObject;
     }
   );
