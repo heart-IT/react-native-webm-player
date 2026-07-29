@@ -346,7 +346,11 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
     if (!result.audioPackets.empty()) {
       auto info = demuxer.trackInfoSnapshot();
       if ([_audioDecoder configureWithSampleRate:info.audioSampleRate
-                                        channels:info.audioChannels]) {
+                                        channels:info.audioChannels
+                                        opusHead:info.audioCodecPrivate.empty()
+                                                     ? nullptr
+                                                     : info.audioCodecPrivate.data()
+                                    opusHeadSize:info.audioCodecPrivate.size()]) {
         for (const auto& pkt : result.audioPackets) {
           if ([_audioDecoder submitPacket:pkt.data
                                    length:pkt.size

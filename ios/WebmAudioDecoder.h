@@ -20,7 +20,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Configure for the container's track parameters. Safe to call repeatedly; the
 /// decoder is rebuilt only when they actually change.
-- (BOOL)configureWithSampleRate:(int)sampleRate channels:(int)channels;
+/// `opusHead` is the track's CodecPrivate; multichannel layouts cannot be
+/// decoded without it.
+- (BOOL)configureWithSampleRate:(int)sampleRate
+                       channels:(int)channels
+                       opusHead:(nullable const uint8_t*)opusHead
+                   opusHeadSize:(size_t)opusHeadSize;
 
 /// Decode one Opus packet and enqueue it. `durationUs` comes from the container
 /// and is used to detect a missing frame ahead of this one, which is recovered

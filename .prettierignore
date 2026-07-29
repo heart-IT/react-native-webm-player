@@ -11,3 +11,6 @@ tests/fixtures/
 
 # Xcode regenerates these; formatting them creates churn on every pod install.
 *.xcassets/
+
+# Generated fixture data
+example/src/fixture.ts

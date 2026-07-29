@@ -239,6 +239,39 @@ deferred to P6.
 
 ---
 
+## Found by running it (P6)
+
+Three defects that no amount of reading had surfaced. See
+[DEVICE_VALIDATION.md](DEVICE_VALIDATION.md) for the full run output.
+
+**P6-1 · Multichannel Opus could not be decoded at all · FIXED**
+The 5.1 fixture logged `opus init failed (48000 Hz, 6 ch, err -1)` on every
+packet and produced silence. `opus_decoder_create` rejects channels > 2;
+multichannel Opus is carried as several streams plus a mapping table in the
+OpusHead and needs `opus_multistream_decoder_create`. Added
+`cpp/playback/OpusChannelMapping.h` (RFC 7845 §5.1 parser, 3 tests) and a
+multistream path in `OpusDecoderAdapter`. Verified at runtime: the error is gone.
+Note the container was right all along — ffprobe confirms the file is genuinely
+5.1, so this was an engine limitation, not a parse bug.
+
+**P6-2 · The audio renderer was fed by polling, dropping ~98% of packets · FIXED**
+`audio 1 (underruns 50)`. The engine polled `isReadyForMoreMediaData` from the
+demux thread and dropped whenever it read NO — but that property is only
+meaningful inside a `requestMediaDataWhenReadyOnQueue:` pull loop. The
+predecessor's migration doc listed pull-based feeding as a deferred "known gap";
+running it showed the deferral means audio effectively does not play. Underruns
+went 50 → 0.
+The same header also documents that _"releasing the
+AVQueuedSampleBufferRendering object without a call to stopRequestingMediaData
+will result in undefined behavior"_ — which the code never called. Fixed too.
+
+**P6-3 · The Android view manager was never registered · FIXED**
+`IllegalViewOperationException: Can't find ViewManager 'WebmPlayerView'`. Nitro
+autolinks HybridObjects but not views; on Android the generated manager only
+reaches the registry via a `BaseReactPackage`. Because the HybridObject itself
+registered fine, this surfaced only on first render — the build was green
+throughout.
+
 ## What remains
 
 Not findings — audit coverage that was never completed, carried forward:

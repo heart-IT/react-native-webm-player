@@ -3,6 +3,8 @@
 #import <AudioToolbox/AudioToolbox.h>
 
 #include <atomic>
+#include <deque>
+#include <mutex>
 #include <vector>
 
 #include "common/MediaLog.h"
@@ -12,6 +14,10 @@ namespace {
 
 // Opus tops out at 120ms per packet: 5760 frames at 48 kHz.
 constexpr int kMaxOpusFrames = 5760;
+
+// ~2s of 20ms packets. Deep enough to absorb burst arrival from a P2P feed,
+// shallow enough that a stalled renderer does not accumulate unbounded latency.
+constexpr size_t kMaxPendingBuffers = 100;
 
 CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
                                         int sampleRate, int channels,
@@ -62,6 +68,10 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
 @implementation WebmAudioDecoder {
   __weak AVSampleBufferAudioRenderer* _renderer;
+  // Decoded buffers waiting for the renderer to pull them.
+  std::deque<CMSampleBufferRef> _pending;
+  std::mutex _pendingMutex;
+  dispatch_queue_t _feedQueue;
   media::OpusDecoderAdapter _opus;
   int _sampleRate;
   int _channels;
@@ -85,19 +95,64 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   _underruns = 0;
   _framesRecovered = 0;
   _pcm.resize(static_cast<size_t>(kMaxOpusFrames) * 2);
+  _feedQueue = dispatch_queue_create("webmplayer.audio.feed", DISPATCH_QUEUE_SERIAL);
   return self;
 }
 
-- (void)setRenderer:(AVSampleBufferAudioRenderer*)renderer {
-  _renderer = renderer;
+- (void)dealloc {
+  [_renderer stopRequestingMediaData];
+  [self drainPending];
 }
 
-- (BOOL)configureWithSampleRate:(int)sampleRate channels:(int)channels {
+- (void)setRenderer:(AVSampleBufferAudioRenderer*)renderer {
+  // Every request must be cancelled before the renderer is released; the header
+  // states that releasing without it is undefined behaviour.
+  [_renderer stopRequestingMediaData];
+  _renderer = renderer;
+  if (!renderer) return;
+
+  // Pull, not push. `isReadyForMoreMediaData` is only meaningful inside this
+  // callback loop; polling it from the demux thread reports NO almost always,
+  // which silently discarded nearly every packet.
+  __weak WebmAudioDecoder* weakSelf = self;
+  [renderer requestMediaDataWhenReadyOnQueue:_feedQueue
+                                  usingBlock:^{
+    WebmAudioDecoder* strongSelf = weakSelf;
+    if (!strongSelf) return;
+    [strongSelf feedRenderer:renderer];
+  }];
+}
+
+- (void)feedRenderer:(AVSampleBufferAudioRenderer*)renderer {
+  while (renderer.isReadyForMoreMediaData) {
+    CMSampleBufferRef next = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(_pendingMutex);
+      if (_pending.empty()) return;
+      next = _pending.front();
+      _pending.pop_front();
+    }
+    [renderer enqueueSampleBuffer:next];
+    CFRelease(next);
+    _packetsDecoded.fetch_add(1);
+  }
+}
+
+- (void)drainPending {
+  std::lock_guard<std::mutex> lock(_pendingMutex);
+  for (CMSampleBufferRef sb : _pending) CFRelease(sb);
+  _pending.clear();
+}
+
+- (BOOL)configureWithSampleRate:(int)sampleRate
+                       channels:(int)channels
+                       opusHead:(const uint8_t*)opusHead
+                   opusHeadSize:(size_t)opusHeadSize {
   if (sampleRate <= 0 || channels <= 0) return NO;
   if (_opus.isValid() && sampleRate == _sampleRate && channels == _channels) {
     return YES;
   }
-  if (!_opus.initialize(sampleRate, channels)) {
+  if (!_opus.initialize(sampleRate, channels, opusHead, opusHeadSize)) {
     MEDIA_LOG_E("WebmAudioDecoder: opus init failed (%d Hz, %d ch, err %d)",
                 sampleRate, channels, _opus.lastError());
     return NO;
@@ -110,6 +165,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 }
 
 - (void)reset {
+  [self drainPending];
   // OPUS_RESET_STATE, plus force a reconfigure so the next stream gets a decoder
   // built for its own track parameters rather than the previous stream's.
   _opus.reset();
@@ -124,19 +180,29 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
       BuildLPCMSampleBuffer(_pcm.data(), frames, _sampleRate, _channels, ptsUs);
   if (!sb) return NO;
 
-  // A live producer arrives at real-time pace, so a renderer that is not ready
-  // means the session was interrupted rather than that the queue is merely deep.
-  // Drop and count instead of blocking the demux thread.
-  BOOL accepted = NO;
-  AVSampleBufferAudioRenderer* renderer = _renderer;
-  if (renderer.isReadyForMoreMediaData) {
-    [renderer enqueueSampleBuffer:sb];
-    accepted = YES;
-  } else {
-    _underruns.fetch_add(1);
+  {
+    std::lock_guard<std::mutex> lock(_pendingMutex);
+    // Drop the newest rather than the oldest: the queue is ordered by
+    // presentation time, and discarding from the front would tear a hole in
+    // audio the renderer is about to play.
+    if (_pending.size() >= kMaxPendingBuffers) {
+      _underruns.fetch_add(1);
+      CFRelease(sb);
+      return NO;
+    }
+    _pending.push_back(sb);  // ownership moves to the queue
   }
-  CFRelease(sb);
-  return accepted;
+
+  // The renderer re-invokes its block only when it transitions to ready. If it
+  // was already ready and we had nothing to give, it will not call us again —
+  // so nudge the feed queue whenever fresh data arrives.
+  AVSampleBufferAudioRenderer* renderer = _renderer;
+  if (renderer) {
+    dispatch_async(_feedQueue, ^{
+      [self feedRenderer:renderer];
+    });
+  }
+  return YES;
 }
 
 - (BOOL)submitPacket:(const uint8_t*)data
@@ -167,7 +233,6 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   if (frames <= 0) return NO;
 
   BOOL accepted = [self enqueue:frames atPts:ptsUs];
-  if (accepted) _packetsDecoded.fetch_add(1);
 
   _expectedPtsUs =
       ptsUs + (durationUs > 0

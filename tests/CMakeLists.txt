@@ -40,6 +40,7 @@ endif()
 include_directories(
     ${CPP_ROOT}
     ${CPP_ROOT}/common
+    ${CPP_ROOT}/playback
     ${CPP_ROOT}/demux
     ${CPP_ROOT}/playback
     ${CPP_ROOT}/video
