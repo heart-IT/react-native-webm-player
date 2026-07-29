@@ -1,52 +1,34 @@
 #import "WebmPlaybackEngine.h"
 #import "WebmAudioDecoder.h"
+#import "WebmDemuxPump.h"
 #import "WebmVideoDecoder.h"
 
 #import <AudioToolbox/AudioToolbox.h>
 #include <atomic>
-#include <memory>
-#include <thread>
-#include <vector>
 
 #include "common/MediaLog.h"
-#include "common/WebMStreamBuffer.h"
-#include "demux/WebmDemuxer.h"
 
-namespace {
-
-// Bytes pulled from the ring per demux pass.
-constexpr size_t kPumpChunkBytes = 64 * 1024;
-
-}  // namespace
+@interface WebmPlaybackEngine () <WebmDemuxPumpDelegate>
+@end
 
 @implementation WebmPlaybackEngine {
-  std::unique_ptr<media::WebMStreamBuffer> _ring;
+  WebmDemuxPump* _pump;
   AVSampleBufferDisplayLayer* _displayLayer;
   AVSampleBufferAudioRenderer* _audioRenderer;
   AVSampleBufferRenderSynchronizer* _synchronizer;
   WebmVideoDecoder* _videoDecoder;
   WebmAudioDecoder* _audioDecoder;
 
-  std::thread _demuxThread;
   std::atomic<bool> _running;
   std::atomic<bool> _paused;
-  std::atomic<bool> _stop;
-  // Set by resetStream() on the JS thread, consumed by the demux thread. The
-  // demuxer is owned by that thread, so it cannot be reset from here directly.
-  std::atomic<bool> _resetRequested;
+  // Latched from the pump's terminal-parse-error health event, so a failure
+  // survives stop() as it does on Android. start() clears it.
   std::atomic<bool> _failed;
   // The synchronizer's clock is the media timeline. Starting it before any
   // media exists makes it run ahead of the stream, so it is started at the
   // first sample's presentation time instead.
   std::atomic<bool> _clockStarted;
 
-  std::atomic<uint64_t> _bytesFed;
-  std::atomic<uint64_t> _audioPacketsDecoded;
-  std::atomic<uint64_t> _videoPacketsDecoded;
-  std::atomic<uint64_t> _audioUnderruns;
-  std::atomic<uint64_t> _videoFramesDropped;
-  std::atomic<int> _videoWidth;
-  std::atomic<int> _videoHeight;
   std::atomic<float> _gain;
   std::atomic<bool> _muted;
   std::atomic<float> _playbackRate;
@@ -60,21 +42,15 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   if (!self) return nil;
   _running = false;
   _paused = false;
-  _stop = false;
-  _resetRequested = false;
   _failed = false;
   _clockStarted = false;
-  _bytesFed = 0;
-  _audioPacketsDecoded = 0;
-  _videoPacketsDecoded = 0;
-  _audioUnderruns = 0;
-  _videoFramesDropped = 0;
-  _videoWidth = 0;
-  _videoHeight = 0;
   _gain = 1.0f;
   _muted = false;
   _playbackRate = 1.0f;
   _lastHealthStatus = @"idle";
+  // Outlives start/stop cycles so its cumulative counters do too.
+  _pump = [[WebmDemuxPump alloc] init];
+  _pump.delegate = self;
   return self;
 }
 
@@ -121,9 +97,6 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 
 - (BOOL)start {
   if (_running) return YES;
-  _ring = std::make_unique<media::WebMStreamBuffer>(
-      media::WebMStreamBuffer::broadcastCapacityBytes(),
-      media::WebMStreamBuffer::broadcastConfig());
 
   _audioRenderer = [[AVSampleBufferAudioRenderer alloc] init];
   _audioRenderer.muted = _muted.load();
@@ -139,21 +112,18 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 
   [self setupAudioSession];
 
-  _stop = false;
   _paused = false;
   _failed = false;
   _clockStarted = false;
   _running = true;
-  _demuxThread = std::thread([self] { [self demuxLoop]; });
+  [_pump startWithAudioDecoder:_audioDecoder videoDecoder:_videoDecoder];
   return YES;
 }
 
 - (BOOL)stop {
   if (!_running) return YES;
-  _stop = true;
   _running = false;
-  if (_ring) _ring->shutdown();
-  if (_demuxThread.joinable()) _demuxThread.join();
+  [_pump stop];
 
   if (_synchronizer) {
     [_synchronizer setRate:0];
@@ -173,7 +143,6 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   _audioDecoder = nil;
   _audioRenderer = nil;
   _synchronizer = nil;
-  _ring.reset();
   return YES;
 }
 
@@ -200,25 +169,17 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 }
 
 - (size_t)feedData:(const uint8_t*)bytes length:(size_t)length {
-  if (!_ring || !_running) return 0;
-  // Synthetic chunk boundaries, not cluster-aligned — skip the debug validator.
-  size_t wrote = _ring->write(bytes, length, /*isClusterBoundary=*/false);
-  _bytesFed.fetch_add(wrote);
-  return wrote;
+  if (!_running) return 0;
+  return [_pump feedData:bytes length:length];
 }
 
 - (BOOL)setEndOfStream {
-  if (_ring) _ring->setEndOfStream(true);
+  [_pump setEndOfStream];
   return YES;
 }
 
 - (BOOL)resetStream {
-  // Ring first, so anything the demux thread reads after it observes the flag is
-  // already post-clear. The demuxer itself lives on that thread and keeps parse
-  // state across feeds; without resetting it, the next stream's EBML header is
-  // appended to a demuxer still mid-cluster and every subsequent parse fails.
-  if (_ring) _ring->clear();
-  _resetRequested.store(true, std::memory_order_release);
+  [_pump requestReset];
   return YES;
 }
 
@@ -248,7 +209,9 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   if (_failed.load()) return WebmPlaybackStateFailed;
   if (!_running) return WebmPlaybackStateIdle;
   if (_paused) return WebmPlaybackStatePaused;
-  if (_videoPacketsDecoded.load() == 0 && _audioPacketsDecoded.load() == 0) {
+  // Read from the decoders, not from mirrored counters: an audio-only stream
+  // must leave Buffering too.
+  if (_videoDecoder.framesPresented == 0 && _audioDecoder.packetsDecoded == 0) {
     return WebmPlaybackStateBuffering;
   }
   return WebmPlaybackStatePlaying;
@@ -256,7 +219,7 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 
 - (WebmPlaybackMetrics)metrics {
   WebmPlaybackMetrics m = {0};
-  m.bytesFedTotal = _bytesFed.load();
+  m.bytesFedTotal = _pump.bytesFedTotal;
   // Read from the decoders rather than mirroring into atomics on the demux
   // thread: the renderer keeps draining after the last packet is fed, so a
   // mirror updated only while demuxing freezes mid-playback.
@@ -266,10 +229,10 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   // would otherwise look identical to playing on one platform and not the other.
   m.videoPacketsDecoded = _videoDecoder ? _videoDecoder.framesPresented : 0;
   m.audioUnderruns = _audioDecoder ? _audioDecoder.underruns : 0;
-  m.videoFramesDropped = _videoFramesDropped.load();
+  m.videoFramesDropped = _pump.videoFramesDropped;
   m.audioFramesRecovered = _audioDecoder ? _audioDecoder.framesRecovered : 0;
-  m.videoWidth = _videoWidth.load();
-  m.videoHeight = _videoHeight.load();
+  m.videoWidth = _pump.videoWidth;
+  m.videoHeight = _pump.videoHeight;
   m.gain = _gain.load();
   m.muted = _muted.load();
   m.playbackRate = _playbackRate.load();
@@ -332,112 +295,19 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   });
 }
 
-#pragma mark - Demux loop
+#pragma mark - WebmDemuxPumpDelegate
 
-- (void)demuxLoop {
-  pthread_setname_np("webmplayer.demux");
-  if (!_ring) return;
+- (void)demuxPump:(id)pump didDecodeFirstAudioAtPts:(int64_t)ptsUs {
+  [self startClockAtPts:ptsUs];
+}
 
-  media::demux::WebmDemuxer demuxer;
-  std::vector<uint8_t> chunk(kPumpChunkBytes);
-  bool firstAudioSeen = false;
-  bool firstVideoSeen = false;
-
-  [self fireHealth:@"buffering" detail:@"waiting for stream data"];
-
-  while (!_stop.load()) {
-    // Observed before reading, so every byte taken afterwards belongs to the new
-    // stream. resetStream() clears the ring before raising this.
-    if (_resetRequested.exchange(false, std::memory_order_acquire)) {
-      demuxer.reset();
-      [_audioDecoder reset];
-      firstAudioSeen = false;
-      firstVideoSeen = false;
-      _failed.store(false);
-      [self fireHealth:@"buffering" detail:@"stream reset"];
-    }
-
-    int got = _ring->read(chunk.data(), chunk.size(), 50);
-    if (got <= 0) {
-      // read() returns -1 once the ring is shut down or drained at EOS.
-      if (got < 0) {
-        [self fireHealth:@"ended" detail:@"end of stream"];
-        break;
-      }
-      continue;
-    }
-
-    // Packets point into the demuxer's internal buffer and are invalidated by
-    // the next feedData(), so everything is consumed before looping.
-    const auto& result =
-        demuxer.feedData(chunk.data(), static_cast<size_t>(got));
-
-    if (!result.audioPackets.empty()) {
-      auto info = demuxer.trackInfoSnapshot();
-      if ([_audioDecoder configureWithSampleRate:info.audioSampleRate
-                                        channels:info.audioChannels
-                                        opusHead:info.audioCodecPrivate.empty()
-                                                     ? nullptr
-                                                     : info.audioCodecPrivate.data()
-                                    opusHeadSize:info.audioCodecPrivate.size()]) {
-        for (const auto& pkt : result.audioPackets) {
-          if ([_audioDecoder submitPacket:pkt.data
-                                   length:pkt.size
-                                    ptsUs:pkt.ptsUs
-                               durationUs:pkt.durationUs]) {
-            if (!firstAudioSeen) {
-              firstAudioSeen = true;
-              [self startClockAtPts:pkt.ptsUs];
-              [self fireHealth:@"playing" detail:@"first audio frame"];
-            }
-          }
-        }
-      }
-    }
-
-    if (!result.videoPackets.empty()) {
-      auto info = demuxer.trackInfoSnapshot();
-      _videoWidth.store(info.videoWidth);
-      _videoHeight.store(info.videoHeight);
-      // The container knows the frame size, so a VP9 header the parser cannot
-      // read no longer means no video at all.
-      [_videoDecoder setContainerWidth:info.videoWidth height:info.videoHeight];
-      for (const auto& pkt : result.videoPackets) {
-        BOOL ok = [_videoDecoder submitFrame:pkt.data
-                                      length:pkt.size
-                                       ptsUs:pkt.ptsUs
-                                       isKey:pkt.isKeyFrame ? YES : NO];
-        if (ok) {
-          _videoPacketsDecoded.fetch_add(1);
-          if (!firstVideoSeen) {
-            firstVideoSeen = true;
-            [self fireHealth:@"playing" detail:@"first video frame"];
-          }
-        } else {
-          _videoFramesDropped.fetch_add(1);
-          if (!firstVideoSeen && !_videoDecoder.hardwareDecodeSupported) {
-            firstVideoSeen = true;  // report once, not per frame
-            [self fireHealth:@"playing"
-                      detail:@"audio only — no VP9 decoder on this device"];
-          }
-        }
-      }
-    }
-
-    if (!result.error.empty()) {
-      MEDIA_LOG_W("WebmPlaybackEngine: demux error: %s", result.error.c_str());
-    }
-
-    // A transient parse error is normal on a lossy feed and is logged above.
-    // The demuxer's terminal state is not: nothing downstream recovers from it,
-    // so surface it instead of looping silently.
-    if (demuxer.parseState() == media::demux::ParseState::Error) {
-      if (!_failed.exchange(true)) {
-        MEDIA_LOG_E("WebmPlaybackEngine: demuxer entered a terminal parse error");
-        [self fireHealth:@"failed" detail:@"demuxer parse failure"];
-      }
-    }
-  }
+- (void)demuxPump:(id)pump
+    didReportHealth:(NSString*)status
+             detail:(NSString*)detail {
+  // Latched here rather than read from the pump, so the state outlives the
+  // pump's own per-run flag being cleared by the next start().
+  if ([status isEqualToString:@"failed"]) _failed.store(true);
+  [self fireHealth:status detail:detail];
 }
 
 @end
