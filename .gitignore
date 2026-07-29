@@ -87,3 +87,6 @@ ios/opus/lib/
 # Local agent guidance — never committed (see CLAUDE.md TL;DR)
 CLAUDE.md
 .claude/
+
+# Xcode derived data for device builds
+example/ios/build-device/

@@ -14,14 +14,38 @@ import {
   type WebmPlayer,
 } from '@heartit/webm-player';
 import { FIXTURE_BASE64, FIXTURE_BYTES } from './src/fixture';
+import { LONG_BASE64, LONG_BYTES, LONG_SECONDS } from './src/fixtureLong';
 
-// Roughly a real chunk from a P2P transport, fed at about real time so the
-// buffer sees a live-ish arrival pattern rather than one giant write.
-const CHUNK_BYTES = 8 * 1024;
-const CHUNK_INTERVAL_MS = 15;
+const FEED_INTERVAL_MS = 50;
+// Upper bound per feedData call, so catching up after a late tick still arrives
+// as several realistic chunks rather than one large write.
+const MAX_CHUNK_BYTES = 16 * 1024;
 
-function decodeFixture(): Uint8Array {
-  const binary = global.atob(FIXTURE_BASE64);
+type Clip = {
+  name: string;
+  base64: string;
+  bytes: number;
+  seconds: number;
+};
+
+// 1s 5.1 Opus — the only clip that exercises the multistream decode path.
+const SHORT_CLIP: Clip = {
+  name: '1s 5.1',
+  base64: FIXTURE_BASE64,
+  bytes: FIXTURE_BYTES,
+  seconds: 1,
+};
+
+// 60s stereo with a burnt-in timecode, for sustained playback and drift.
+const LONG_CLIP: Clip = {
+  name: '60s',
+  base64: LONG_BASE64,
+  bytes: LONG_BYTES,
+  seconds: LONG_SECONDS,
+};
+
+function decodeBase64(b64: string): Uint8Array {
+  const binary = global.atob(b64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
@@ -41,6 +65,8 @@ export default function App(): React.JSX.Element {
   const [log, setLog] = useState<string[]>([]);
   const [stats, setStats] = useState('not started');
   const feeding = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startedAt = useRef<number>(0);
+  const clipSeconds = useRef<number>(0);
 
   const say = useCallback((line: string) => {
     setLog(prev =>
@@ -75,12 +101,27 @@ export default function App(): React.JSX.Element {
       if (!p) return;
       try {
         const m = p.getMetrics();
+        const elapsed = startedAt.current
+          ? (Date.now() - startedAt.current) / 1000
+          : 0;
+        // Drift only means something while there is still content to play.
+        // Media time stops at the end of the clip and wall time does not, so
+        // comparing them past that point reports the clip's own length as
+        // drift: at wall 100s on a 60s clip it reads -40s, which only says it
+        // ended 40s ago. Clamp the reference to the clip duration.
+        const wall = clipSeconds.current
+          ? Math.min(elapsed, clipSeconds.current)
+          : elapsed;
+        const drift = elapsed > 0 ? m.currentTimeSeconds - wall : 0;
+        const ended = clipSeconds.current > 0 && elapsed > clipSeconds.current;
         setStats(
           `${STATE_NAMES[p.playbackState] ?? '?'} · fed ${m.bytesFedTotal}B · ` +
-            `audio ${m.audioPacketsDecoded} (recovered ${m.audioFramesRecovered}, ` +
-            `underruns ${m.audioUnderruns}) · video ${m.videoPacketsDecoded} ` +
-            `(dropped ${m.videoFramesDropped}) · ${m.videoWidth}x${m.videoHeight} · ` +
-            `t=${m.currentTimeSeconds.toFixed(2)}s`,
+            `audio ${m.audioPacketsDecoded} (rec ${m.audioFramesRecovered}, ` +
+            `under ${m.audioUnderruns}) · video ${m.videoPacketsDecoded} ` +
+            `(drop ${m.videoFramesDropped}) · ${m.videoWidth}x${m.videoHeight}\n` +
+            `t=${m.currentTimeSeconds.toFixed(2)}s · wall=${wall.toFixed(1)}s · ` +
+            `drift=${drift >= 0 ? '+' : ''}${drift.toFixed(2)}s` +
+            (ended ? ` · ended (+${(elapsed - wall).toFixed(0)}s ago)` : ''),
         );
       } catch (e) {
         setStats(`getMetrics failed: ${String(e)}`);
@@ -89,31 +130,56 @@ export default function App(): React.JSX.Element {
     return () => clearInterval(id);
   }, []);
 
-  const play = useCallback(() => {
-    const p = playerRef.current;
-    if (!p) return;
-    if (feeding.current) clearInterval(feeding.current);
+  const play = useCallback(
+    (clip: Clip) => {
+      const p = playerRef.current;
+      if (!p) return;
+      if (feeding.current) clearInterval(feeding.current);
 
-    p.start();
-    say(`start() · feeding ${FIXTURE_BYTES}B in ${CHUNK_BYTES}B chunks`);
+      p.start();
+      const bytesPerSecond = clip.bytes / clip.seconds;
+      say(
+        `start() · ${clip.name} · ${clip.bytes}B at ~${Math.round(bytesPerSecond)}B/s`,
+      );
 
-    const bytes = decodeFixture();
-    let offset = 0;
-    feeding.current = setInterval(() => {
-      if (offset >= bytes.length) {
-        clearInterval(feeding.current!);
-        feeding.current = null;
-        p.setEndOfStream();
-        say('fixture fully fed · setEndOfStream()');
-        return;
-      }
-      const end = Math.min(offset + CHUNK_BYTES, bytes.length);
-      // slice() gives a fresh buffer, so .buffer is exactly this chunk.
-      const accepted = p.feedData(bytes.slice(offset, end).buffer);
-      if (!accepted) say(`feedData rejected at offset ${offset} (ring full)`);
-      offset = end;
-    }, CHUNK_INTERVAL_MS);
-  }, [say]);
+      const bytes = decodeBase64(clip.base64);
+      // Deliberately after decoding, so base64 time is not charged to drift.
+      // What remains in the gap is real pipeline latency: bytes sit in the ring
+      // until the demuxer and decoders catch up.
+      startedAt.current = Date.now();
+      clipSeconds.current = clip.seconds;
+      let offset = 0;
+      feeding.current = setInterval(() => {
+        // Target derived from elapsed time, not tick count. setInterval fires
+        // late under JS load, and a per-tick byte budget never makes that up —
+        // the feed then runs slower than real time and the player starves,
+        // which reads as playback drift when it is really a starved input.
+        const elapsed = (Date.now() - startedAt.current) / 1000;
+        const target = Math.min(
+          bytes.length,
+          Math.floor(bytesPerSecond * elapsed),
+        );
+
+        while (offset < target) {
+          const end = Math.min(offset + MAX_CHUNK_BYTES, target);
+          // slice() gives a fresh buffer, so .buffer is exactly this chunk.
+          if (!p.feedData(bytes.slice(offset, end).buffer)) {
+            say(`feedData rejected at ${offset} (ring full)`);
+            break;
+          }
+          offset = end;
+        }
+
+        if (offset >= bytes.length) {
+          clearInterval(feeding.current!);
+          feeding.current = null;
+          p.setEndOfStream();
+          say('fully fed · setEndOfStream()');
+        }
+      }, FEED_INTERVAL_MS);
+    },
+    [say],
+  );
 
   // Auto-start once, so an unattended run (simulator smoke test, CI) exercises
   // the whole path without needing a tap. The buttons stay for device testing.
@@ -121,7 +187,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     if (!player || autoStarted.current) return;
     autoStarted.current = true;
-    const id = setTimeout(() => play(), 1000);
+    const id = setTimeout(() => play(LONG_CLIP), 1000);
     return () => clearTimeout(id);
   }, [player, play]);
 
@@ -156,8 +222,14 @@ export default function App(): React.JSX.Element {
       <Text style={styles.stats}>{stats}</Text>
 
       <View style={styles.row}>
-        <TouchableOpacity style={styles.button} onPress={play}>
-          <Text style={styles.buttonText}>Play fixture</Text>
+        <TouchableOpacity style={styles.button} onPress={() => play(LONG_CLIP)}>
+          <Text style={styles.buttonText}>Play 60s</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => play(SHORT_CLIP)}
+        >
+          <Text style={styles.buttonText}>1s 5.1</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.button} onPress={reset}>
           <Text style={styles.buttonText}>Reset</Text>

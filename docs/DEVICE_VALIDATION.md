@@ -24,6 +24,35 @@ device disproved them:
 - _"Audio is barely decoding."_ Audio was playing correctly the whole time; the
   on-screen count was a stale mirror that stopped updating once feeding ended.
 
+## Sustained playback (60s)
+
+A second fixture — 60s, 512x288 VP9 + stereo Opus, with a burnt-in timecode and
+a beep on every second boundary — covers sustained arrival rather than a
+one-shot decode. Confirmed on the iPhone 11: video plays, beeps are audible.
+
+**Result: sync holds for the full 60s of content.** Drift stays near zero for the
+whole clip on the device.
+
+Getting a trustworthy number out of this took two harness fixes, and neither bug
+was in the player. Both are worth knowing about, because both produce a large
+negative drift that looks exactly like a failing player:
+
+1. **Starved input.** The feeder computed a byte budget per timer tick, but
+   `setInterval` fires late under JS load and a per-tick budget never makes that
+   up. It delivered ~74% of real-time rate, so the player ran out of data and
+   drift grew to -8.4s over a minute. The feeder now derives its target from
+   elapsed time and self-corrects, which tracks 99.9% of real-time rate.
+2. **Measuring past the end of the clip.** Media time stops when the clip ends;
+   wall time does not. On a 60s clip left running to wall=100s, the reported
+   drift was -40s — which is not drift at all, just the 40s that elapsed after
+   playback finished. The measurement now clamps its reference to the clip
+   duration and marks the run `ended`.
+
+The lesson for reading this metric: `drift` is only meaningful while content is
+still arriving _and_ still playing. Outside that window it measures the harness.
+Check `fed` against elapsed time, and check whether the clip has ended, before
+concluding anything about playback.
+
 ## What has been executed, and where
 
 Runs were done on the **iOS Simulator (iPhone 17, iOS 26.4)** and the
@@ -82,10 +111,10 @@ the simulator caveats above do not apply.
 
 **iOS**
 
-- [ ] Video renders (this settles finding 2 above)
-- [ ] Audio is audible, and `audio N` climbs past 1 (settles finding 1)
-- [ ] `t=` tracks media position, not wall-clock (settles finding 3)
-- [ ] A/V stay in sync across a 60s continuous feed
+- [x] Video renders (this settles finding 2 above)
+- [x] Audio is audible, and `audio N` climbs past 1 (settles finding 1)
+- [x] `t=` tracks media position, not wall-clock (settles finding 3)
+- [x] A/V stay in sync across a 60s continuous feed
 - [ ] Backgrounding pauses, foregrounding resumes without artefacts
 - [ ] Route change (speaker ↔ wired ↔ Bluetooth) keeps playback going and fires
       `setRouteChangeCallback`
