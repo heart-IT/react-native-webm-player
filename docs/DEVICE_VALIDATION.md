@@ -9,6 +9,21 @@ npm install
 cd example && npm run ios      # or: npm run android
 ```
 
+## Physical device: validated
+
+**iPhone 11 (A13), iOS 26.5.2, Release build.** After the fixes below, video
+renders, audio is audible, and the packet counts and media position all read
+correctly — matching Android on the same fixture.
+
+Two assumptions from the simulator round turned out to be **wrong**, and only the
+device disproved them:
+
+- _"The A13 has no VP9 hardware decoder."_ It does. VideoToolbox decoded all 24
+  frames. The black screen was ours: decoded frames were being discarded after
+  decode, at the display layer.
+- _"Audio is barely decoding."_ Audio was playing correctly the whole time; the
+  on-screen count was a stale mirror that stopped updating once feeding ended.
+
 ## What has been executed, and where
 
 Runs were done on the **iOS Simulator (iPhone 17, iOS 26.4)** and the
@@ -28,7 +43,7 @@ size, correct media position, and a decoded frame visibly on screen. The ring,
 demuxer, JNI bridge, ExoPlayer DataSource, view and health path are all confirmed
 end to end.
 
-### iOS — partially working
+### iOS — simulator run (superseded by the device run above)
 
 ```
 fed 45863B · audio 1 (recovered 0, underruns 0) · video 0 (dropped 24)
@@ -41,7 +56,8 @@ Confirmed working: HybridObject + view registration, `createWebmPlayer`,
 from the container), track parsing, health transitions, `setEndOfStream`, route
 reporting, and multichannel Opus decode.
 
-Three things remain unresolved and **need a physical device**:
+Three things looked unresolved here; the device settled all three, and each
+turned out to be a real defect rather than a simulator artifact:
 
 1. **Audio reaches the renderer but only one buffer is pulled.** Underruns are 0
    and the queue never saturates, so buffers are being produced and queued; the

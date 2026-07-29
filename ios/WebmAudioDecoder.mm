@@ -72,6 +72,9 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   std::deque<CMSampleBufferRef> _pending;
   std::mutex _pendingMutex;
   dispatch_queue_t _feedQueue;
+  // Whether a media-data request is currently outstanding. Touched only on
+  // _feedQueue, so it needs no lock.
+  BOOL _requesting;
   media::OpusDecoderAdapter _opus;
   int _sampleRate;
   int _channels;
@@ -83,6 +86,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   std::atomic<uint64_t> _packetsDecoded;
   std::atomic<uint64_t> _underruns;
   std::atomic<uint64_t> _framesRecovered;
+  std::atomic<int64_t> _lastPresentedPtsUs;
 }
 
 - (instancetype)init {
@@ -94,26 +98,37 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   _packetsDecoded = 0;
   _underruns = 0;
   _framesRecovered = 0;
+  _lastPresentedPtsUs = -1;
   _pcm.resize(static_cast<size_t>(kMaxOpusFrames) * 2);
   _feedQueue = dispatch_queue_create("webmplayer.audio.feed", DISPATCH_QUEUE_SERIAL);
   return self;
 }
 
 - (void)dealloc {
-  [_renderer stopRequestingMediaData];
+  if (_requesting) [_renderer stopRequestingMediaData];
   [self drainPending];
 }
 
 - (void)setRenderer:(AVSampleBufferAudioRenderer*)renderer {
   // Every request must be cancelled before the renderer is released; the header
   // states that releasing without it is undefined behaviour.
-  [_renderer stopRequestingMediaData];
+  if (_requesting) {
+    [_renderer stopRequestingMediaData];
+    _requesting = NO;
+  }
   _renderer = renderer;
   if (!renderer) return;
+  dispatch_async(_feedQueue, ^{
+    [self armRequestFor:renderer];
+  });
+}
 
-  // Pull, not push. `isReadyForMoreMediaData` is only meaningful inside this
-  // callback loop; polling it from the demux thread reports NO almost always,
-  // which silently discarded nearly every packet.
+// Pull, not push. `isReadyForMoreMediaData` is only meaningful inside this
+// callback loop; polling it from the demux thread reported NO almost always and
+// silently discarded nearly every packet.
+- (void)armRequestFor:(AVSampleBufferAudioRenderer*)renderer {
+  if (_requesting) return;
+  _requesting = YES;
   __weak WebmAudioDecoder* weakSelf = self;
   [renderer requestMediaDataWhenReadyOnQueue:_feedQueue
                                   usingBlock:^{
@@ -128,13 +143,26 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
     CMSampleBufferRef next = nullptr;
     {
       std::lock_guard<std::mutex> lock(_pendingMutex);
-      if (_pending.empty()) return;
+      if (_pending.empty()) {
+        // Out of data while the renderer still wants more. Returning here would
+        // end the requests silently — the renderer only re-invokes the block
+        // when it *becomes* ready, which it already is. Cancel explicitly and
+        // re-arm when the next packet arrives.
+        _requesting = NO;
+        [renderer stopRequestingMediaData];
+        return;
+      }
       next = _pending.front();
       _pending.pop_front();
     }
+    CMTime pts = CMSampleBufferGetPresentationTimeStamp(next);
     [renderer enqueueSampleBuffer:next];
     CFRelease(next);
     _packetsDecoded.fetch_add(1);
+    if (CMTIME_IS_VALID(pts)) {
+      _lastPresentedPtsUs.store(
+          CMTimeGetSeconds(pts) * 1000000, std::memory_order_relaxed);
+    }
   }
 }
 
@@ -193,13 +221,10 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
     _pending.push_back(sb);  // ownership moves to the queue
   }
 
-  // The renderer re-invokes its block only when it transitions to ready. If it
-  // was already ready and we had nothing to give, it will not call us again —
-  // so nudge the feed queue whenever fresh data arrives.
   AVSampleBufferAudioRenderer* renderer = _renderer;
   if (renderer) {
     dispatch_async(_feedQueue, ^{
-      [self feedRenderer:renderer];
+      [self armRequestFor:renderer];
     });
   }
   return YES;
@@ -251,6 +276,10 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
 - (uint64_t)framesRecovered {
   return _framesRecovered.load();
+}
+
+- (int64_t)lastPresentedPtsUs {
+  return _lastPresentedPtsUs.load();
 }
 
 @end

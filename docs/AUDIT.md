@@ -272,6 +272,45 @@ reaches the registry via a `BaseReactPackage`. Because the HybridObject itself
 registered fine, this surfaced only on first render — the build was green
 throughout.
 
+## Found on a physical device
+
+iPhone 11 (A13) / iOS 26.5.2. Four further defects, none of which the simulator,
+the emulator, the host tests or any amount of reading had surfaced.
+
+**P6-4 · Audio metrics froze mid-playback · FIXED**
+The engine mirrored the audio decoder's counters into atomics _inside the demux
+loop_, which stops running once the stream is fully fed — while the renderer
+keeps draining for another second. The count froze at 2 while audio played fine.
+Metrics now read the decoders directly.
+
+**P6-5 · Decoded video frames were silently dropped at the display layer · FIXED**
+VideoToolbox decoded every frame on the A13, then the VideoToolbox output
+callback discarded any frame the layer was not instantaneously ready for:
+`if (layer.isReadyForMoreMediaData) enqueue…`, with no counter. The predecessor's
+migration doc had flagged this exact line as an unwired counter and deferred it.
+`AVSampleBufferDisplayLayer` conforms to `AVQueuedSampleBufferRendering`, so it
+now uses the same pull model as audio, with a bounded backlog and a failed-status
+flush.
+
+**P6-6 · `currentTimeSeconds` reported wall-clock · FIXED**
+`AVSampleBufferRenderSynchronizer.currentTime` runs continuously once started, so
+a 1-second fixture read 50s after sitting for a minute. Anchoring the clock to
+the first sample's PTS (`setRate:time:`) was necessary but not sufficient; the
+metric now reports the last presented timestamp, which is the stream's own
+timeline and matches Android.
+
+**P6-7 · The two platforms counted different things · FIXED**
+Android's `videoPacketsDecoded` came from `renderedOutputBufferCount` — frames
+actually rendered — while iOS counted frames merely submitted to the decoder.
+That is why `video 24 (dropped 0)` sat happily beside a black screen. iOS now
+counts frames that reached the layer.
+
+The pull-model contract is the thread running through P6-2 and P6-5: on both the
+audio renderer and the display layer, returning from the callback while the
+receiver is still ready silently ends the requests. `stopRequestingMediaData` and
+re-arming on new data is the documented pairing, and getting it wrong degrades
+quietly rather than failing.
+
 ## What remains
 
 Not findings — audit coverage that was never completed, carried forward:

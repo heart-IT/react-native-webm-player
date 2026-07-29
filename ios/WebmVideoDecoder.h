@@ -31,6 +31,15 @@ NS_ASSUME_NONNULL_BEGIN
               ptsUs:(int64_t)ptsUs
               isKey:(BOOL)isKey;
 
+/// Whether VideoToolbox reports a usable VP9 decoder on this device. When NO,
+/// no session can be created and every frame is dropped — the single most
+/// useful thing to know when a device shows no picture.
+@property(nonatomic, readonly) BOOL hardwareDecodeSupported;
+
+/// Frames actually handed to the display layer. Diverging from the submitted
+/// count means frames are decoding but never reaching the screen.
+@property(nonatomic, readonly) uint64_t framesPresented;
+
 /// Drain in-flight frames, invalidate the session, release format desc.
 /// Safe to call multiple times.
 - (void)shutdown;

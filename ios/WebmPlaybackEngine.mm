@@ -35,6 +35,10 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   // demuxer is owned by that thread, so it cannot be reset from here directly.
   std::atomic<bool> _resetRequested;
   std::atomic<bool> _failed;
+  // The synchronizer's clock is the media timeline. Starting it before any
+  // media exists makes it run ahead of the stream, so it is started at the
+  // first sample's presentation time instead.
+  std::atomic<bool> _clockStarted;
 
   std::atomic<uint64_t> _bytesFed;
   std::atomic<uint64_t> _audioPacketsDecoded;
@@ -59,6 +63,7 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   _stop = false;
   _resetRequested = false;
   _failed = false;
+  _clockStarted = false;
   _bytesFed = 0;
   _audioPacketsDecoded = 0;
   _videoPacketsDecoded = 0;
@@ -137,10 +142,9 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   _stop = false;
   _paused = false;
   _failed = false;
+  _clockStarted = false;
   _running = true;
   _demuxThread = std::thread([self] { [self demuxLoop]; });
-
-  [_synchronizer setRate:_playbackRate.load()];
   return YES;
 }
 
@@ -181,7 +185,9 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 
 - (BOOL)resume {
   _paused = false;
-  if (_synchronizer) [_synchronizer setRate:_playbackRate.load()];
+  if (_synchronizer && _clockStarted.load()) {
+    [_synchronizer setRate:_playbackRate.load()];
+  }
   return YES;
 }
 
@@ -230,7 +236,9 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 
 - (BOOL)setPlaybackRate:(float)rate {
   _playbackRate = rate;
-  if (_synchronizer && _running && !_paused) [_synchronizer setRate:rate];
+  if (_synchronizer && _running && !_paused && _clockStarted.load()) {
+    [_synchronizer setRate:rate];
+  }
   return YES;
 }
 
@@ -249,9 +257,15 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 - (WebmPlaybackMetrics)metrics {
   WebmPlaybackMetrics m = {0};
   m.bytesFedTotal = _bytesFed.load();
-  m.audioPacketsDecoded = _audioPacketsDecoded.load();
-  m.videoPacketsDecoded = _videoPacketsDecoded.load();
-  m.audioUnderruns = _audioUnderruns.load();
+  // Read from the decoders rather than mirroring into atomics on the demux
+  // thread: the renderer keeps draining after the last packet is fed, so a
+  // mirror updated only while demuxing freezes mid-playback.
+  m.audioPacketsDecoded = _audioDecoder ? _audioDecoder.packetsDecoded : 0;
+  // Frames that reached the display layer, not frames handed to VideoToolbox.
+  // Android reports renderedOutputBufferCount, so submitting-but-never-showing
+  // would otherwise look identical to playing on one platform and not the other.
+  m.videoPacketsDecoded = _videoDecoder ? _videoDecoder.framesPresented : 0;
+  m.audioUnderruns = _audioDecoder ? _audioDecoder.underruns : 0;
   m.videoFramesDropped = _videoFramesDropped.load();
   m.audioFramesRecovered = _audioDecoder ? _audioDecoder.framesRecovered : 0;
   m.videoWidth = _videoWidth.load();
@@ -259,10 +273,11 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
   m.gain = _gain.load();
   m.muted = _muted.load();
   m.playbackRate = _playbackRate.load();
-  if (_synchronizer) {
-    CMTime t = [_synchronizer currentTime];
-    if (CMTIME_IS_VALID(t)) m.currentTimeSeconds = CMTimeGetSeconds(t);
-  }
+  // The synchronizer's clock keeps advancing once started, so after a stream
+  // ends it reports wall-clock rather than position. The last presented
+  // timestamp is the stream's own timeline, and matches what Android reports.
+  int64_t lastPts = _audioDecoder ? _audioDecoder.lastPresentedPtsUs : -1;
+  if (lastPts >= 0) m.currentTimeSeconds = static_cast<double>(lastPts) / 1000000.0;
   return m;
 }
 
@@ -301,6 +316,20 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
     MEDIA_LOG_E("WebmPlaybackEngine: audio session activate failed: %s",
                 err.localizedDescription.UTF8String);
   }
+}
+
+// Anchors the media timeline to the stream's own timestamps. Without this the
+// synchronizer counts from zero at the set rate the moment start() is called,
+// so currentTime reports wall-clock since start rather than stream position.
+- (void)startClockAtPts:(int64_t)ptsUs {
+  if (_clockStarted.exchange(true)) return;
+  AVSampleBufferRenderSynchronizer* sync = _synchronizer;
+  if (!sync) return;
+  float rate = _paused.load() ? 0.0f : _playbackRate.load();
+  CMTime start = CMTimeMake(ptsUs, 1000000);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [sync setRate:rate time:start];
+  });
 }
 
 #pragma mark - Demux loop
@@ -358,12 +387,11 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
                                durationUs:pkt.durationUs]) {
             if (!firstAudioSeen) {
               firstAudioSeen = true;
+              [self startClockAtPts:pkt.ptsUs];
               [self fireHealth:@"playing" detail:@"first audio frame"];
             }
           }
         }
-        _audioPacketsDecoded.store(_audioDecoder.packetsDecoded);
-        _audioUnderruns.store(_audioDecoder.underruns);
       }
     }
 
@@ -387,6 +415,11 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
           }
         } else {
           _videoFramesDropped.fetch_add(1);
+          if (!firstVideoSeen && !_videoDecoder.hardwareDecodeSupported) {
+            firstVideoSeen = true;  // report once, not per frame
+            [self fireHealth:@"playing"
+                      detail:@"audio only — no VP9 decoder on this device"];
+          }
         }
       }
     }

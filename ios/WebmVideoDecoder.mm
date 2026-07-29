@@ -1,6 +1,10 @@
 #import "WebmVideoDecoder.h"
 
 #import <VideoToolbox/VideoToolbox.h>
+
+#include <atomic>
+#include <deque>
+#include <mutex>
 #include "video/VP9HeaderParser.h"
 #include "common/MediaLog.h"
 
@@ -22,6 +26,7 @@ NSData* BuildVpcCConfig(int profile) {
 }  // namespace
 
 @implementation WebmVideoDecoder {
+    // synthesised below from _hwSupported
     __weak AVSampleBufferDisplayLayer* _layer;
     VTDecompressionSessionRef _session;
     CMVideoFormatDescriptionRef _formatDesc;
@@ -32,6 +37,13 @@ NSData* BuildVpcCConfig(int profile) {
     int _containerHeight;
     BOOL _hwSupported;
     dispatch_queue_t _renderQueue;
+    // Decoded frames waiting for the layer to pull them. Enqueuing directly from
+    // the VideoToolbox callback dropped every frame the layer was not
+    // instantaneously ready for, which is most of them.
+    std::deque<CMSampleBufferRef> _pending;
+    std::mutex _pendingMutex;
+    BOOL _requesting;  // _renderQueue only
+    std::atomic<uint64_t> _framesPresented;
 }
 
 - (instancetype)init {
@@ -43,10 +55,60 @@ NSData* BuildVpcCConfig(int profile) {
         VTRegisterSupplementalVideoDecoderIfAvailable(kVP9CodecType);
     }
     _hwSupported = VTIsHardwareDecodeSupported(kVP9CodecType);
+    if (!_hwSupported) {
+        MEDIA_LOG_E("WebmVideoDecoder: no VP9 decoder on this device; video cannot play");
+    }
     return self;
 }
 
 - (void)dealloc { [self shutdown]; }
+
+- (BOOL)hardwareDecodeSupported { return _hwSupported; }
+
+- (uint64_t)framesPresented { return _framesPresented.load(); }
+
+- (void)armRequest {
+    AVSampleBufferDisplayLayer* layer = _layer;
+    if (!layer || _requesting) return;
+    _requesting = YES;
+    __weak WebmVideoDecoder* weakSelf = self;
+    [layer requestMediaDataWhenReadyOnQueue:_renderQueue usingBlock:^{
+        [weakSelf feedLayer:layer];
+    }];
+}
+
+- (void)feedLayer:(AVSampleBufferDisplayLayer*)layer {
+    if (layer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+        MEDIA_LOG_E("WebmVideoDecoder: display layer failed: %s",
+                    layer.error.localizedDescription.UTF8String);
+        [layer flush];
+    }
+    while (layer.isReadyForMoreMediaData) {
+        CMSampleBufferRef next = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(_pendingMutex);
+            if (_pending.empty()) {
+                // Same contract as the audio renderer: returning while the layer
+                // is still ready ends the requests, so cancel and re-arm when the
+                // next frame is decoded.
+                _requesting = NO;
+                [layer stopRequestingMediaData];
+                return;
+            }
+            next = _pending.front();
+            _pending.pop_front();
+        }
+        [layer enqueueSampleBuffer:next];
+        CFRelease(next);
+        _framesPresented.fetch_add(1);
+    }
+}
+
+- (void)drainPending {
+    std::lock_guard<std::mutex> lock(_pendingMutex);
+    for (CMSampleBufferRef sb : _pending) CFRelease(sb);
+    _pending.clear();
+}
 
 - (void)setOutputLayer:(AVSampleBufferDisplayLayer*)layer { _layer = layer; }
 
@@ -58,7 +120,7 @@ NSData* BuildVpcCConfig(int profile) {
 - (BOOL)ensureSession:(int)width height:(int)height profile:(int)profile {
     if (_session && width == _width && height == _height && profile == _profile) return YES;
     [self shutdownSession];
-    if (!_hwSupported) return NO;
+    if (!_hwSupported) return NO;  // already logged once at init
 
     NSData* vpcc = BuildVpcCConfig(profile);
     NSDictionary* extensions = @{
@@ -160,13 +222,19 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     CFRelease(outFmt);
     if (s != noErr || !sample) return;
 
-    AVSampleBufferDisplayLayer* layer = self_->_layer;
-    CFRetain(sample);
+    {
+        std::lock_guard<std::mutex> lock(self_->_pendingMutex);
+        // Bound the backlog at ~1s of 30fps video; a layer that stops pulling
+        // must not grow this without limit.
+        if (self_->_pending.size() >= 30) {
+            CFRelease(sample);
+            return;
+        }
+        self_->_pending.push_back(sample);  // ownership moves to the queue
+    }
     dispatch_async(self_->_renderQueue, ^{
-        if (layer && layer.isReadyForMoreMediaData) [layer enqueueSampleBuffer:sample];
-        CFRelease(sample);
+        [self_ armRequest];
     });
-    CFRelease(sample);
 }
 
 - (void)shutdownSession {
@@ -184,6 +252,11 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
 
 - (void)shutdown {
     [self shutdownSession];
+    if (_requesting) {
+        [_layer stopRequestingMediaData];
+        _requesting = NO;
+    }
+    [self drainPending];
     // Flush the render queue to ensure no enqueued blocks reference stale buffers.
     dispatch_sync(_renderQueue, ^{});
 }

@@ -44,6 +44,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) uint64_t underruns;
 /// Frames reconstructed from FEC or concealed by PLC after a detected gap.
 @property(nonatomic, readonly) uint64_t framesRecovered;
+/// Presentation time of the most recent buffer handed to the renderer, in
+/// microseconds. -1 before anything has played.
+@property(nonatomic, readonly) int64_t lastPresentedPtsUs;
 
 @end
 
