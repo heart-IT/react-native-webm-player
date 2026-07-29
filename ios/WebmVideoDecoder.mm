@@ -282,8 +282,33 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
 }
 
 - (void)resume {
-    std::lock_guard<std::mutex> lock(_sessionMutex);
-    _suspended = NO;
+    {
+        std::lock_guard<std::mutex> lock(_sessionMutex);
+        _suspended = NO;
+    }
+
+    AVSampleBufferDisplayLayer* layer = _layer;
+    if (!layer) return;
+    // Losing the foreground leaves the layer in AVQueuedSampleBufferRenderingStatusFailed,
+    // and it only leaves that state on a -flush. The flush in feedLayer cannot do it: a
+    // failed layer never becomes ready for more media data, so the request block it runs
+    // from is never invoked again. Waiting to be asked means never being asked, and the
+    // picture stays frozen even though the decoder recovered at the next keyframe.
+    dispatch_async(_renderQueue, ^{
+        MEDIA_LOG_I("WebmVideoDecoder: resume, layer status %ld requiresFlush %d",
+                    (long)layer.status, (int)layer.requiresFlushToResumeDecoding);
+        if (layer.status == AVQueuedSampleBufferRenderingStatusFailed ||
+            layer.requiresFlushToResumeDecoding) {
+            [layer flush];
+        }
+        // Re-arm from scratch: the request this decoder installed before the trip is
+        // dead along with the layer's old status.
+        if (self->_requesting) {
+            self->_requesting = NO;
+            [layer stopRequestingMediaData];
+        }
+        [self armRequest];
+    });
 }
 
 - (void)shutdown {
