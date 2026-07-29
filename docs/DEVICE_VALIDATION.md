@@ -137,6 +137,50 @@ discarded went from 401 to **0**, drift +0.07s, playback continued normally.
 The simulator does not suspend the process, so it cannot settle whether the media
 clock survives a real suspension — that needs the device, and is listed below.
 
+### OPEN: video does not return after a background trip (iOS device)
+
+**Status: unresolved.** Confirmed twice on the iPhone 11: after backgrounding for
+~30s, audio resumes but the picture stays frozen. Everything below is what has
+been ruled in or out, so the next session does not repeat it.
+
+Ruled **out**:
+
+- _Not a keyframe famine._ The 60s fixture has **30 keyframes, one every 2s**
+  (`ffprobe` over the decoded fixture, counted via named JSON fields — a CSV
+  query gave a wrong answer first because ffprobe emits fields in its own order,
+  not the requested one). The decoder had a recovery point every 2 seconds.
+- _Not the `ensureSession` early-return._ `shutdownSession` zeroes
+  `_width/_height/_profile`, so the guard cannot return a stale session.
+
+Ruled **in** (partially): the display layer is left in
+`AVQueuedSampleBufferRenderingStatusFailed` after the app loses the foreground,
+and it only leaves that state on `-flush`. The flush inside `feedLayer` cannot
+do it, because a failed layer never becomes ready for more media data and so the
+`requestMediaDataWhenReadyOnQueue:` block it runs from is never invoked again.
+
+An explicit flush + re-arm on resume was written (uncommitted, in
+`WebmVideoDecoder.resume`) and **did not fix it**, so at least one more cause is
+in play. Candidates not yet tested:
+
+1. The `AVSampleBufferRenderSynchronizer` may need the layer re-added as a
+   renderer after the failure, not just flushed.
+2. `_pending` frames enqueued before the trip carry timestamps behind the
+   resumed timebase and may all be discarded as late, with newly decoded frames
+   never arriving because the VP9 session did not actually rebuild.
+3. The VP9 session rebuild itself is unverified — no evidence either way yet.
+
+Blocking the diagnosis: **no working device log capture.** `MEDIA_LOG` goes to
+`os_log` (subsystem `com.heartit.webmplayer`), and neither route worked:
+`idevicesyslog` reads the legacy syslog and captured 339 lines with none of ours;
+`log stream --device-name` does not exist on this macOS; `devicectl device
+console` is not a subcommand, and `process launch --console` forwards stdio,
+which `os_log` does not use. Next attempt: Console.app with the device selected,
+or `sudo log collect --device-udid <udid>` and query the archive. Getting logs
+working is the first step — the fix attempts so far have been blind.
+
+Note for whoever picks this up: `log` is aliased to `git log` in this shell, so
+scripted captures must use `/usr/bin/log`.
+
 ### Known limitation: what `currentTimeSeconds` measures
 
 It is the presentation timestamp of the last buffer _handed to the renderer_
