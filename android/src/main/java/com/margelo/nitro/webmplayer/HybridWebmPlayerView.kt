@@ -24,7 +24,9 @@ class HybridWebmPlayerView(context: Context) : HybridWebmPlayerViewSpec() {
     PlayerView(context).apply {
       useController = false
       setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
-      setUseArtwork(false)
+      // Not setUseArtwork(false): media3 1.8.0 inverts it, mapping false to
+      // ARTWORK_DISPLAY_MODE_FIT, so the deprecated call switched artwork on.
+      setArtworkDisplayMode(PlayerView.ARTWORK_DISPLAY_MODE_OFF)
       setShutterBackgroundColor(SHUTTER_COLOR)
     }
 
