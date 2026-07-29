@@ -1,6 +1,7 @@
 #import "WebmPlaybackEngine.h"
 #import "WebmAudioDecoder.h"
 #import "WebmDemuxPump.h"
+#import "WebmLifecycleObserver.h"
 #import "WebmVideoDecoder.h"
 
 #import <AudioToolbox/AudioToolbox.h>
@@ -13,6 +14,7 @@
 
 @implementation WebmPlaybackEngine {
   WebmDemuxPump* _pump;
+  WebmLifecycleObserver* _lifecycle;
   AVSampleBufferDisplayLayer* _displayLayer;
   AVSampleBufferAudioRenderer* _audioRenderer;
   AVSampleBufferRenderSynchronizer* _synchronizer;
@@ -21,6 +23,9 @@
 
   std::atomic<bool> _running;
   std::atomic<bool> _paused;
+  // Backgrounded is kept apart from _paused: resuming must not start playing a
+  // stream the user had explicitly paused before backgrounding.
+  std::atomic<bool> _backgrounded;
   // Latched from the pump's terminal-parse-error health event, so a failure
   // survives stop() as it does on Android. start() clears it.
   std::atomic<bool> _failed;
@@ -42,6 +47,7 @@
   if (!self) return nil;
   _running = false;
   _paused = false;
+  _backgrounded = false;
   _failed = false;
   _clockStarted = false;
   _gain = 1.0f;
@@ -51,6 +57,11 @@
   // Outlives start/stop cycles so its cumulative counters do too.
   _pump = [[WebmDemuxPump alloc] init];
   _pump.delegate = self;
+
+  __weak WebmPlaybackEngine* weakSelf = self;
+  _lifecycle = [[WebmLifecycleObserver alloc]
+      initWithOnBackground:^{ [weakSelf suspendForBackground]; }
+              onForeground:^{ [weakSelf resumeFromForeground]; }];
   return self;
 }
 
@@ -113,6 +124,7 @@
   [self setupAudioSession];
 
   _paused = false;
+  _backgrounded = false;
   _failed = false;
   _clockStarted = false;
   _running = true;
@@ -149,15 +161,43 @@
 - (BOOL)pause {
   _paused = true;
   if (_synchronizer) [_synchronizer setRate:0];
+  [_pump setPaused:YES];
   return YES;
 }
 
 - (BOOL)resume {
   _paused = false;
+  // Backgrounded playback stays stopped until the app returns, whatever JS asks
+  // for: the decoder has no session and the audio session may be inactive.
+  if (_backgrounded.load()) return YES;
+  [_pump setPaused:NO];
   if (_synchronizer && _clockStarted.load()) {
     [_synchronizer setRate:_playbackRate.load()];
   }
   return YES;
+}
+
+- (void)suspendForBackground {
+  if (!_running.load() || _backgrounded.exchange(true)) return;
+  // Rate 0 rather than leaving it running: the synchronizer's timebase is driven
+  // by the host clock and keeps advancing while the process is suspended, so a
+  // running rate would return from a 30s background trip 30s ahead of the audio
+  // that actually played.
+  if (_synchronizer) [_synchronizer setRate:0];
+  [_pump setPaused:YES];
+  [_videoDecoder suspend];
+}
+
+- (void)resumeFromForeground {
+  if (!_running.load() || !_backgrounded.exchange(false)) return;
+  [_videoDecoder resume];
+  [_pump setPaused:NO];
+  // iOS may have deactivated the session while we were away; reactivating is a
+  // no-op if it did not.
+  [self setupAudioSession];
+  if (_synchronizer && _clockStarted.load() && !_paused.load()) {
+    [_synchronizer setRate:_playbackRate.load()];
+  }
 }
 
 - (BOOL)isRunning {

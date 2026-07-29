@@ -58,6 +58,11 @@ typedef struct {
 - (BOOL)stop;
 - (BOOL)pause;
 - (BOOL)resume;
+/// Driven by app lifecycle notifications, not by JS. Stops the media clock and
+/// hands back the video decoder for the duration of a background trip.
+- (void)suspendForBackground;
+- (void)resumeFromForeground;
+
 - (BOOL)isRunning;
 - (BOOL)isPaused;
 

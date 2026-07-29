@@ -4,6 +4,7 @@
 #import "WebmVideoDecoder.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -40,6 +41,7 @@ constexpr int kRingReadTimeoutMs = 50;
 
   std::thread _thread;
   std::atomic<bool> _stop;
+  std::atomic<bool> _paused;
   // Set by requestReset() on the JS thread, consumed by the demux thread.
   std::atomic<bool> _resetRequested;
   std::atomic<bool> _failed;
@@ -55,6 +57,7 @@ constexpr int kRingReadTimeoutMs = 50;
   self = [super init];
   if (!self) return nil;
   _stop = false;
+  _paused = false;
   _resetRequested = false;
   _failed = false;
   _bytesFed = 0;
@@ -100,6 +103,10 @@ constexpr int kRingReadTimeoutMs = 50;
   return wrote;
 }
 
+- (void)setPaused:(BOOL)paused {
+  _paused.store(paused);
+}
+
 - (void)setEndOfStream {
   if (_ring) _ring->setEndOfStream(true);
 }
@@ -138,6 +145,11 @@ constexpr int kRingReadTimeoutMs = 50;
   [self reportHealth:@"buffering" detail:@"waiting for stream data"];
 
   while (!_stop.load()) {
+    if (_paused.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kRingReadTimeoutMs));
+      continue;
+    }
+
     // Observed before reading, so every byte taken afterwards belongs to the new
     // stream. requestReset() clears the ring before raising this.
     if (_resetRequested.exchange(false, std::memory_order_acquire)) {

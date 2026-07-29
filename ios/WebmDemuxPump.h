@@ -50,6 +50,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// Shuts the ring down and joins the thread. Idempotent.
 - (void)stop;
 
+/// Park the demux thread without tearing anything down.
+///
+/// Stopping the renderer alone is not enough: the thread would keep draining the
+/// ring and decoding into a queue nobody consumes, and the decoder discards what
+/// does not fit — silently losing audio for the whole pause. Parked, the bytes
+/// stay in the ring and playback continues from exactly where it stopped.
+- (void)setPaused:(BOOL)paused;
+
 /// Accepts muxed WebM bytes. Returns the number accepted; short means the ring
 /// is full and the caller is outrunning the demuxer.
 - (size_t)feedData:(const uint8_t*)bytes length:(size_t)length;

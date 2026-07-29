@@ -104,6 +104,48 @@ turned out to be a real defect rather than a simulator artifact:
    rate regardless of what has been enqueued. Needs a device to confirm the fix
    shape before changing it.
 
+## Background and foreground
+
+Policy: **playback pauses on background and resumes on return.** No configuration
+is required from a consuming app — no `UIBackgroundModes`, no Android foreground
+service. The library observes the transition itself (`UIApplication` notifications
+on iOS, React Native's host lifecycle on Android).
+
+What the transition has to survive, and why each piece is there:
+
+- **iOS revokes video decoder resources when the app leaves the foreground**, and
+  the `VTDecompressionSession` stays invalid afterwards. Nothing reported this, so
+  a session that outlived a background trip was reused forever and never decoded
+  another frame. The session is now released on suspend and rebuilt at the first
+  keyframe after resume, and `kVTInvalidSessionErr` is treated the same way if it
+  turns up by another route.
+- **The synchronizer's timebase is host-clock-based** and keeps advancing while
+  the process is suspended. Left running, a 30s background trip would return 30s
+  ahead of the audio that actually played, so the rate goes to 0 on suspend.
+- **Stopping the renderer is not enough.** The demux thread would keep draining
+  the ring and decoding into a queue nobody consumes, and the audio decoder drops
+  what does not fit. Measured on the simulator: a 12s background trip discarded
+  **401 audio packets** — a silent hole on resume. The demux thread is now parked,
+  so the bytes stay in the ring. The same fix applies to an explicit `pause()`,
+  which had the same hole.
+- **A `resume()` from JS while backgrounded does not start playback** on either
+  platform. The decoder has no session and the audio session may be inactive.
+
+Verified on the iOS simulator across a 12s background trip: audio packets
+discarded went from 401 to **0**, drift +0.07s, playback continued normally.
+
+The simulator does not suspend the process, so it cannot settle whether the media
+clock survives a real suspension — that needs the device, and is listed below.
+
+### Known limitation: what `currentTimeSeconds` measures
+
+It is the presentation timestamp of the last buffer _handed to the renderer_
+(`WebmAudioDecoder.mm`, stored at `enqueueSampleBuffer:`), not what has been
+heard. It therefore runs ahead of real playback by the renderer's buffer depth,
+and after a pause it catches up to wall time as the backlog is enqueued, faster
+than the audio can actually play. Good enough to spot a stall; not a playback
+position.
+
 ## Checklist for a physical device
 
 Run the example and work through these. Anything that fails is a real defect —
@@ -116,6 +158,8 @@ the simulator caveats above do not apply.
 - [x] `t=` tracks media position, not wall-clock (settles finding 3)
 - [x] A/V stay in sync across a 60s continuous feed
 - [ ] Backgrounding pauses, foregrounding resumes without artefacts
+      (simulator-verified; the device must confirm the media clock does not
+      jump across a real process suspension)
 - [ ] Route change (speaker ↔ wired ↔ Bluetooth) keeps playback going and fires
       `setRouteChangeCallback`
 - [ ] `stop()` then `start()` cycles cleanly, with no leak across cycles

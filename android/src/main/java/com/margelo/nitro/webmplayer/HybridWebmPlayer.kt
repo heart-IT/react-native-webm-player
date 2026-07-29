@@ -6,14 +6,10 @@ import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
@@ -22,8 +18,6 @@ import androidx.media3.ui.PlayerView
 import com.margelo.nitro.NitroModules
 import com.margelo.nitro.core.ArrayBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Android playback: ExoPlayer reading from a WebMStreamBuffer-backed DataSource.
@@ -64,7 +58,6 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   @Volatile private var ringHandle: Long = 0L
   @Volatile private var player: ExoPlayer? = null
   private var focus: AudioFocusController? = null
-  private var statsRunnable: Runnable? = null
   // Main-thread only, like everything else that touches ExoPlayer.
   private var surface: PlayerView? = null
   private var routes: AudioRouteMonitor? = null
@@ -73,19 +66,12 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   private val running = AtomicBoolean(false)
   private val paused = AtomicBoolean(false)
+  // Kept apart from `paused`: returning to the foreground must not start playing
+  // a stream JS had explicitly paused before the app went away.
+  private val backgrounded = AtomicBoolean(false)
 
-  // Mirrors of main-thread-only player state, so the spec's synchronous getters
-  // never reach across a thread boundary into ExoPlayer.
-  private val bytesFed = AtomicLong(0)
-  private val audioPackets = AtomicLong(0)
-  private val videoPackets = AtomicLong(0)
-  private val audioUnderruns = AtomicLong(0)
-  private val videoDropped = AtomicLong(0)
-  private val videoW = AtomicInteger(0)
-  private val videoH = AtomicInteger(0)
-  private val positionMs = AtomicLong(0)
-  private val exoState = AtomicInteger(Player.STATE_IDLE)
-  private val failed = AtomicBoolean(false)
+  private val stats = PlaybackStats(mainHandler)
+  private var lifecycle: HostLifecycleObserver? = null
 
   @Volatile private var currentGain: Double = 1.0
   @Volatile private var currentMuted: Boolean = false
@@ -101,7 +87,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     if (ringHandle == 0L) return false
     running.set(true)
     paused.set(false)
-    failed.set(false)
+    stats.failed.set(false)
     mainHandler.post { startOnMain() }
     return true
   }
@@ -109,7 +95,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   private fun startOnMain() {
     val context = NitroModules.applicationContext ?: run {
       Log.e(TAG, "no application context; cannot create ExoPlayer")
-      failed.set(true)
+      stats.failed.set(true)
       return
     }
     try {
@@ -146,7 +132,12 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
         ProgressiveMediaSource.Factory(DataSource.Factory { source }, extractors)
           .createMediaSource(mediaItem)
 
-      attachListeners(exo)
+      stats.attach(exo) { status, detail -> fireHealth(status, detail) }
+      lifecycle = HostLifecycleObserver(
+        context,
+        onBackground = { suspendForBackground() },
+        onForeground = { resumeFromForeground() },
+      )
       focus = AudioFocusController(context, mainHandler).also { controller ->
         controller.acquire { change ->
           when (change) {
@@ -163,10 +154,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       exo.playWhenReady = true
       player = exo
       surface?.player = exo
-      startStatsPolling()
     } catch (e: Exception) {
       Log.e(TAG, "start failed", e)
-      failed.set(true)
+      stats.failed.set(true)
       releaseOnMain()
     }
   }
@@ -175,6 +165,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     if (!running.get()) return true
     running.set(false)
     paused.set(false)
+    backgrounded.set(false)
     val handle = ringHandle
     if (handle != 0L) nativeShutdown(handle)  // unblocks a reader inside DataSource.read
     mainHandler.post {
@@ -194,8 +185,26 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   override fun resume(): Boolean {
     paused.set(false)
+    // Backgrounded playback stays stopped until the app returns, matching iOS.
+    if (backgrounded.get()) return true
     mainHandler.post { player?.play() }
     return true
+  }
+
+  /**
+   * Driven by the host activity, not by JS. ExoPlayer keeps its decoders and
+   * buffered data across this, so returning resumes where playback stopped;
+   * only the surface it renders into goes away and comes back.
+   */
+  private fun suspendForBackground() {
+    if (!running.get() || backgrounded.getAndSet(true)) return
+    mainHandler.post { player?.pause() }
+  }
+
+  private fun resumeFromForeground() {
+    if (!running.get() || !backgrounded.getAndSet(false)) return
+    if (paused.get()) return
+    mainHandler.post { player?.play() }
   }
 
   override val isRunning: Boolean
@@ -206,10 +215,10 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   override val playbackState: WebmPlaybackState
     get() = when {
-      failed.get() -> WebmPlaybackState.FAILED
+      stats.failed.get() -> WebmPlaybackState.FAILED
       !running.get() -> WebmPlaybackState.IDLE
       paused.get() -> WebmPlaybackState.PAUSED
-      exoState.get() == Player.STATE_READY -> WebmPlaybackState.PLAYING
+      stats.isReady -> WebmPlaybackState.PLAYING
       else -> WebmPlaybackState.BUFFERING
     }
 
@@ -226,7 +235,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     val buffer = data.getBuffer(false)
     if (!buffer.isDirect) return false
     val wrote = nativeWrite(handle, buffer, size)
-    bytesFed.addAndGet(wrote.toLong())
+    stats.bytesFed.addAndGet(wrote.toLong())
     return wrote == size
   }
 
@@ -324,86 +333,15 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   // MARK: - Metrics
 
-  override fun getMetrics(): WebmPlayerMetrics = WebmPlayerMetrics(
-    bytesFedTotal = bytesFed.get().toDouble(),
-    audioPacketsDecoded = audioPackets.get().toDouble(),
-    videoPacketsDecoded = videoPackets.get().toDouble(),
-    audioUnderruns = audioUnderruns.get().toDouble(),
-    videoFramesDropped = videoDropped.get().toDouble(),
-    // ExoPlayer conceals internally and does not report recovered frames, so
-    // this stays 0 on Android rather than inventing a number.
-    audioFramesRecovered = 0.0,
-    videoWidth = videoW.get().toDouble(),
-    videoHeight = videoH.get().toDouble(),
-    currentTimeSeconds = positionMs.get() / 1000.0,
-    playbackRate = currentRate,
-    muted = currentMuted,
-    gain = currentGain,
-  )
+  override fun getMetrics(): WebmPlayerMetrics =
+    stats.snapshot(currentRate, currentMuted, currentGain)
 
   // MARK: - Main-thread wiring
 
-  private fun attachListeners(exo: ExoPlayer) {
-    exo.addListener(object : Player.Listener {
-      override fun onPlaybackStateChanged(state: Int) {
-        exoState.set(state)
-        when (state) {
-          Player.STATE_READY -> fireHealth(WebmHealthStatus.PLAYING, "ready")
-          Player.STATE_BUFFERING -> fireHealth(WebmHealthStatus.BUFFERING, "buffering")
-          Player.STATE_ENDED -> fireHealth(WebmHealthStatus.ENDED, "end of stream")
-          else -> Unit
-        }
-      }
-
-      override fun onPlayerError(error: PlaybackException) {
-        Log.e(TAG, "player error: ${error.errorCodeName}", error)
-        failed.set(true)
-        fireHealth(WebmHealthStatus.FAILED, error.errorCodeName)
-      }
-
-      override fun onVideoSizeChanged(videoSize: VideoSize) {
-        videoW.set(videoSize.width)
-        videoH.set(videoSize.height)
-      }
-    })
-
-    exo.addAnalyticsListener(object : AnalyticsListener {
-      override fun onAudioUnderrun(
-        eventTime: AnalyticsListener.EventTime,
-        bufferSize: Int,
-        bufferSizeMs: Long,
-        elapsedSinceLastFeedMs: Long,
-      ) {
-        audioUnderruns.incrementAndGet()
-      }
-    })
-  }
-
-  private fun startStatsPolling() {
-    val tick = object : Runnable {
-      override fun run() {
-        player?.let { p ->
-          positionMs.set(p.currentPosition)
-          p.videoDecoderCounters?.let {
-            videoPackets.set(it.renderedOutputBufferCount.toLong())
-            videoDropped.set(it.droppedBufferCount.toLong())
-          }
-          p.audioDecoderCounters?.let {
-            audioPackets.set(it.queuedInputBufferCount.toLong())
-          }
-        }
-        mainHandler.postDelayed(this, STATS_INTERVAL_MS)
-      }
-    }
-    statsRunnable = tick
-    mainHandler.post(tick)
-  }
-
-
-
   private fun releaseOnMain() {
-    statsRunnable?.let { mainHandler.removeCallbacks(it) }
-    statsRunnable = null
+    lifecycle?.invalidate()
+    lifecycle = null
+    stats.detach()
     surface?.player = null
     player?.release()
     player = null

@@ -42,6 +42,11 @@ NSData* BuildVpcCConfig(int profile) {
     // instantaneously ready for, which is most of them.
     std::deque<CMSampleBufferRef> _pending;
     std::mutex _pendingMutex;
+    // submitFrame runs on the demux thread; suspend/resume arrive on main.
+    // Guards _session and _formatDesc against teardown mid-submit. Taken only at
+    // public entry points — ensureSession/shutdownSession assume it is held.
+    std::mutex _sessionMutex;
+    BOOL _suspended;
     BOOL _requesting;  // _renderQueue only
     std::atomic<uint64_t> _framesPresented;
 }
@@ -158,6 +163,11 @@ NSData* BuildVpcCConfig(int profile) {
 - (BOOL)submitFrame:(const uint8_t*)data length:(size_t)length ptsUs:(int64_t)ptsUs isKey:(BOOL)isKey {
     if (!data || length == 0) return NO;
 
+    std::lock_guard<std::mutex> lock(_sessionMutex);
+    // Backgrounded: decoder resources are not ours to use, and rebuilding the
+    // session here would fail. Frames resume at the next keyframe after resume.
+    if (_suspended) return NO;
+
     if (isKey) {
         auto info = media::vp9::parseHeader(data, length);
         if (info.valid && info.width > 0 && info.height > 0) {
@@ -199,6 +209,16 @@ NSData* BuildVpcCConfig(int profile) {
                                           kVTDecodeFrame_EnableAsynchronousDecompression,
                                           ptsCtx, &out);
     CFRelease(sample);
+
+    // iOS revokes video decoder resources when the app loses the foreground, and
+    // the session stays invalid afterwards. Nothing else reports this, so without
+    // tearing it down here a session that outlived a background trip would be
+    // reused forever and never decode another frame.
+    if (s == kVTInvalidSessionErr) {
+        MEDIA_LOG_W("WebmVideoDecoder: decode session invalidated, rebuilding at next keyframe");
+        [self shutdownSession];
+        return NO;
+    }
     return s == noErr;
 }
 
@@ -250,7 +270,24 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     _width = _height = _profile = 0;
 }
 
+- (void)suspend {
+    std::lock_guard<std::mutex> lock(_sessionMutex);
+    if (_suspended) return;
+    _suspended = YES;
+    // Released rather than left to be revoked, so the decoder is handed back
+    // cleanly. Already-decoded frames stay queued: the synchronizer's clock is
+    // stopped too, so their timestamps are still ahead of it on resume and they
+    // paint the first picture back with no wait for a keyframe.
+    [self shutdownSession];
+}
+
+- (void)resume {
+    std::lock_guard<std::mutex> lock(_sessionMutex);
+    _suspended = NO;
+}
+
 - (void)shutdown {
+    std::lock_guard<std::mutex> lock(_sessionMutex);
     [self shutdownSession];
     if (_requesting) {
         [_layer stopRequestingMediaData];

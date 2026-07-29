@@ -42,6 +42,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Drain in-flight frames, invalidate the session, release format desc.
 /// Safe to call multiple times.
+/// Release decoder resources for a background trip. iOS revokes them anyway;
+/// doing it explicitly keeps the invalid session from being reused. Frames are
+/// refused until resume(), then decoding restarts at the next keyframe.
+- (void)suspend;
+
+/// Allow decoding again. The session is rebuilt on the next keyframe.
+- (void)resume;
+
 - (void)shutdown;
 
 @end
