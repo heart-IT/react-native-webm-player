@@ -32,6 +32,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # A manual dispatch can target any ref; re-run the fast gates rather
+      # than trusting that CI already ran on it.
+      - name: Format
+        run: npx prettier . --check
+      - name: Lint
+        run: npm run lint
+      - name: File size budgets
+        run: npm run lint:size
+      - name: Codegen is fresh
+        run: |
+          npx nitrogen
+          git diff --exit-code
+
       - name: Build lib
         run: npm run build
 
