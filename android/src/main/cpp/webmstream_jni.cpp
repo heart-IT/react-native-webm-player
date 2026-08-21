@@ -107,21 +107,4 @@ Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeShutdown(JNIEnv*, jobje
   }
 }
 
-JNIEXPORT void JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeGoToLive(JNIEnv*, jobject,
-                                                                  jlong handle) {
-  if (auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle))) {
-    ring->goToLive();
-  }
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeIsBehindLive(
-    JNIEnv*, jobject, jlong handle, jint thresholdBytes) {
-  auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle));
-  if (!ring || thresholdBytes <= 0) return JNI_FALSE;
-  return ring->isBehindLive(static_cast<size_t>(thresholdBytes)) ? JNI_TRUE
-                                                                 : JNI_FALSE;
-}
-
 }  // extern "C"

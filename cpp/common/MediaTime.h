@@ -31,11 +31,11 @@ inline void primeClock() noexcept {}
 
 namespace detail {
 
-// Zero-init'd globals — no __cxa_guard involvement.
-// Populated once via a race-safe CAS on first call; subsequent calls see the
-// cached values via relaxed atomic reads.
-inline std::atomic<uint64_t> g_machNumer{0};
-inline std::atomic<uint64_t> g_machDenom{0};
+// constinit: the no-__cxa_guard property these rely on is compiler-enforced,
+// not just asserted in a comment. Populated once via a race-safe publish on
+// first call; subsequent calls see the cached values via atomic reads.
+inline constinit std::atomic<uint64_t> g_machNumer{0};
+inline constinit std::atomic<uint64_t> g_machDenom{0};
 
 inline void primeMachTimebase() noexcept {
     if (g_machDenom.load(std::memory_order_acquire) != 0) return;

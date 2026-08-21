@@ -215,13 +215,6 @@ TEST(write_with_partial_space_rejects_the_chunk_whole) {
   ASSERT_GT(stats.bufferOverflows, uint64_t(0));
 }
 
-TEST(is_consumer_lagging_trips_above_eighty_percent) {
-  auto buf = makeBuffer();
-  ASSERT_FALSE(buf.isConsumerLagging());
-  fill(buf, static_cast<size_t>(kCapacity * 0.85));
-  ASSERT_TRUE(buf.isConsumerLagging());
-}
-
 // --------------------------------------------------------- end of stream / shutdown
 
 TEST(end_of_stream_makes_an_empty_read_return_minus_one) {
@@ -332,81 +325,53 @@ TEST(clear_is_ignored_once_shutdown) {
   ASSERT_TRUE(buf.isShutdown());
 }
 
-// -------------------------------------------------------------- live / recovery
+TEST(clear_racing_an_in_flight_read_never_wedges_the_ring) {
+  // clear() used to zero head and tail while a reader that had already loaded
+  // the old tail could publish tail+n afterward, leaving tail ahead of head.
+  // Every later read then saw an empty ring until head re-earned the gap —
+  // playback wedged silently and permanently. The consumer now publishes via
+  // CAS and loses cleanly to the clear.
+  //
+  // Each round arms one collision: a deep backlog keeps the reader inside
+  // back-to-back read() calls (small reads, so it is almost always between its
+  // tail load and its tail publish) while this thread — the producer, exactly
+  // like resetStream() on the JS thread in production — fires a single clear().
+  // The reader is then joined and the round verifies single-threaded that fresh
+  // bytes still flow. One collision wedges the old code permanently; rounds are
+  // independent, so ten of them make a miss vanishingly unlikely.
+  for (int round = 0; round < 10; round++) {
+    auto buf = makeBuffer();
+    std::atomic<bool> stop{false};
 
-TEST(go_to_live_discards_the_entire_backlog) {
-  auto buf = makeBuffer();
-  fill(buf, 1024 * 1024);
-  ASSERT_GT(buf.sizeBytes(), uint64_t(0));
+    std::thread consumer([&] {
+      std::vector<uint8_t> dst(4096);
+      while (!stop.load(std::memory_order_acquire)) {
+        (void)buf.read(dst.data(), dst.size(), 1);
+      }
+    });
 
-  buf.goToLive();
-  ASSERT_EQ(buf.sizeBytes(), uint64_t(0));
-}
+    // No pause between fill and clear: the reader outpaces nothing here — the
+    // producer finishes the 6 MiB long before the 4 KiB-at-a-time reader can
+    // drain it, so the clear lands while the reader is mid-read with near
+    // certainty. Sleeping first lets the reader go idle and the collision
+    // never happens.
+    fill(buf, 6u << 20);
+    buf.clear();
 
-TEST(is_behind_live_compares_backlog_to_threshold) {
-  auto buf = makeBuffer();
-  put(buf, pattern(1000));
-  ASSERT_TRUE(buf.isBehindLive(500));
-  ASSERT_FALSE(buf.isBehindLive(2000));
-}
+    stop.store(true, std::memory_order_release);
+    consumer.join();
 
-TEST(soft_reset_trims_backlog_to_half_capacity) {
-  auto buf = makeBuffer();
-  const size_t sixMiB = 6u << 20;
-  ASSERT_EQ(fill(buf, sixMiB), sixMiB);
-
-  buf.softReset();
-
-  ASSERT_EQ(buf.sizeBytes(), uint64_t(kCapacity / 2));
-  ASSERT_EQ(buf.getRecoveryStats().softResets, uint64_t(1));
-}
-
-TEST(soft_reset_leaves_a_small_backlog_untouched) {
-  auto buf = makeBuffer();
-  put(buf, pattern(1000));
-
-  buf.softReset();
-
-  // Below half capacity there is nothing to trim, but the reset is still
-  // recorded — the counter tracks invocations, not bytes reclaimed.
-  ASSERT_EQ(buf.sizeBytes(), uint64_t(1000));
-  ASSERT_EQ(buf.getRecoveryStats().softResets, uint64_t(1));
-}
-
-TEST(soft_reset_on_empty_buffer_is_a_no_op) {
-  auto buf = makeBuffer();
-  buf.softReset();
-  ASSERT_EQ(buf.getRecoveryStats().softResets, uint64_t(0));
-}
-
-// ---------------------------------------------------------------------- health
-
-TEST(health_is_healthy_when_fresh) {
-  auto buf = makeBuffer();
-  ASSERT_TRUE(buf.getHealthStatus() == WebMStreamBuffer::HealthStatus::Healthy);
-}
-
-TEST(health_is_dead_after_shutdown) {
-  auto buf = makeBuffer();
-  buf.shutdown();
-  ASSERT_TRUE(buf.getHealthStatus() == WebMStreamBuffer::HealthStatus::Dead);
-}
-
-TEST(health_reports_severe_backpressure_when_nearly_full) {
-  auto buf = makeBuffer();
-  fill(buf, kCapacity);
-  ASSERT_TRUE(buf.getHealthStatus() ==
-              WebMStreamBuffer::HealthStatus::SevereBackpressure);
-}
-
-TEST(health_reports_producer_stall_after_the_configured_window) {
-  WebMStreamBuffer::Config cfg = testConfig();
-  cfg.producerStallMs = 20;
-  WebMStreamBuffer buf(1024, cfg);
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
-  ASSERT_TRUE(buf.getHealthStatus() ==
-              WebMStreamBuffer::HealthStatus::ProducerStalled);
+    ASSERT_EQ(put(buf, pattern(1000)), size_t(1000));
+    std::vector<uint8_t> dst(2000);
+    size_t drained = 0;
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(500);
+    while (drained < 1000 && std::chrono::steady_clock::now() < deadline) {
+      int n = buf.read(dst.data(), dst.size(), 10);
+      if (n > 0) drained += static_cast<size_t>(n);
+    }
+    ASSERT_EQ(drained, size_t(1000));
+  }
 }
 
 // ----------------------------------------------------------------------- stats

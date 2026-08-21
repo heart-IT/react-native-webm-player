@@ -2,6 +2,7 @@
 #include "MediaLog.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstring>
 
@@ -47,10 +48,6 @@ bool WebMStreamBuffer::validateWebMClusterBoundary(const uint8_t* data, size_t l
 }
 #endif
 
-size_t WebMStreamBuffer::getDefaultCapacity() {
-    return 32 * 1024 * 1024;
-}
-
 uint64_t WebMStreamBuffer::sizeBytes(std::memory_order order) const noexcept {
     uint64_t head = headBytes_.load(order);
     uint64_t tail = tailBytes_.load(order);
@@ -68,30 +65,6 @@ uint64_t WebMStreamBuffer::sizeBytes() const noexcept {
     return sizeBytes(std::memory_order_acquire);
 }
 
-void WebMStreamBuffer::updateBitrate(size_t bytes) {
-    if (bytes < BITRATE_SKIP_THRESHOLD) {
-        bytesSinceLastUpdate_.fetch_add(bytes, std::memory_order_relaxed);
-        return;
-    }
-    bytesSinceLastUpdate_.fetch_add(bytes, std::memory_order_relaxed);
-
-    uint64_t now = nowMs();
-    uint64_t expected = lastBitrateUpdateMs_.load(std::memory_order_relaxed);
-    if (expected == 0) {
-        if (lastBitrateUpdateMs_.compare_exchange_strong(expected, now, std::memory_order_relaxed)) return;
-        expected = lastBitrateUpdateMs_.load(std::memory_order_relaxed);
-    }
-    uint64_t delta = now - expected;
-    if (delta >= 1000) {
-        if (lastBitrateUpdateMs_.compare_exchange_strong(expected, now, std::memory_order_relaxed)) {
-            uint64_t windowBytes = bytesSinceLastUpdate_.exchange(0, std::memory_order_relaxed);
-            double bits = static_cast<double>(windowBytes) * 8.0;
-            double bps = (bits * 1000.0) / std::max<double>(static_cast<double>(delta), 1.0);
-            lastBitrateBitsPerSec_.store(static_cast<uint64_t>(bps), std::memory_order_relaxed);
-        }
-    }
-}
-
 WebMStreamBuffer::ConsumerActiveGuard::ConsumerActiveGuard(WebMStreamBuffer& owner) : owner_(owner) {
     owner_.consumerActiveCount_.fetch_add(1, std::memory_order_acquire);
 }
@@ -104,21 +77,18 @@ WebMStreamBuffer::ConsumerActiveGuard::~ConsumerActiveGuard() {
     owner_.consumerActiveCount_.fetch_sub(1, std::memory_order_release);
 }
 
+WebMStreamBuffer::WebMStreamBuffer(size_t capacityBytes)
+    : WebMStreamBuffer(capacityBytes, Config{}) {}
+
 WebMStreamBuffer::WebMStreamBuffer(size_t capacityBytes, const Config& cfg)
     : cfg_(cfg), capacityBytes_(capacityBytes) {
     if (capacityBytes_ < cfg_.minCapacityBytes) capacityBytes_ = cfg_.minCapacityBytes;
     if (capacityBytes_ < MIN_CAPACITY) capacityBytes_ = MIN_CAPACITY;
 
-    size_t pow2 = 1;
-    while (pow2 < capacityBytes_) pow2 <<= 1;
-    capacityBytes_ = pow2;
+    capacityBytes_ = std::bit_ceil(capacityBytes_);
     mask_ = capacityBytes_ - 1;
 
     buffer_ = std::make_unique<uint8_t[]>(capacityBytes_);
-
-    uint64_t now = nowMs();
-    lastProducerActivityMs_.store(now, std::memory_order_relaxed);
-    lastConsumerActivityMs_.store(now, std::memory_order_relaxed);
 
     MEDIA_LOG_D("WebMStreamBuffer initialized capacity=%.2fMB", capacityBytes_ / 1024.0 / 1024.0);
 }
@@ -193,8 +163,8 @@ size_t WebMStreamBuffer::write(const uint8_t* data, size_t length, bool isCluste
         producerLocalDroppedBytes_.fetch_add(length, std::memory_order_relaxed);
         producerLocalBufferOverflows_.fetch_add(1, std::memory_order_relaxed);
         consumerLagEvents_.fetch_add(1, std::memory_order_relaxed);
-        if (producerLocalDroppedBytes_ >= cfg_.statsFlushMinBytes ||
-            producerLocalBufferOverflows_ > 10) {
+        if (producerLocalDroppedBytes_.load(std::memory_order_relaxed) >= cfg_.statsFlushMinBytes ||
+            producerLocalBufferOverflows_.load(std::memory_order_relaxed) > 10) {
             flushProducerStatsIfNeeded(nowMs());
         }
         if (shouldLog(cfg_.logMinIntervalMs)) {
@@ -205,7 +175,6 @@ size_t WebMStreamBuffer::write(const uint8_t* data, size_t length, bool isCluste
     }
 
     const size_t toWrite = length;
-    bool wasEmpty = (used == 0);
 
     size_t writePos = indexFor(head);
     size_t first = std::min(toWrite, capacityBytes_ - writePos);
@@ -215,7 +184,6 @@ size_t WebMStreamBuffer::write(const uint8_t* data, size_t length, bool isCluste
         std::memcpy(buffer_.get(), data + first, secondPart);
     }
 
-    lastProducerActivityMs_.store(nowMs(), std::memory_order_relaxed);
     headBytes_.store(head + toWrite, std::memory_order_release);
 
     auto localWritten = producerLocalBytesWritten_.fetch_add(toWrite, std::memory_order_relaxed) + toWrite;
@@ -223,12 +191,14 @@ size_t WebMStreamBuffer::write(const uint8_t* data, size_t length, bool isCluste
         flushProducerStatsIfNeeded(nowMs());
     }
 
-    updateBitrate(toWrite);
-
-    if (wasEmpty) {
-        std::lock_guard<std::mutex> lock(cvMutex_);
-        cv_.notify_one();
-    }
+    // Notify on every publish, not only on an empty→non-empty snapshot: that
+    // snapshot was taken before the copy, so a consumer that drained the ring
+    // and blocked in the meantime would never be woken — and once the ring was
+    // non-empty in every later snapshot, never again. The empty lock section
+    // orders this publish against a waiter between its predicate check and its
+    // wait; notifying outside the lock avoids waking it into a held mutex.
+    { std::lock_guard<std::mutex> lock(cvMutex_); }
+    cv_.notify_one();
 
     return toWrite;
 }
@@ -236,7 +206,6 @@ size_t WebMStreamBuffer::write(const uint8_t* data, size_t length, bool isCluste
 void WebMStreamBuffer::setEndOfStream(bool eos) {
     if (destroyed_.load(std::memory_order_relaxed)) return;
     endOfStream_.store(eos, std::memory_order_release);
-    lastProducerActivityMs_.store(nowMs(), std::memory_order_relaxed);
     if (eos) {
         std::lock_guard<std::mutex> lock(cvMutex_);
         cv_.notify_all();
@@ -251,8 +220,14 @@ void WebMStreamBuffer::clear() {
         return;
     }
 
-    headBytes_.store(0, std::memory_order_relaxed);
-    tailBytes_.store(0, std::memory_order_relaxed);
+    // Discard by advancing tail to head, never by zeroing the counters:
+    // positions are monotonic, and the consumer republishes tail with a CAS, so
+    // a read in flight across this call fails its CAS and reports nothing read.
+    // Zeroing instead let that read land its stale tail after the clear, leaving
+    // tail ahead of head — the consumer then saw an empty ring until head
+    // re-earned the gap: a permanent, silent stall of playback.
+    uint64_t head = headBytes_.load(std::memory_order_relaxed);
+    tailBytes_.store(head, std::memory_order_release);
     endOfStream_.store(false, std::memory_order_release);
 
     totalBytesWritten_.store(0, std::memory_order_relaxed);
@@ -260,20 +235,11 @@ void WebMStreamBuffer::clear() {
     droppedBytes_.store(0, std::memory_order_relaxed);
     bufferOverflows_.store(0, std::memory_order_relaxed);
     consumerLagEvents_.store(0, std::memory_order_relaxed);
-    lastBitrateBitsPerSec_.store(0, std::memory_order_relaxed);
-    lastBitrateUpdateMs_.store(0, std::memory_order_relaxed);
-    bytesSinceLastUpdate_.store(0, std::memory_order_relaxed);
-    corruptionEvents_.store(0, std::memory_order_relaxed);
-
-    softResets_.store(0, std::memory_order_relaxed);
-    hardResets_.store(0, std::memory_order_relaxed);
-    lastResetTimeMs_.store(0, std::memory_order_relaxed);
 
     producerLocalBytesWritten_.store(0, std::memory_order_relaxed);
     producerLocalDroppedBytes_.store(0, std::memory_order_relaxed);
     producerLocalBufferOverflows_.store(0, std::memory_order_relaxed);
     consumerLocalBytesRead_.store(0, std::memory_order_relaxed);
-    consumerLocalLagEvents_.store(0, std::memory_order_relaxed);
 
     producerStatsLastFlushMs_.store(0, std::memory_order_relaxed);
     consumerStatsLastFlushMs_.store(0, std::memory_order_relaxed);
@@ -312,8 +278,6 @@ void WebMStreamBuffer::flushConsumerStatsIfNeeded(uint64_t now) const {
 
     auto localRead = consumerLocalBytesRead_.exchange(0, std::memory_order_relaxed);
     if (localRead > 0) totalBytesRead_.fetch_add(localRead, std::memory_order_release);
-    auto localLag = consumerLocalLagEvents_.exchange(0, std::memory_order_relaxed);
-    if (localLag > 0) consumerLagEvents_.fetch_add(localLag, std::memory_order_release);
 }
 
 int WebMStreamBuffer::read(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
@@ -332,39 +296,43 @@ int WebMStreamBuffer::read(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
         if (head == tail) return -1;
     }
 
-    while (true) {
-        uint64_t tail = tailBytes_.load(std::memory_order_relaxed);
-        uint64_t head = headBytes_.load(std::memory_order_acquire);
-        uint64_t available = (head >= tail) ? (head - tail) : 0;
-        if (available == 0) break;
-
-        size_t toRead = static_cast<size_t>(std::min<uint64_t>(available, maxLen));
-        if (toRead < cfg_.batchReadThreshold && available > cfg_.batchReadThreshold * 4) {
-            size_t batch = cfg_.batchReadThreshold;
-            if (batch > maxLen) batch = maxLen;
-            toRead = batch;
-        }
-
-        size_t readPos = indexFor(tail);
-        size_t first = std::min(toRead, capacityBytes_ - readPos);
-        std::memcpy(dst, buffer_.get() + readPos, first);
-        size_t second = toRead - first;
-        if (second > 0) std::memcpy(dst + first, buffer_.get(), second);
-
-        tailBytes_.store(tail + toRead, std::memory_order_release);
-
-        auto localRead = consumerLocalBytesRead_.fetch_add(toRead, std::memory_order_relaxed) + toRead;
-        if (localRead >= cfg_.statsFlushMinBytes) {
-            flushConsumerStatsIfNeeded(nowMs());
-        }
-        lastConsumerActivityMs_.store(nowMs(), std::memory_order_relaxed);
-        return static_cast<int>(toRead);
-    }
-
+    uint64_t tail = tailBytes_.load(std::memory_order_relaxed);
+    uint64_t head = headBytes_.load(std::memory_order_acquire);
+    if (head > tail) return copyOut(tail, head, dst, maxLen);
     return readSlow(dst, maxLen, timeoutMs);
 }
 
-// Callers must hold a ConsumerActiveGuard; read() and readBatch() both do.
+// Clamps to what is available, copies out, and publishes the new tail.
+// Requires head > tail; both read() paths share this so the publish contract
+// cannot drift between them again.
+int WebMStreamBuffer::copyOut(uint64_t tail, uint64_t head, uint8_t* dst, size_t maxLen) {
+    size_t toRead = static_cast<size_t>(std::min<uint64_t>(head - tail, maxLen));
+
+    size_t readPos = indexFor(tail);
+    size_t first = std::min(toRead, capacityBytes_ - readPos);
+    std::memcpy(dst, buffer_.get() + readPos, first);
+    size_t second = toRead - first;
+    if (second > 0) std::memcpy(dst + first, buffer_.get(), second);
+
+    // CAS, not a blind store: clear() advances tail from another thread, and a
+    // clear that lands during the copy above discards exactly the bytes just
+    // copied — losing the CAS and reporting nothing read is the correct
+    // outcome. Release still orders the copy-out before the producer's acquire
+    // sees the space as free.
+    if (!tailBytes_.compare_exchange_strong(tail, tail + toRead,
+                                            std::memory_order_release,
+                                            std::memory_order_relaxed)) {
+        return 0;
+    }
+
+    auto localRead = consumerLocalBytesRead_.fetch_add(toRead, std::memory_order_relaxed) + toRead;
+    if (localRead >= cfg_.statsFlushMinBytes) {
+        flushConsumerStatsIfNeeded(nowMs());
+    }
+    return static_cast<int>(toRead);
+}
+
+// Caller must hold a ConsumerActiveGuard; read() does.
 int WebMStreamBuffer::readSlow(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
     if (!dst || maxLen == 0) return 0;
 
@@ -400,63 +368,11 @@ int WebMStreamBuffer::readSlow(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) 
 
     uint64_t head = headBytes_.load(std::memory_order_acquire);
     uint64_t tail = tailBytes_.load(std::memory_order_acquire);
-    uint64_t available = (head >= tail) ? (head - tail) : 0;
-    if (available == 0) {
+    if (head <= tail) {
         if (endOfStream_.load(std::memory_order_acquire)) return -1;
         return 0;
     }
-
-    size_t toRead = static_cast<size_t>(std::min<uint64_t>(available, maxLen));
-    if (toRead < cfg_.batchReadThreshold && available > cfg_.batchReadThreshold * 4) {
-        size_t batch = cfg_.batchReadThreshold;
-        if (batch > maxLen) batch = maxLen;
-        toRead = batch;
-    }
-
-    size_t readPos = indexFor(tail);
-    size_t first = std::min(toRead, capacityBytes_ - readPos);
-    std::memcpy(dst, buffer_.get() + readPos, first);
-    size_t second = toRead - first;
-    if (second > 0) std::memcpy(dst + first, buffer_.get(), second);
-
-    tailBytes_.store(tail + toRead, std::memory_order_release);
-
-    auto localRead = consumerLocalBytesRead_.fetch_add(toRead, std::memory_order_relaxed) + toRead;
-    if (localRead >= cfg_.statsFlushMinBytes) {
-        flushConsumerStatsIfNeeded(nowMs());
-    }
-    lastConsumerActivityMs_.store(nowMs(), std::memory_order_relaxed);
-    return static_cast<int>(toRead);
-}
-
-int WebMStreamBuffer::readBatch(uint8_t* dst, size_t maxLen, uint64_t timeoutMs) {
-    (void)validateThread("readBatch");
-    if (!dst || maxLen == 0) return 0;
-    ConsumerActiveGuard guard(*this);
-    return readSlow(dst, maxLen, timeoutMs);
-}
-
-void WebMStreamBuffer::softReset() {
-    if (shutdown_.load(std::memory_order_acquire)) return;
-
-    uint64_t head = headBytes_.load(std::memory_order_relaxed);
-    uint64_t tail = tailBytes_.load(std::memory_order_relaxed);
-    uint64_t used = (head >= tail) ? (head - tail) : 0;
-    if (used == 0) return;
-
-    uint64_t targetUsed = capacityBytes_ / 2;
-    uint64_t newTail = (used > targetUsed) ? (head - targetUsed) : tail;
-    if (newTail < tail) newTail = tail;
-
-    tailBytes_.store(newTail, std::memory_order_release);
-    softResets_.fetch_add(1, std::memory_order_relaxed);
-    lastResetTimeMs_.store(nowMs(), std::memory_order_relaxed);
-    consumerLagEvents_.fetch_add(1, std::memory_order_relaxed);
-
-    if (shouldLog(cfg_.logMinIntervalMs)) {
-        MEDIA_LOG_W("WebMStreamBuffer soft reset used=%llu newTail=%llu",
-                    static_cast<unsigned long long>(used), static_cast<unsigned long long>(newTail));
-    }
+    return copyOut(tail, head, dst, maxLen);
 }
 
 WebMStreamBuffer::Stats WebMStreamBuffer::getStats() const {
@@ -468,60 +384,11 @@ WebMStreamBuffer::Stats WebMStreamBuffer::getStats() const {
     s.droppedBytes = droppedBytes_.load(std::memory_order_relaxed);
     s.bufferOverflows = bufferOverflows_.load(std::memory_order_relaxed);
     s.consumerLagEvents = consumerLagEvents_.load(std::memory_order_relaxed);
-    s.estimatedBitrateBitsPerSec = lastBitrateBitsPerSec_.load(std::memory_order_relaxed);
     s.currentSizeBytes = sizeBytesRelaxed();
     s.capacityBytes = capacityBytes_;
     s.endOfStream = endOfStream_.load(std::memory_order_acquire);
     s.shutdown = shutdown_.load(std::memory_order_acquire);
     return s;
-}
-
-bool WebMStreamBuffer::isConsumerLagging() const {
-    uint64_t used = sizeBytesRelaxed();
-    return used > static_cast<uint64_t>(capacityBytes_ * 0.8);
-}
-
-WebMStreamBuffer::HealthStatus WebMStreamBuffer::getHealthStatus() const {
-    if (shutdown_.load(std::memory_order_acquire) || destroyed_.load(std::memory_order_acquire)) {
-        return HealthStatus::Dead;
-    }
-    uint64_t now = nowMs();
-    uint64_t lastProd = lastProducerActivityMs_.load(std::memory_order_relaxed);
-    uint64_t lastCons = lastConsumerActivityMs_.load(std::memory_order_relaxed);
-    if (now - lastProd > cfg_.producerStallMs) return HealthStatus::ProducerStalled;
-    if (now - lastCons > cfg_.consumerStallMs) return HealthStatus::ConsumerStalled;
-
-    uint64_t used = sizeBytesRelaxed();
-    double fillRatio = (capacityBytes_ > 0)
-        ? static_cast<double>(used) / static_cast<double>(capacityBytes_) : 0.0;
-    if (fillRatio > cfg_.severeBackpressureRatio) return HealthStatus::SevereBackpressure;
-    return HealthStatus::Healthy;
-}
-
-WebMStreamBuffer::RecoveryStats WebMStreamBuffer::getRecoveryStats() const {
-    RecoveryStats r;
-    r.softResets = softResets_.load(std::memory_order_relaxed);
-    r.hardResets = hardResets_.load(std::memory_order_relaxed);
-    r.lastResetTimeMs = lastResetTimeMs_.load(std::memory_order_relaxed);
-    return r;
-}
-
-void WebMStreamBuffer::goToLive() {
-    std::lock_guard<std::mutex> lock(cvMutex_);
-    if (shutdown_.load(std::memory_order_acquire) || destroyed_.load(std::memory_order_acquire)) return;
-    uint64_t head = headBytes_.load(std::memory_order_acquire);
-    tailBytes_.store(head, std::memory_order_release);
-    cv_.notify_all();
-    if (shouldLog(cfg_.logMinIntervalMs)) {
-        MEDIA_LOG_W("WebMStreamBuffer goToLive head=%llu", static_cast<unsigned long long>(head));
-    }
-}
-
-bool WebMStreamBuffer::isBehindLive(size_t thresholdBytes) const noexcept {
-    uint64_t head = headBytes_.load(std::memory_order_acquire);
-    uint64_t tail = tailBytes_.load(std::memory_order_acquire);
-    uint64_t used = (head >= tail) ? (head - tail) : 0;
-    return used > thresholdBytes;
 }
 
 }  // namespace media

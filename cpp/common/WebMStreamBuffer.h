@@ -19,38 +19,10 @@ namespace media {
 class WebMStreamBuffer {
 public:
     struct Config {
-        size_t minCapacityBytes;
-        uint64_t producerStallMs;
-        uint64_t consumerStallMs;
-        double severeBackpressureRatio;
-        size_t batchReadThreshold;
-        uint64_t shutdownGraceMs;
-        uint64_t logMinIntervalMs;
-        size_t statsFlushMinBytes;
-
-        Config()
-            : minCapacityBytes(16 * 1024 * 1024),
-              producerStallMs(10000),
-              consumerStallMs(10000),
-              severeBackpressureRatio(0.95),
-              batchReadThreshold(4096),
-              shutdownGraceMs(500),
-              logMinIntervalMs(5000),
-              statsFlushMinBytes(64 * 1024) {}
-    };
-
-    enum class HealthStatus {
-        Healthy,
-        ProducerStalled,
-        ConsumerStalled,
-        SevereBackpressure,
-        Dead
-    };
-
-    struct RecoveryStats {
-        uint64_t softResets;
-        uint64_t hardResets;
-        uint64_t lastResetTimeMs;
+        size_t minCapacityBytes = 16 * 1024 * 1024;
+        uint64_t shutdownGraceMs = 500;
+        uint64_t logMinIntervalMs = 5000;
+        size_t statsFlushMinBytes = 64 * 1024;
     };
 
     struct Stats {
@@ -59,14 +31,11 @@ public:
         uint64_t droppedBytes = 0;
         uint64_t bufferOverflows = 0;
         uint64_t consumerLagEvents = 0;
-        uint64_t estimatedBitrateBitsPerSec = 0;
         uint64_t currentSizeBytes = 0;
         size_t capacityBytes = 0;
         bool endOfStream = false;
         bool shutdown = false;
     };
-
-    static size_t getDefaultCapacity();
 
     /// Capacity and tuning for broadcast playback, shared by both platforms.
     ///
@@ -79,22 +48,14 @@ public:
     static Config broadcastConfig() {
         Config cfg;
         cfg.minCapacityBytes = 4 * 1024 * 1024;
-        // A live feed that goes quiet for 2s is already a visible stall; the
-        // generic 10s is far too slow to be useful as a health signal here.
-        cfg.producerStallMs = 2000;
-        cfg.consumerStallMs = 2000;
-        // Report backpressure with headroom left to recover, rather than at 95%
-        // where the next chunk is already being rejected.
-        cfg.severeBackpressureRatio = 0.7;
-        cfg.batchReadThreshold = 1024;
-        // Only a warning threshold: the destructor waits for consumers to drain
-        // regardless of this value.
-        cfg.shutdownGraceMs = 500;
         cfg.logMinIntervalMs = 30000;
         return cfg;
     }
 
-    explicit WebMStreamBuffer(size_t capacityBytes, const Config& cfg = Config());
+    // Two overloads rather than a Config() default argument: a default argument
+    // inside the enclosing class may not use Config's default member initializers.
+    explicit WebMStreamBuffer(size_t capacityBytes);
+    WebMStreamBuffer(size_t capacityBytes, const Config& cfg);
     ~WebMStreamBuffer();
 
     WebMStreamBuffer(const WebMStreamBuffer&) = delete;
@@ -118,24 +79,13 @@ public:
     void shutdown();
 
     int read(uint8_t* dst, size_t maxLen, uint64_t timeoutMs = 50);
-    int readBatch(uint8_t* dst, size_t maxLen, uint64_t timeoutMs = 50);
 
     Stats getStats() const;
     uint64_t sizeBytes() const noexcept;
     size_t capacity() const noexcept { return capacityBytes_; }
-    bool isConsumerLagging() const;
-
-    void softReset();
-
-    HealthStatus getHealthStatus() const;
-    RecoveryStats getRecoveryStats() const;
-
-    void goToLive();
-    bool isBehindLive(size_t thresholdBytes) const noexcept;
 
 private:
     static constexpr size_t MIN_CAPACITY = 8 * 1024 * 1024;
-    static constexpr size_t BITRATE_SKIP_THRESHOLD = 128;
 
     class ConsumerActiveGuard {
     public:
@@ -164,18 +114,6 @@ private:
     alignas(64) mutable std::atomic<uint64_t> totalBytesRead_{0};
     alignas(64) mutable std::atomic<uint64_t> consumerLagEvents_{0};
 
-    alignas(64) mutable std::atomic<uint64_t> lastBitrateBitsPerSec_{0};
-    alignas(64) mutable std::atomic<uint64_t> lastBitrateUpdateMs_{0};
-    alignas(64) mutable std::atomic<uint64_t> bytesSinceLastUpdate_{0};
-
-    alignas(64) mutable std::atomic<uint64_t> lastProducerActivityMs_{0};
-    alignas(64) mutable std::atomic<uint64_t> lastConsumerActivityMs_{0};
-
-    alignas(64) mutable std::atomic<uint64_t> softResets_{0};
-    alignas(64) mutable std::atomic<uint64_t> hardResets_{0};
-    alignas(64) mutable std::atomic<uint64_t> lastResetTimeMs_{0};
-
-    alignas(64) mutable std::atomic<uint64_t> corruptionEvents_{0};
     alignas(64) mutable std::atomic<uint64_t> lastLogTimeMs_{0};
 
     alignas(64) std::atomic<uint32_t> consumerActiveCount_{0};
@@ -184,7 +122,6 @@ private:
     mutable std::atomic<uint64_t> producerLocalDroppedBytes_{0};
     mutable std::atomic<uint64_t> producerLocalBufferOverflows_{0};
     mutable std::atomic<uint64_t> consumerLocalBytesRead_{0};
-    mutable std::atomic<uint64_t> consumerLocalLagEvents_{0};
     mutable std::atomic<uint64_t> producerStatsLastFlushMs_{0};
     mutable std::atomic<uint64_t> consumerStatsLastFlushMs_{0};
 
@@ -210,13 +147,13 @@ private:
     uint64_t sizeBytes(std::memory_order order) const noexcept;
     uint64_t sizeBytesRelaxed() const noexcept;
 
-    void updateBitrate(size_t bytes);
     static uint64_t nowMs();
     bool shouldLog(uint64_t minIntervalMs) const;
 
     void flushProducerStatsIfNeeded(uint64_t now) const;
     void flushConsumerStatsIfNeeded(uint64_t now) const;
 
+    int copyOut(uint64_t tail, uint64_t head, uint8_t* dst, size_t maxLen);
     int readSlow(uint8_t* dst, size_t maxLen, uint64_t timeoutMs);
 };
 
