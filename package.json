@@ -20,8 +20,8 @@
     "test:native": "npm run test:asan && npm run test:tsan && npm run test:ubsan",
     "clean": "git clean -dfX",
     "release": "semantic-release",
-    "build": "npm run typecheck && bob build",
-    "codegen": "nitrogen --logLevel=\"debug\" && npm run build && node post-script.js",
+    "build": "npm run typecheck && bob build && mkdir -p lib/nitrogen/generated/shared/json && cp nitrogen/generated/shared/json/*.json lib/nitrogen/generated/shared/json/",
+    "codegen": "nitrogen --logLevel=\"debug\" && npm run build",
     "test:fuzz": "cmake -B tests/build-asan -S tests -DSANITIZER=address && cmake --build tests/build-asan --target fuzz_demuxer && ./tests/build-asan/fuzz_demuxer"
   },
   "keywords": [
