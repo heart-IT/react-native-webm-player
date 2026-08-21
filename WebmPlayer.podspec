@@ -13,7 +13,7 @@ Pod::Spec.new do |s|
   # iOS only: the vendored opus.xcframework carries no visionOS slice, so a
   # visionOS consumer would fail at link, not at pod install.
   s.platforms    = { :ios => min_ios_version_supported }
-  s.source       = { :git => "https://github.com/rahulgarg/react-native-webm-player.git", :tag => "#{s.version}" }
+  s.source       = { :git => "https://github.com/heart-IT/react-native-webm-player.git", :tag => "#{s.version}" }
 
   # Build the Opus XCFramework from source during pod install, mirroring the
   # Android side's CMake FetchContent. Skipped when already built.

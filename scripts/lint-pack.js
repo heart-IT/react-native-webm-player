@@ -70,12 +70,42 @@ function resolveInclude(spec, fromFileRel) {
   return null
 }
 
+// Repo-relative files a podspec executes or reads at pod-install time
+// (prepare_command scripts, resource paths). These never appear in an
+// #include, so the include-graph walk above cannot see them.
+function podspecReferencedFiles(packaged) {
+  const refs = []
+  const re = /[A-Za-z0-9_](?:[A-Za-z0-9_./-]*)\.(?:sh|rb|py|js)\b/g
+  for (const rel of packaged) {
+    if (!rel.endsWith('.podspec')) continue
+    const src = fs.readFileSync(path.join(ROOT, rel), 'utf8')
+    const seen = new Set()
+    let m
+    while ((m = re.exec(src)) !== null) {
+      if (seen.has(m[0])) continue
+      seen.add(m[0])
+      if (fs.existsSync(path.join(ROOT, m[0])))
+        refs.push({ from: rel, ref: m[0] })
+    }
+  }
+  return refs
+}
+
 function main() {
   const packaged = packagedFiles()
   const packagedSet = new Set(packaged)
   const missing = []
   let scanned = 0
   let checked = 0
+
+  for (const { from, ref } of podspecReferencedFiles(packaged)) {
+    checked++
+    if (!packagedSet.has(ref)) {
+      missing.push(
+        `${from} references "${ref}", which exists locally but is NOT in the tarball.`
+      )
+    }
+  }
 
   for (const rel of packaged) {
     if (!NATIVE_EXTS.has(path.extname(rel))) continue
