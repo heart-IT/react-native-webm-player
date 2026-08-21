@@ -2,21 +2,16 @@
 // Enforces file size discipline.
 //
 //   - 400 lines: warning. Approaching the cap is a refactor signal.
-//   - 600 lines: hard ceiling. New offenders fail CI.
-//   - .lintsize-baseline.json: existing offenders. Each entry pins the file's
-//     current size — the file must shrink below 600 to be removed from the
-//     baseline, and may NEVER grow past its pinned size while it remains.
+//   - 600 lines: hard ceiling, CI fails.
 //
 // Vendored deps and nitrogen-generated code are excluded; tests are included.
 //
 // Run: npm run lint:size
-// Update baseline (after extracting): node scripts/lint-size.js --update-baseline
 
 const fs = require('fs')
 const path = require('path')
 
 const ROOT = path.resolve(__dirname, '..')
-const BASELINE_PATH = path.join(ROOT, '.lintsize-baseline.json')
 
 const WARN = 400
 const HARD = 600
@@ -75,18 +70,6 @@ function lineCount(file) {
   return lines
 }
 
-function loadBaseline() {
-  if (!fs.existsSync(BASELINE_PATH)) return {}
-  return JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'))
-}
-
-function saveBaseline(b) {
-  const sorted = Object.fromEntries(
-    Object.entries(b).sort(([a], [c]) => a.localeCompare(c))
-  )
-  fs.writeFileSync(BASELINE_PATH, JSON.stringify(sorted, null, 2) + '\n')
-}
-
 function collect() {
   const files = []
   for (const dir of SOURCE_DIRS) {
@@ -97,51 +80,15 @@ function collect() {
 }
 
 function main() {
-  const updateBaseline = process.argv.includes('--update-baseline')
   const files = collect()
-  const baseline = loadBaseline()
-
   const errors = []
   const warnings = []
-  const stale = [] // baselined files that have shrunk below HARD
-  const newBaseline = {}
 
   for (const abs of files) {
     const rel = path.relative(ROOT, abs)
     const lines = lineCount(abs)
-
-    if (rel in baseline) {
-      const pinned = baseline[rel]
-      if (lines <= HARD) {
-        stale.push(
-          `${rel}: now ${lines} lines (was pinned at ${pinned}); remove from baseline.`
-        )
-        if (!updateBaseline) newBaseline[rel] = pinned
-      } else if (lines > pinned) {
-        errors.push(
-          `${rel}: ${lines} lines (baseline ${pinned}). Baselined files must shrink, not grow. Extract before adding.`
-        )
-        newBaseline[rel] = pinned
-      } else {
-        if (lines < pinned && !updateBaseline) {
-          warnings.push(
-            `${rel}: ${lines} lines (baseline ${pinned}, --update-baseline to tighten).`
-          )
-        }
-        newBaseline[rel] = updateBaseline ? lines : pinned
-      }
-      continue
-    }
-
     if (lines > HARD) {
-      if (updateBaseline) {
-        newBaseline[rel] = lines
-        warnings.push(`${rel}: ${lines} lines added to baseline.`)
-      } else {
-        errors.push(
-          `${rel}: ${lines} lines exceeds hard limit of ${HARD}. New files must be under ${HARD}.`
-        )
-      }
+      errors.push(`${rel}: ${lines} lines exceeds hard limit of ${HARD}.`)
     } else if (lines > WARN) {
       warnings.push(`${rel}: ${lines} lines (warn at ${WARN}).`)
     }
@@ -150,13 +97,6 @@ function main() {
   if (warnings.length) {
     console.warn('lint:size warnings:')
     for (const w of warnings) console.warn('  ' + w)
-    console.warn('')
-  }
-
-  if (stale.length) {
-    console.warn('lint:size — baseline entries that can be retired:')
-    for (const s of stale) console.warn('  ' + s)
-    console.warn('  Run: node scripts/lint-size.js --update-baseline')
     console.warn('')
   }
 
@@ -169,10 +109,8 @@ function main() {
     process.exit(1)
   }
 
-  if (updateBaseline) saveBaseline(newBaseline)
-
   console.log(
-    `lint:size ok — ${files.length} files, ${warnings.length} warnings, ${Object.keys(newBaseline).length} baselined.`
+    `lint:size ok — ${files.length} files, ${warnings.length} warnings.`
   )
 }
 
