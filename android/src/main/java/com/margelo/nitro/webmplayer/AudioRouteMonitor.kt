@@ -18,7 +18,8 @@ class AudioRouteMonitor(context: Context, private val handler: Handler) {
 
   private val audioManager =
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-  private var onChange: ((WebmAudioRoute) -> Unit)? = null
+  // Written from the JS thread (setCallback), read on the handler's thread.
+  @Volatile private var onChange: ((WebmAudioRoute) -> Unit)? = null
   private var deviceCallback: AudioDeviceCallback? = null
 
   /**

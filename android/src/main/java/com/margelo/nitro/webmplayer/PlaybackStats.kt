@@ -39,11 +39,22 @@ class PlaybackStats(private val mainHandler: Handler) {
 
   private var tick: Runnable? = null
 
+  // Decoder counters restart at zero with every ExoPlayer instance (and every
+  // re-prepare after a stream reset); these bases carry the totals accumulated
+  // so far, so the atomics stay cumulative. Main thread only, like the poll.
+  private var audioPacketsBase = 0L
+  private var videoPacketsBase = 0L
+  private var videoDroppedBase = 0L
+
   val isReady: Boolean
     get() = exoState.get() == Player.STATE_READY
 
   /** Wires listeners and starts the counter poll. Main thread only. */
   fun attach(exo: ExoPlayer, onHealth: (WebmHealthStatus, String) -> Unit) {
+    rebase()
+    // A stale READY from the previous cycle would read as PLAYING before this
+    // player's first onPlaybackStateChanged.
+    exoState.set(Player.STATE_IDLE)
     exo.addListener(object : Player.Listener {
       override fun onPlaybackStateChanged(state: Int) {
         exoState.set(state)
@@ -86,6 +97,13 @@ class PlaybackStats(private val mainHandler: Handler) {
     tick = null
   }
 
+  /** Re-captures the cumulative bases. Call whenever decoders restart. */
+  fun rebase() {
+    audioPacketsBase = audioPackets.get()
+    videoPacketsBase = videoPackets.get()
+    videoDroppedBase = videoDropped.get()
+  }
+
   fun snapshot(rate: Double, muted: Boolean, gain: Double) = WebmPlayerMetrics(
     bytesFedTotal = bytesFed.get().toDouble(),
     audioPacketsDecoded = audioPackets.get().toDouble(),
@@ -109,11 +127,11 @@ class PlaybackStats(private val mainHandler: Handler) {
       override fun run() {
         positionMs.set(exo.currentPosition)
         exo.videoDecoderCounters?.let {
-          videoPackets.set(it.renderedOutputBufferCount.toLong())
-          videoDropped.set(it.droppedBufferCount.toLong())
+          videoPackets.set(videoPacketsBase + it.renderedOutputBufferCount)
+          videoDropped.set(videoDroppedBase + it.droppedBufferCount)
         }
         exo.audioDecoderCounters?.let {
-          audioPackets.set(it.queuedInputBufferCount.toLong())
+          audioPackets.set(audioPacketsBase + it.queuedInputBufferCount)
         }
         mainHandler.postDelayed(this, STATS_INTERVAL_MS)
       }

@@ -42,6 +42,11 @@ class HybridWebmPlayerView(context: Context) : HybridWebmPlayerViewSpec() {
       (value as? HybridWebmPlayer)?.attachSurface(playerView)
     }
 
+  /** React dropped this view: unregister it from the player it presented. */
+  override fun onDropView() {
+    (player as? HybridWebmPlayer)?.detachSurface(playerView)
+  }
+
   override var scaleMode: WebmScaleMode = WebmScaleMode.CONTAIN
     set(value) {
       field = value

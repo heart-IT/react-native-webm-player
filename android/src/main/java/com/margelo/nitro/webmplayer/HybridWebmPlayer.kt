@@ -4,20 +4,14 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.media3.common.C
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DataSource
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.MediaSource
-import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import androidx.media3.extractor.DefaultExtractorsFactory
-import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.ui.PlayerView
 import com.margelo.nitro.NitroModules
 import com.margelo.nitro.core.ArrayBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Android playback: ExoPlayer reading from a WebMStreamBuffer-backed DataSource.
@@ -50,18 +44,15 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   private external fun nativeSetEndOfStream(handle: Long)
   private external fun nativeClear(handle: Long)
   private external fun nativeShutdown(handle: Long)
-  private external fun nativeGoToLive(handle: Long)
-  private external fun nativeIsBehindLive(handle: Long, thresholdBytes: Int): Boolean
 
   private val mainHandler = Handler(Looper.getMainLooper())
 
-  @Volatile private var ringHandle: Long = 0L
+  private val ringHandle = AtomicLong(0L)
   @Volatile private var player: ExoPlayer? = null
-  private var focus: AudioFocusController? = null
   // Main-thread only, like everything else that touches ExoPlayer.
   private var surface: PlayerView? = null
   private var routes: AudioRouteMonitor? = null
-  private var healthCallback: ((WebmHealthEvent) -> Unit)? = null
+  @Volatile private var healthCallback: ((WebmHealthEvent) -> Unit)? = null
   @Volatile private var lastHealth: WebmHealthStatus? = null
 
   private val running = AtomicBoolean(false)
@@ -83,8 +74,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     if (running.get()) return true
     lastHealth = null
     // Created synchronously so feedData() can buffer while ExoPlayer spins up.
-    ringHandle = nativeCreateRing()
-    if (ringHandle == 0L) return false
+    val handle = nativeCreateRing()
+    if (handle == 0L) return false
+    ringHandle.set(handle)
     running.set(true)
     paused.set(false)
     stats.failed.set(false)
@@ -93,44 +85,30 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   }
 
   private fun startOnMain() {
+    val handle = ringHandle.get()
     val context = NitroModules.applicationContext ?: run {
       Log.e(TAG, "no application context; cannot create ExoPlayer")
-      stats.failed.set(true)
+      failOnMain(handle, "no application context")
       return
     }
     try {
-      val loadControl = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(50, 120, 30, 50)
-        .setBackBuffer(50, true)
-        .setPrioritizeTimeOverSizeThresholds(true)
-        .build()
-
       val exo = ExoPlayer.Builder(context)
-        .setLoadControl(loadControl)
+        .setLoadControl(WebmMediaPipeline.loadControl())
         .build()
         .apply {
+          // handleAudioFocus = true: ExoPlayer owns focus, so losses, ducks and
+          // regains flow through playWhenReady/volume and the mirrored state
+          // stays truthful.
           setAudioAttributes(
             androidx.media3.common.AudioAttributes.Builder()
               .setUsage(C.USAGE_MEDIA)
               .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
               .build(),
-            false,
+            true,
           )
           volume = if (currentMuted) 0f else currentGain.toFloat()
           setPlaybackSpeed(currentRate.toFloat())
         }
-
-      val handle = ringHandle
-      val source = RingDataSource { buf, off, len -> nativeRead(handle, buf, off, len, READ_TIMEOUT_MS) }
-      val extractors = DefaultExtractorsFactory()
-        .setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
-      val mediaItem = MediaItem.Builder()
-        .setUri(RingDataSource.STREAM_URI)
-        .setMimeType(MimeTypes.VIDEO_WEBM)
-        .build()
-      val mediaSource: MediaSource =
-        ProgressiveMediaSource.Factory(DataSource.Factory { source }, extractors)
-          .createMediaSource(mediaItem)
 
       stats.attach(exo) { status, detail -> fireHealth(status, detail) }
       lifecycle = HostLifecycleObserver(
@@ -138,43 +116,61 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
         onBackground = { suspendForBackground() },
         onForeground = { resumeFromForeground() },
       )
-      focus = AudioFocusController(context, mainHandler).also { controller ->
-        controller.acquire { change ->
-          when (change) {
-            AudioFocusController.Change.PAUSE -> player?.pause()
-            AudioFocusController.Change.DUCK -> player?.volume = DUCK_VOLUME
-            AudioFocusController.Change.RESTORE ->
-              player?.volume = if (currentMuted) 0f else currentGain.toFloat()
-          }
-        }
-      }
 
-      exo.setMediaSource(mediaSource)
+      exo.setMediaSource(buildMediaSource(handle))
       exo.prepare()
       exo.playWhenReady = true
       player = exo
       surface?.player = exo
     } catch (e: Exception) {
       Log.e(TAG, "start failed", e)
-      stats.failed.set(true)
-      releaseOnMain()
+      failOnMain(handle, e.message ?: e.javaClass.simpleName)
     }
   }
+
+  /**
+   * A player that failed to come up must not report running, and nothing will
+   * ever read this cycle's ring, so it is freed here — stop() early-returns
+   * once running is false. The CAS leaves a ring a newer start() created alone.
+   */
+  private fun failOnMain(handle: Long, detail: String) {
+    stats.failed.set(true)
+    running.set(false)
+    fireHealth(WebmHealthStatus.FAILED, detail)
+    releaseOnMain()
+    if (handle != 0L && ringHandle.compareAndSet(handle, 0L)) {
+      nativeShutdown(handle)
+      nativeDestroyRing(handle)
+    }
+  }
+
+  private fun buildMediaSource(handle: Long): MediaSource =
+    WebmMediaPipeline.mediaSource {
+      RingDataSource { buf, off, len -> nativeRead(handle, buf, off, len, READ_TIMEOUT_MS) }
+    }
 
   override fun stop(): Boolean {
     if (!running.get()) return true
     running.set(false)
     paused.set(false)
     backgrounded.set(false)
-    val handle = ringHandle
+    val handle = ringHandle.get()
     if (handle != 0L) nativeShutdown(handle)  // unblocks a reader inside DataSource.read
     mainHandler.post {
       releaseOnMain()
-      // Freed only after the player (and its loader thread) is gone.
+      // Freed only after the player (and its loader thread) is gone. The CAS
+      // leaves a ring a newer start() created alone.
       if (handle != 0L) nativeDestroyRing(handle)
-      if (ringHandle == handle) ringHandle = 0L
+      ringHandle.compareAndSet(handle, 0L)
     }
     return true
+  }
+
+  override fun dispose() {
+    stop()
+    routes?.release()
+    routes = null
+    super.dispose()
   }
 
   override fun pause(): Boolean {
@@ -225,7 +221,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   // MARK: - Stream data
 
   override fun feedData(data: ArrayBuffer): Boolean {
-    val handle = ringHandle
+    val handle = ringHandle.get()
     if (handle == 0L) return false
     val size = data.size
     if (size == 0) return false
@@ -240,13 +236,26 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   }
 
   override fun setEndOfStream() {
-    val handle = ringHandle
+    val handle = ringHandle.get()
     if (handle != 0L) nativeSetEndOfStream(handle)
   }
 
   override fun resetStream() {
-    val handle = ringHandle
-    if (handle != 0L) nativeClear(handle)
+    val handle = ringHandle.get()
+    if (handle == 0L) return
+    nativeClear(handle)
+    mainHandler.post {
+      val exo = player ?: return@post
+      // A new stream begins with its own EBML header, and the running
+      // MatroskaExtractor is mid-cluster — rebuild the pipeline rather than
+      // feed a header into it. Mirrors the iOS pump's demuxer.reset().
+      exo.stop()
+      exo.setMediaSource(buildMediaSource(handle))
+      exo.prepare()
+      stats.rebase()
+      exo.playWhenReady = !paused.get() && !backgrounded.get()
+      fireHealth(WebmHealthStatus.BUFFERING, "stream reset")
+    }
   }
 
   // MARK: - Controls
@@ -286,6 +295,10 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
    */
   fun attachSurface(target: PlayerView) {
     mainHandler.post {
+      val previous = surface
+      // A replaced view must drop its player reference, or it stays registered
+      // as a listener on the ExoPlayer it no longer presents.
+      if (previous !== target) previous?.player = null
       surface = target
       target.player = player
     }
@@ -345,14 +358,10 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     surface?.player = null
     player?.release()
     player = null
-    focus?.release()
-    focus = null
   }
 
   companion object {
     private const val TAG = "WebmPlayer"
-    private const val STATS_INTERVAL_MS = 750L
     private const val READ_TIMEOUT_MS = 50
-    private const val DUCK_VOLUME = 0.2f
   }
 }
