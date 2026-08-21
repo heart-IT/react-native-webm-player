@@ -45,7 +45,6 @@ constexpr size_t kCapacity = 8u << 20;
 
 WebMStreamBuffer::Config testConfig() {
   WebMStreamBuffer::Config cfg;
-  cfg.minCapacityBytes = 0;
   return cfg;
 }
 
@@ -58,7 +57,7 @@ void fillCompletely(WebMStreamBuffer& ring) {
   std::vector<uint8_t> chunk(kChunk, 0x5A);
   size_t written = 0;
   while (written < kCapacity) {
-    size_t got = ring.write(chunk.data(), kChunk, false);
+    size_t got = ring.write(chunk.data(), kChunk);
     if (got == 0) break;
     written += got;
   }

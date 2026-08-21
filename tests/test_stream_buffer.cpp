@@ -38,7 +38,6 @@ constexpr size_t kCapacity = 8u << 20;
 
 WebMStreamBuffer::Config testConfig() {
   WebMStreamBuffer::Config cfg;
-  cfg.minCapacityBytes = 0;  // let the hard 8 MiB floor decide
   return cfg;
 }
 
@@ -52,10 +51,8 @@ std::vector<uint8_t> pattern(size_t n, size_t startIndex = 0) {
   return v;
 }
 
-// isClusterBoundary=false: synthetic bytes are not real WebM clusters, and the
-// debug-build validator would otherwise count and log a mismatch per write.
 size_t put(WebMStreamBuffer& buf, const std::vector<uint8_t>& data) {
-  return buf.write(data.data(), data.size(), false);
+  return buf.write(data.data(), data.size());
 }
 
 // Fill to exactly `bytes` using repeated writes.
@@ -65,7 +62,7 @@ size_t fill(WebMStreamBuffer& buf, size_t bytes) {
   size_t written = 0;
   while (written < bytes) {
     size_t want = std::min(kChunk, bytes - written);
-    size_t got = buf.write(chunk.data(), want, false);
+    size_t got = buf.write(chunk.data(), want);
     if (got == 0) break;
     written += got;
   }
@@ -105,8 +102,8 @@ TEST(write_then_read_roundtrips_bytes) {
 TEST(write_rejects_null_pointer_and_zero_length) {
   auto buf = makeBuffer();
   auto src = pattern(8);
-  ASSERT_EQ(buf.write(nullptr, 8, false), size_t(0));
-  ASSERT_EQ(buf.write(src.data(), 0, false), size_t(0));
+  ASSERT_EQ(buf.write(nullptr, 8), size_t(0));
+  ASSERT_EQ(buf.write(src.data(), 0), size_t(0));
   ASSERT_EQ(buf.sizeBytes(), uint64_t(0));
 }
 
@@ -444,7 +441,7 @@ TEST(concurrent_producer_and_consumer_preserve_the_byte_stream) {
       auto src = pattern(kChunk, index);
       size_t off = 0;
       while (off < kChunk) {
-        size_t n = buf.write(src.data() + off, kChunk - off, false);
+        size_t n = buf.write(src.data() + off, kChunk - off);
         if (n == 0) {
           std::this_thread::yield();
           continue;

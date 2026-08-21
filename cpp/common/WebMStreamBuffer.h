@@ -1,9 +1,11 @@
-// Lock-free SPSC byte ring buffer for WebM stream data.
-// Producer (JS via feedData) writes; consumer (ExoPlayer DataSource on Android,
-// libwebm demuxer on iOS) reads. Power-of-two capacity for fast modular indexing.
+// SPSC byte ring buffer for WebM stream data. Producer (JS via feedData)
+// writes; consumer (ExoPlayer DataSource on Android, libwebm demuxer on iOS)
+// reads. Power-of-two capacity for fast modular indexing.
 //
-// Ported from call-doctor-mobile (battle-tested in production). Namespace and
-// logging adjusted to webm-player conventions; behavior unchanged.
+// Ported from call-doctor-mobile, then stripped of that codebase's
+// high-frequency machinery (stats batching, debug validators, cache-line
+// padding on counters): this ring moves a few hundred KB/s, not audio-callback
+// traffic.
 #pragma once
 
 #include <atomic>
@@ -19,10 +21,8 @@ namespace media {
 class WebMStreamBuffer {
 public:
     struct Config {
-        size_t minCapacityBytes = 16 * 1024 * 1024;
         uint64_t shutdownGraceMs = 500;
         uint64_t logMinIntervalMs = 5000;
-        size_t statsFlushMinBytes = 64 * 1024;
     };
 
     struct Stats {
@@ -47,7 +47,6 @@ public:
 
     static Config broadcastConfig() {
         Config cfg;
-        cfg.minCapacityBytes = 4 * 1024 * 1024;
         cfg.logMinIntervalMs = 30000;
         return cfg;
     }
@@ -73,7 +72,7 @@ public:
         return shutdown_.load(std::memory_order_acquire);
     }
 
-    size_t write(const uint8_t* data, size_t length, bool isClusterBoundary = true);
+    size_t write(const uint8_t* data, size_t length);
     void setEndOfStream(bool eos = true);
     void clear();
     void shutdown();
@@ -104,41 +103,22 @@ private:
     std::atomic<bool> endOfStream_{false};
     std::atomic<bool> destroyed_{false};
 
+    // The only fields both threads touch at rate; padded so producer publishes
+    // and consumer publishes never share a line.
     alignas(64) std::atomic<uint64_t> headBytes_{0};
     alignas(64) std::atomic<uint64_t> tailBytes_{0};
 
-    alignas(64) mutable std::atomic<uint64_t> totalBytesWritten_{0};
-    alignas(64) mutable std::atomic<uint64_t> droppedBytes_{0};
-    alignas(64) mutable std::atomic<uint64_t> bufferOverflows_{0};
+    std::atomic<uint64_t> totalBytesWritten_{0};
+    std::atomic<uint64_t> droppedBytes_{0};
+    std::atomic<uint64_t> bufferOverflows_{0};
+    std::atomic<uint64_t> totalBytesRead_{0};
+    std::atomic<uint64_t> consumerLagEvents_{0};
+    mutable std::atomic<uint64_t> lastLogTimeMs_{0};
 
-    alignas(64) mutable std::atomic<uint64_t> totalBytesRead_{0};
-    alignas(64) mutable std::atomic<uint64_t> consumerLagEvents_{0};
-
-    alignas(64) mutable std::atomic<uint64_t> lastLogTimeMs_{0};
-
-    alignas(64) std::atomic<uint32_t> consumerActiveCount_{0};
-
-    mutable std::atomic<uint64_t> producerLocalBytesWritten_{0};
-    mutable std::atomic<uint64_t> producerLocalDroppedBytes_{0};
-    mutable std::atomic<uint64_t> producerLocalBufferOverflows_{0};
-    mutable std::atomic<uint64_t> consumerLocalBytesRead_{0};
-    mutable std::atomic<uint64_t> producerStatsLastFlushMs_{0};
-    mutable std::atomic<uint64_t> consumerStatsLastFlushMs_{0};
+    std::atomic<uint32_t> consumerActiveCount_{0};
 
     mutable std::mutex cvMutex_;
     std::condition_variable cv_;
-
-#ifndef NDEBUG
-    mutable std::atomic<size_t> nonClusterWrites_{0};
-    mutable std::thread::id producerThreadId_{};
-    mutable std::thread::id consumerThreadId_{};
-    mutable std::mutex debugThreadValidationMutex_;
-    bool validateThread(const char* op) const;
-    bool validateWebMClusterBoundary(const uint8_t* data, size_t length) const;
-#else
-    inline bool validateThread(const char*) const { return true; }
-    inline bool validateWebMClusterBoundary(const uint8_t*, size_t) const { return true; }
-#endif
 
     inline size_t indexFor(uint64_t abs) const noexcept {
         return static_cast<size_t>(abs & static_cast<uint64_t>(mask_));
@@ -149,9 +129,6 @@ private:
 
     static uint64_t nowMs();
     bool shouldLog(uint64_t minIntervalMs) const;
-
-    void flushProducerStatsIfNeeded(uint64_t now) const;
-    void flushConsumerStatsIfNeeded(uint64_t now) const;
 
     int copyOut(uint64_t tail, uint64_t head, uint8_t* dst, size_t maxLen);
     int readSlow(uint8_t* dst, size_t maxLen, uint64_t timeoutMs);

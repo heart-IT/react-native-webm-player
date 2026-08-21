@@ -32,7 +32,6 @@ constexpr size_t kCapacity = 8u << 20;
 
 WebMStreamBuffer::Config testConfig() {
   WebMStreamBuffer::Config cfg;
-  cfg.minCapacityBytes = 0;
   return cfg;
 }
 
@@ -46,7 +45,7 @@ size_t fill(WebMStreamBuffer& buf, size_t bytes) {
   size_t written = 0;
   while (written < bytes) {
     size_t want = std::min(kChunk, bytes - written);
-    size_t got = buf.write(chunk.data(), want, false);
+    size_t got = buf.write(chunk.data(), want);
     if (got == 0) break;
     written += got;
   }
@@ -74,7 +73,7 @@ TEST(overflow_must_reject_a_chunk_whole_rather_than_splitting_it) {
   ASSERT_EQ(fill(buf, kCapacity - kHeadroom), kCapacity - kHeadroom);
 
   auto chunk = patternOf(100, 0xBB);
-  size_t wrote = buf.write(chunk.data(), chunk.size(), false);
+  size_t wrote = buf.write(chunk.data(), chunk.size());
 
   // All-or-nothing is the required contract. Currently returns 10.
   ASSERT_TRUE(wrote == 0 || wrote == chunk.size());
@@ -93,7 +92,7 @@ TEST(a_partially_written_chunk_leaves_a_fragment_in_the_stream) {
   ASSERT_EQ(fill(buf, kCapacity - kHeadroom), kCapacity - kHeadroom);
 
   auto chunk = patternOf(100, 0xA1);  // filler is 0xAA, so 0xA1 is unambiguous
-  buf.write(chunk.data(), chunk.size(), false);
+  buf.write(chunk.data(), chunk.size());
 
   size_t fragmentBytes = 0;
   std::vector<uint8_t> sink(64 * 1024);

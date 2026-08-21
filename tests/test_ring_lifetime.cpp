@@ -55,7 +55,6 @@ constexpr int kRounds = 60;
 
 WebMStreamBuffer::Config testConfig() {
   WebMStreamBuffer::Config cfg;
-  cfg.minCapacityBytes = 0;
   return cfg;
 }
 
@@ -65,7 +64,7 @@ void fillToCapacity(WebMStreamBuffer& ring, size_t capacity) {
   std::vector<uint8_t> chunk(kChunk, 0x5A);
   size_t written = 0;
   while (written < capacity) {
-    size_t got = ring.write(chunk.data(), std::min(kChunk, capacity - written), false);
+    size_t got = ring.write(chunk.data(), std::min(kChunk, capacity - written));
     if (got == 0) break;
     written += got;
   }

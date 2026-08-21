@@ -114,7 +114,7 @@ constexpr uint64_t kErrorLogMask = 511;
   if (!_ring) return 0;
   if (_resetRequested.load(std::memory_order_relaxed)) [self restartIfExited];
   // Synthetic chunk boundaries, not cluster-aligned — skip the debug validator.
-  size_t wrote = _ring->write(bytes, length, /*isClusterBoundary=*/false);
+  size_t wrote = _ring->write(bytes, length);
   _bytesFed.fetch_add(wrote);
   return wrote;
 }

@@ -55,7 +55,7 @@ Java_com_margelo_nitro_webmplayer_RingBridge_write(
     return 0;
   }
   return static_cast<jint>(
-      ring->write(base, static_cast<size_t>(length), /*isClusterBoundary=*/false));
+      ring->write(base, static_cast<size_t>(length)));
 }
 
 // ExoPlayer's DataSource hands us a byte[], so this side cannot avoid the JNI
