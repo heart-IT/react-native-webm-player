@@ -323,3 +323,73 @@ Not findings — audit coverage that was never completed, carried forward:
 - Systematic sweeps of `WebmBlockParser` internals, observability, and RN
   render/bridge profiling.
 - **Execution coverage of the engines** — the dominant risk, closed only by P6.
+
+## 2026-08-07 full-codebase audit (four parallel passes + fix sweep)
+
+Four audits — C++ core, iOS, Android, cross-platform parity — with every
+finding verified against source before action. Fixes landed the same day;
+verdicts below reflect post-fix state, unlike the sections above.
+
+**Fixed (shared C++):** `clear()` racing an in-flight `read()` wedged the ring
+permanently (tail published past head; TSan-invisible logic race, reachable
+from `resetStream()` during playback — consumer now publishes via CAS and a
+regression test proves the wedge on the old code); missed-wakeup in `write()`'s
+empty→non-empty notify gate; mid-feed backpressure drain invalidated zero-copy
+packet pointers already emitted into the same `DemuxResult` (drain removed —
+drop-new, matching the ring's policy); laced-block PTS dedup dropped frames
+2..n of every laced block (dedup now block-level; no laced fixture exists, so
+this fix is analysis-verified only); error-path `append()` return ignored. Dead
+surface deleted: ring health/recovery API, live-edge API (`goToLive`/
+`isBehindLive` through JNI and Kotlin), provably-no-op batch-read clamp, and
+the demuxer's unreachable scratch-slot fallback. `WebMStreamBuffer.cpp` shrank
+from 527 to 455 lines — still over the 400-line warning; the next change there
+holds or shrinks it.
+
+**Fixed (Android):** custom audio-focus controller deleted in favour of
+ExoPlayer's `handleAudioFocus` (removes focus-pause invisible to the state
+mirror, no-resume-after-call, and the pre-O gap); `dispose()` now releases the
+player, route callback, and ring; view unmount detaches the surface; ringHandle
+stop/start TOCTOU closed with CAS; `@Volatile` on cross-thread callbacks;
+decoder metrics genuinely cumulative across cycles; start failures fire the
+FAILED health event; `resetStream()` rebuilds the extractor (was ring-clear
+only — the mid-cluster wedge iOS already guarded against). Known residual: ring
+clear on the JS thread races the old loader until the main-thread `stop()`.
+
+**Fixed (iOS, outside the frozen presentation path):** audio-session
+interruption observer (a phone call left the synchronizer at rate 0 forever —
+the rate-zeroing is documented on `AVSampleBufferRenderSynchronizer`);
+`resumeFromForeground` no longer unparks the pump when JS-paused (resurrected
+the measured 401-packet hole); `stop()` clears pause/background flags;
+gain/rate clamps matching Android; pump reports mid-stream stalls as
+`buffering` and recovery as `playing`; pump delegate calls hop to main (a
+weak-load on the demux thread could join the thread from itself);
+`@autoreleasepool` on the demux loop; block-buffer copy returns checked;
+pending-cap drops counted and logged (the frozen-layer signature, previously
+invisible); `audioUnderruns` now honestly 0 on iOS (it was the queue-overflow
+count — the opposite condition; starvation is unobservable through
+`AVSampleBufferAudioRenderer`); dead `Bridge.h`, dead pump properties, and the
+podspec's unbuildable visionOS claim removed.
+
+**Parity/JS:** `WebmHealthStatus`, `WebmAudioRoute`, `WebmHealthEvent` now
+exported from `src/index.ts`; platform-only metrics fields documented in the
+spec.
+
+**Deferred — do not touch before the device evidence run** (all in the
+frozen-picture path, see DEVICE_VALIDATION):
+
+- Engine object graph and renderer set are touched from JS + main threads
+  unsynchronized (`start`/`stop` vs lifecycle handlers; renderer add/remove on
+  the JS thread against the engine's own main-thread rule).
+- `_requesting` flags touched off their documented confinement queues
+  (video `shutdown`, audio `setRenderer`/`dealloc`).
+- No observer for layer-failure notifications; recovery is one-shot at
+  `willEnterForeground` (candidate 4 in DEVICE_VALIDATION).
+- The deprecated `AVSampleBufferDisplayLayer` queue API (14 sites, one file):
+  guarded `sampleBufferRenderer` migration (iOS 17+, floor stays at RN's 15.1);
+  the synchronizer accepts `AVSampleBufferVideoRenderer` directly; SDK forbids
+  mixing the two surfaces.
+
+**Known divergence, documented not fixed:** a WebM parse error mid-broadcast is
+fatal on Android (`MatroskaExtractor`'s `ParserException` is non-retriable in
+ExoPlayer's load-error policy) while iOS skips and continues per the error
+table. Inherent to leaning on ExoPlayer; recovery is a JS `stop()`/`start()`.

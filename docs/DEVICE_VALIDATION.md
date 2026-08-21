@@ -163,11 +163,25 @@ An explicit flush + re-arm on resume was written (uncommitted, in
 in play. Candidates not yet tested:
 
 1. The `AVSampleBufferRenderSynchronizer` may need the layer re-added as a
-   renderer after the failure, not just flushed.
+   renderer after the failure, not just flushed. (The SDK documents flush alone
+   as sufficient — if re-add turns out to be needed, it is undocumented
+   behaviour.)
 2. `_pending` frames enqueued before the trip carry timestamps behind the
    resumed timebase and may all be discarded as late, with newly decoded frames
    never arriving because the VP9 session did not actually rebuild.
 3. The VP9 session rebuild itself is unverified — no evidence either way yet.
+4. Recovery is one-shot and fires at `willEnterForeground`, before the app is
+   active. If the layer fails again after that single flush, nothing can ever
+   notice: the detection lives inside the pull block a failed layer never
+   invokes, there is no KVO on `status`, and the SDK's failure notifications
+   (`RequiresFlushToResumeDecodingDidChange`, `FailedToDecode`) have no
+   observers. Fits every observation, including "flush+re-arm did not fix it".
+
+The code now logs, at levels that persist into a collected archive: layer
+status before→after the resume flush, the pending-queue PTS range, the
+synchronizer clock at background and foreground, VP9 session creation, decode
+errors, and pending-queue-full drops. One instrumented device run discriminates
+all four candidates.
 
 Blocking the diagnosis: **no working device log capture.** `MEDIA_LOG` goes to
 `os_log` (subsystem `com.heartit.webmplayer`), and neither route worked:
