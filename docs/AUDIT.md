@@ -525,3 +525,42 @@ covered by reading + host execution. **Performance on device and everything
 requiring real playback remain deferred to device validation**, plus the
 standing frozen-picture regression and its device-log blocker
 (DEVICE_VALIDATION.md), untouched by this round per its ground rules.
+
+## Round-3 fix sweep (2026-08-21, same day)
+
+Every gate green after the sweep: quick gates, codegen 0-diff, ASan/TSan/UBSan
+across 7 binaries + a now-5-phase fuzzer (125k iterations, seed self-checked to
+reach `Streaming`), iOS and Android example builds. New tests proven able to
+fail: `test_demux_hostile` red against pre-sweep code; `test_demux_lacing` red
+under a reintroduced per-frame dedup mutation.
+
+| Commit    | Closes                                                                                                                                                                                                                      |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `7d0f2f2` | **R3-1**, D-4, D-5, D-6, D-7 — tarball ships `build-opus.sh` (145 files, was 309); lint:pack now also gates podspec-referenced scripts (red-proven)                                                                         |
+| `92f7d33` | **R3-2**, R3-22 — post-script deleted; `lib/` entries resolve (view-config json copied into lib at build)                                                                                                                   |
+| `b0e2691` | D-9 — release job re-runs format/lint/size/codegen-freshness                                                                                                                                                                |
+| `ed25b66` | R3-7 (Android), **R3-9** (Android: `playWhenReady` mirrored; platform halts read `Paused` with `isPaused` false), C-3, C-4, C-5, C-7, C-8, C-9                                                                              |
+| `60f10d1` | **R3-3, R3-4, R3-8** (pump restarts after EOS; reset re-anchors clock, flushes renderers via new `demuxPumpDidResetStream`), R3-9 (iOS), R3-11, R3-12, R3-13, R3-16, R3-17, R3-18, R3-19, B-11, B-12, E-14/E-15/E-16b (iOS) |
+| `cf9d1c6` | R3-10 (gain 0.0–1.0 both platforms), **R3-15** (feeder contract in spec JSDoc + README)                                                                                                                                     |
+| `c107bc7` | **R3-5** (unfittable cluster → parse Error, red-proven), **R3-6** (fuzz seed + self-check + laced phase), R3-20 (UB clamp), E-12 cull (also moots R3-21/A-4), E-15 (demux), lacing test gap                                 |
+| `62d6ff0` | R3-14 — 8-channel ceiling bounds the pending-queue worst case (~18 MB, was ~590 MB)                                                                                                                                         |
+
+Line budgets: `WebmPlaybackEngine.mm` held at 416 (audio-session control and
+metrics assembly extracted to `WebmAudioSessionController` / `WebmEngineMetrics`
+first, honoring E-13). `WebmVideoDecoder.mm` grew 375 → 413 — justified: the
+additions are this sweep's fixes, and the only extractable mass is the
+frozen-picture pull loop, which is off-limits before the device evidence run.
+
+**Still open after the sweep:**
+
+- E-10 (partial): iOS renderer-stage drops now reach `videoFramesDropped`;
+  ring/demux drop counters remain JS-invisible. A pre-overflow backpressure
+  watermark for feeders (R3-15's remaining half) needs a spec addition.
+- E-11: video-only stream never starts the iOS clock — needs a device decision.
+- E-16 (partial): platform halts now visible via `playbackState`; no dedicated
+  health status for interruptions (would need a spec enum addition).
+- The documented Android reset/loader residual — unchanged, C-2's latch fix
+  halves its blast radius as planned.
+- Everything device-gated: see the round-3 checklist in DEVICE_VALIDATION.md.
+  Behavior-changing fixes (R3-4, R3-17/18, B-11, gain clamp) are
+  build/sanitizer-verified only; the physical-device pass is the ship gate.
