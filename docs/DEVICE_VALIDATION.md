@@ -1,8 +1,9 @@
 # Device validation (P6)
 
-The example app (`example/App.tsx`) auto-plays a bundled 1-second 480p VP9 +
-5.1 Opus fixture on launch and shows live metrics, so a run needs no interaction.
-Buttons are there for manual checks.
+The example app (`example/App.tsx`) auto-plays the bundled 60-second 512x288
+VP9 + stereo Opus clip on launch and shows live metrics, so a run needs no
+interaction. Buttons are there for manual checks — including "1s 5.1", the only
+path that exercises multistream Opus decode; tap it on every device run.
 
 ```bash
 npm install
@@ -234,6 +235,27 @@ the simulator caveats above do not apply.
 - [ ] Memory flat over several minutes (no growth per stream cycle)
 - [ ] `audioFramesRecovered` climbs on a lossy link — exercises the FEC/PLC path,
       which no test covers today
+
+**Added by the 2026-08-21 audit** (round-3 findings whose fixes, once made,
+need device confirmation — IDs refer to docs/AUDIT.md):
+
+- [ ] iOS: `pause()` → `stop()` → `start()` plays (R3-3 — today it parks forever)
+- [ ] iOS: `resetStream()` mid-stream presents the new stream, not late-frame
+      silence against the old timeline (R3-4)
+- [ ] iOS: `setEndOfStream()` → `resetStream()` → feed recovers (R3-8 — today inert)
+- [ ] iOS: `setPlaybackRate(1.0)` from JS while backgrounded does not run the
+      clock ahead (R3-17 — measure drift after a 30 s trip)
+- [ ] iOS: after `stop()`, other apps' audio resumes (R3-19)
+- [ ] Both: memory stays bounded through a replication-style burst feed
+      (R3-14 — watch the audio pending queue)
+- [ ] Both: a stream muxed with >2 MiB clusters plays on iOS (R3-5)
+- [ ] Both: during a phone call, `playbackState`/health reflect the
+      interruption (R3-9 — today they read PLAYING)
+- [ ] Android: `gain` above 1.0 — decide clamp-and-report or document
+      iOS-only amplification (R3-10)
+- [ ] iOS: a video-only stream presents (E-11 — today the clock never starts)
+- [ ] Tap "1s 5.1" during every device run: the 60 s auto-play clip no longer
+      exercises the multistream Opus path (D-8)
 
 ## Known limitation
 

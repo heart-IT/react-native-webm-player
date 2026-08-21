@@ -393,3 +393,135 @@ frozen-picture path, see DEVICE_VALIDATION):
 fatal on Android (`MatroskaExtractor`'s `ParserException` is non-retriable in
 ExoPlayer's load-error policy) while iOS skips and continues per the error
 table. Inherent to leaning on ExoPlayer; recovery is a JS `stop()`/`start()`.
+
+---
+
+## 2026-08-21 audit — round 3 (five parallel passes + verification funnel)
+
+Audited at `c3ac876`. Five passes — shared C++ core, iOS, Android,
+JS/packaging/deps, cross-cutting (parity · observability · P2P contract ·
+security · CLAUDE.md) — every P0/P1 and most P2s re-verified independently
+after the pass reported them (source re-read, `npm pack` dry-run, media3 1.8.0
+bytecode disassembly, UBSan repro, fuzz-seed byte count). **Findings below are
+open** — fixes were explicitly out of scope for this round.
+
+**Mechanical gates at `c3ac876`: all green.** typecheck, eslint, prettier,
+`lint:size` (3 warn-only files, 0 over 600), `lint:pack`, `npx nitrogen`
+0-file diff, ASan/TSan/UBSan across all 5 suites + 100k fuzz iterations, iOS
+and Android example builds. Every prior round's finding verified closed.
+
+**Verdict: not production-grade yet.** The package cannot be installed from
+npm on iOS (R3-1), the codegen script is a landmine (R3-2), two public-API
+sequences wedge iOS playback (R3-3, R3-8), a hostile or merely large stream
+wedges it silently (R3-5), and the fuzz gate that is supposed to guard the
+attack surface has been fuzzing only the first parser stage (R3-6).
+
+### P0
+
+| ID   | Pass | Where                                              | Finding                                                                                                                                                                                                                                                                                                                                                       |
+| ---- | ---- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R3-1 | D-1  | `WebmPlayer.podspec:20-26`, `package.json` `files` | The published tarball cannot pass `pod install`: `prepare_command` runs `ios/opus/build-opus.sh`, but no `files` glob ships `.sh` (nor the xcframework binary — only its headers leak in via `ios/**/*.h`). Every registry consumer's iOS install aborts. `lint:pack` is blind to it: it only closes over `#include` edges. Verified by `npm pack --dry-run`. |
+
+### P1
+
+| ID   | Pass | Where                                                    | Finding                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---- | ---- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| R3-2 | D-2  | `post-script.js:20`                                      | `npm run codegen` strips `margelo/nitro/` from `WebmPlayerOnLoad.cpp`; in nitrogen 0.36.3 output the only matches are the two `kJavaDescriptor` strings — the exact compile-fine-crash-at-runtime mismatch CLAUDE.md warns about. The committed tree is correct, proving the script's edit has been bypassed or reverted every time. It also makes `codegen` and CI's freshness gate mutually unsatisfiable. Delete the relic.                                                       |
+| R3-3 | B-1  | `WebmDemuxPump.mm:85-87`, `WebmPlaybackEngine.mm:70,177` | The pump is allocated once per engine and its `_paused` flag is reset by nothing: `pause()` (or a background trip) → `stop()` → `start()` leaves the new session's demux thread parked forever. `playbackState` reads Buffering, `isPaused` reads false; only a redundant `resume()` or process restart recovers.                                                                                                                                                                    |
+| R3-4 | B-2  | `WebmPlaybackEngine.mm:273,386,146`                      | `resetStream()` never re-anchors the media clock or flushes renderers: `_clockStarted` is a one-shot latch cleared only in `start()`, the pump's re-fired first-audio callback is ignored, `WebmVideoDecoder` has no reset entry point, and stale frames stay queued. A reconnected stream plays against the dead stream's timeline; every new buffer is late. Android rebuilds its extractor and re-derives the timeline.                                                           |
+| R3-5 | E-1  | `WebmReaders.h:26,33`, `WebmBlockParser.cpp:223-253`     | A cluster larger than the 2 MiB parse window wedges iOS permanently and invisibly: append capacity hits zero, compaction never trims past the current cluster start, and cluster advance waits for `clusterPos + clusterSize` bytes that can never fit. The pump's stall detector counts only empty ring reads — reads keep succeeding — so health stays `playing` over frozen A/V. Reachable by a hostile peer or a legitimate muxer at ~4 s clusters × 4 Mbps. Android unaffected. |
+| R3-6 | A-3  | `tests/fuzz_demuxer.cpp:30-63`                           | The fuzzer's seed header is internally inconsistent (EBML declares a 19-byte body, carries 31; Audio declares 10, carries 13), so the demuxer never leaves `WaitingForEBML` and phases 2–3 mutate a corpus that cannot reach `parseTracks`/`parseBlocks`/lacing. The CI fuzz gate has been exercising one parser stage; R3-20's UB survived 100k iterations because of this.                                                                                                         |
+
+### P2
+
+| ID    | Pass        | Where                                                                                 | Finding                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----- | ----------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R3-7  | B-4·C-2·E-4 | `WebmPlaybackEngine.mm:303,412,145` · `HybridWebmPlayer.kt:82,214,243`                | Both platforms: the `failed` latch is cleared only by `start()`, so a successful `resetStream()` recovery leaves `playbackState == Failed` while health reports `playing`. iOS reaches it without resetStream too — the demuxer auto-resets from terminal Error when a fresh EBML header arrives.                                                                                                                         |
+| R3-8  | B-10·E-3    | `WebmDemuxPump.mm:116-123,180-185`                                                    | After EOS the iOS pump thread has exited: `resetStream()` raises a flag nobody consumes, `feedData()` keeps returning true into a ring nobody reads, `isRunning` stays true. Same JS sequence recovers fully on Android.                                                                                                                                                                                                  |
+| R3-9  | C-1·E-16    | `PlaybackStats.kt:58-78`, `HybridWebmPlayer.kt:197` · `WebmPlaybackEngine.mm:234-240` | Focus loss, interruptions, and background pauses are invisible to JS: Android never mirrors `playWhenReady` (a phone call or background trip reads PLAYING, contradicting the code's own comment at `HybridWebmPlayer.kt:99`); iOS interruption parks the pump without touching state or health. A consumer cannot tell "muted by a call" from "playing".                                                                 |
+| R3-10 | C-6·E-17    | spec `gain 0.0–2.0` · `ExoPlayerImpl.setVolume`                                       | The advertised 1.0–2.0 gain range is iOS-only: media3 clamps volume to [0,1] (`Util.constrainValue` — verified in 1.8.0 bytecode) while the Android getter reports the unclamped mirror.                                                                                                                                                                                                                                  |
+| R3-11 | B-9·E-6     | `WebmAudioDecoder.mm:186-192`, `WebmDemuxPump.mm:240-247`                             | A permanent Opus configure failure on iOS only logs (unratelimited, per batch): no health event, no Failed, the clock never starts, decoded video queues at rate 0 forever. The same stream FAILs on Android. Violates the error table's "surface to playback state".                                                                                                                                                     |
+| R3-12 | B-5·E-5     | `WebmDemuxPump.mm:90-93,179-185`                                                      | iOS `stop()` on a live stream usually emits health `ended "end of stream"` — the shutdown-woken read returns −1 and the exit path never checks `_stop`. Indistinguishable from a genuine broadcast end; Android emits nothing.                                                                                                                                                                                            |
+| R3-13 | B-13·E-7    | `WebmPlaybackEngine.mm:330`, `WebmVideoDecoder.mm:270-281` · `PlaybackStats.kt:131`   | `videoFramesDropped` counts decode-submit failures on iOS but renderer drops on Android — and iOS renderer-stage drops (`_pendingCapDrops`, the frozen-layer signature) are counted in an atomic no metrics path reads. A frozen layer shows `dropped 0` on iOS. Sibling of the fixed P6-7.                                                                                                                               |
+| R3-14 | E-2         | `WebmAudioDecoder.mm:20`, `OpusChannelMapping.h:54-68`                                | Memory-exhaustion vector: the audio pending queue is count-capped (100), per-buffer size attacker-controlled. A 255-channel OpusHead × 120 ms packets ≈ 5.9 MB each ≈ 587 MB pending — reachable during a replication catch-up burst. Needs a channel ceiling or a byte-based cap.                                                                                                                                        |
+| R3-15 | E-8·E-9     | spec JSDoc, README                                                                    | The feeder contract is unspecified: `feedData → false` conflates ring-full / not-running / empty / non-direct (opposite feeder reactions); the retry-same-chunk obligation exists only implicitly in `example/App.tsx`; post-reset/mid-join header requirements and the post-EOS platform asymmetry (R3-8) are undocumented; no pre-overflow backpressure signal exists. This is the contract both prior rounds deferred. |
+| R3-16 | B-3         | `WebmVideoDecoder.mm:73,285-287,372`                                                  | If a render-queue block holds the last strong reference, `dealloc → shutdown → dispatch_sync(_renderQueue)` deadlocks the queue on itself and hangs any later `stop()` behind it. Narrow window (resume racing a JS `stop()`), guaranteed deadlock when hit.                                                                                                                                                              |
+| R3-17 | B-6         | `WebmPlaybackEngine.mm:294,396`                                                       | `setPlaybackRate()` and the clock-start block gate on `_paused` only — no `_backgrounded` check, and no interrupted flag exists — so JS can restart the host-clock timebase mid-suspension or mid-call, recreating the drift the suspend logic exists to prevent.                                                                                                                                                         |
+| R3-18 | B-7         | `WebmPlaybackEngine.mm:144`                                                           | `start()` unconditionally clears `_backgrounded`: a stop/start cycle while backgrounded (the Bare feed thread keeps running) desyncs the engine from app state and skips audio-session reactivation on return.                                                                                                                                                                                                            |
+| R3-19 | B-8         | `WebmPlaybackEngine.mm:366-380`                                                       | The audio session is activated (non-mixable Playback) and never deactivated anywhere — other apps' audio stays interrupted after `stop()`, and `NotifyOthersOnDeactivation` is never sent.                                                                                                                                                                                                                                |
+| R3-20 | A-1         | `WebmTrackParser.cpp:75`                                                              | `static_cast<int>(GetSamplingRate())` is UB on untrusted input — mkvparser accepts any positive double. UBSan repro built from the real fixture with one exponent byte raised. Survived CI fuzzing because of R3-6.                                                                                                                                                                                                       |
+| R3-21 | A-2         | `WebmTrackParser.cpp:110-115`                                                         | `streamHeader_` is truncated: `cluster_->GetPosition()` is segment-relative, used as absolute length — measured 538 captured vs 586 true header bytes on the bundled fixture (last 48 bytes of Tracks cut). Currently tests-only surface; would emit malformed headers if ever wired.                                                                                                                                     |
+| R3-22 | D-3         | `lib/commonjs/index.js:15`, `lib/module/index.js:4`                                   | The `main`/`module` entry points cannot resolve: bob compiles only `src/`, so `require("../nitrogen/…")` resolves to `lib/nitrogen/`, which does not exist. Node, Jest-without-RN-preset, and web bundlers throw MODULE_NOT_FOUND — defeating the factory's survivable-import purpose.                                                                                                                                    |
+
+**Residual assessment (documented, now quantified):** the `resetStream()`
+ring-clear on the JS thread racing the old loader (Android) cannot corrupt
+memory or crash — the CAS tail publish and registry `shared_ptr` hold — but
+new-stream bytes fed in the one-dispatch window are destructively consumed by
+the doomed extractor, most damagingly the new EBML header, after which the
+rebuilt extractor FAILs (and R3-7 pins the state). P2: `resetStream` can fail
+exactly when used as intended; recoverable via `stop()`/`start()`. Reordering
+alone inverts the race — a complete fix needs stop→clear→prepare on main plus
+a feed gate or reset-complete signal.
+
+### P3 (compact)
+
+- **Android:** `DataSpec.position` ignored on reopen — add a loud guard
+  (C-3); `start()` from a backgrounded JS context plays in background (C-4);
+  ExoPlayer instance leak if `startOnMain` throws before `player = exo`
+  (C-5); standalone-fallback `compileSdkVersion=34` below media3 1.8.0's
+  minCompileSdk 35 (C-7); `GetByteArrayElements` pin/copy-back nit in
+  `nativeRead` (C-8); stray ENDED race on stop (C-9).
+- **iOS:** audio CMSampleBuffers declare per-sample duration equal to the
+  whole buffer (~19 s per 20 ms packet; renderer ignores it today) (B-11);
+  route-monitor `onChange` closure written JS-thread/read main unsynchronized
+  (B-12); `setActive:YES` runs inline on the JS thread (B-14).
+- **Packaging/CI:** locally-packed tarballs sweep in 163+ untracked opus
+  build headers — machine-state-dependent artifacts (D-4); dead `files`
+  entries `react-native.config.js` / `app.plugin.js` — neither exists (D-5);
+  podspec `s.source` points at the wrong repo (D-6); peer range
+  `react-native-nitro-modules: "*"` vs version-coupled generated code (D-7);
+  DEVICE_VALIDATION.md says the example auto-plays the 1 s 5.1 fixture but it
+  auto-plays the 60 s stereo clip — unattended runs skip the multistream path
+  (D-8); the release workflow publishes without re-running typecheck / lint /
+  sanitizers / codegen freshness (D-9).
+- **Observability:** seven drop counters unreachable from JS — ring
+  `droppedBytes`/`bufferOverflows`/`consumerLagEvents`, demux
+  `oversizedFrameDrops`/`packetCapDrops`/`appendBackpressureDrops`, iOS
+  `_queueOverflowDrops`/`_pendingCapDrops` (E-10); unratelimited per-packet
+  logs on the window-full, pump-error and opus-init paths (E-15); iOS Opus
+  decode errors in `submitPacket` neither logged nor counted (E-16b).
+- **Parity edges:** video-only stream never starts the iOS clock (Android
+  plays it) (E-11); health-dedup and reset-while-paused sequence nits (E-18).
+- **CLAUDE.md:** dead surface — `streamHeader()`/`hasStreamHeader()`,
+  `newClusterCount/Positions`, `absOffset`, hot-path `demuxerMetrics()`
+  EWMAs, four `OpusDecoderAdapter` getters, `media::primeClock()` (E-12);
+  `4705b8e` grew `WebmPlaybackEngine.mm` 353→416 in a fix commit — next
+  change extracts first (E-13); magic `30`/`511` literals and four stale v1
+  comments (E-14); `newClusterPositions` documented "absolute", filled
+  segment-relative (A-4).
+
+### Test gaps (invariant → missing test)
+
+- Lacing (all three modes): no fixture has a laced block; the block-level
+  dedup fix remains analysis-verified only.
+- Out-of-range track metadata (R3-20's class): nothing feeds hostile
+  SamplingFrequency/dims/channels.
+- `streamHeader()` validity: the existing assertion passes on the truncated
+  header; nothing round-trips it through a second demuxer.
+- Fuzz seed reachability: no assertion that the seed reaches `Streaming` (R3-6).
+- Ring destructor `shutdownGraceMs` contract-violation branch: untested.
+- Truncation mid-`Tracks`/mid-cluster ("need more data" branches): untested.
+- Cross-thread `WebmDemuxer::reset()` vs `feedData`: unmodeled on the demux side.
+
+### Coverage of this round
+
+Correctness, bugs & edge cases, reliability, security (threat model now
+written — see pass E report), architecture, code quality, RN best practices
+(JS surface), parity (semantic table built), test coverage, observability
+(full path inventory), dependency health (media3 two minors behind; opus
+1.6.1 current + SHA-pinned; libwebm current; 0 runtime deps; all npm audit
+hits dev-side), P2P compliance (contract audited — R3-15), CLAUDE.md: all
+covered by reading + host execution. **Performance on device and everything
+requiring real playback remain deferred to device validation**, plus the
+standing frozen-picture regression and its device-log blocker
+(DEVICE_VALIDATION.md), untouched by this round per its ground rules.
