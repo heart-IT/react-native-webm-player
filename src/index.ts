@@ -3,8 +3,16 @@ import type { WebmPlayer } from './specs/webm-player.nitro'
 import type { WebmPlayerViewProps } from './specs/webm-player-view.nitro'
 import WebmPlayerViewConfig from '../nitrogen/generated/shared/json/WebmPlayerViewConfig.json'
 
-export type { WebmPlayer, WebmPlayerMetrics } from './specs/webm-player.nitro'
-export { WebmPlaybackState } from './specs/webm-player.nitro'
+export type {
+  WebmPlayer,
+  WebmPlayerMetrics,
+  WebmHealthEvent,
+} from './specs/webm-player.nitro'
+export {
+  WebmPlaybackState,
+  WebmHealthStatus,
+  WebmAudioRoute,
+} from './specs/webm-player.nitro'
 export type {
   WebmPlayerViewProps,
   WebmScaleMode,

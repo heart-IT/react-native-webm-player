@@ -36,9 +36,17 @@ export interface WebmPlayerMetrics {
   bytesFedTotal: number
   audioPacketsDecoded: number
   videoPacketsDecoded: number
+  /**
+   * Renderer starvation events. Android only (ExoPlayer reports them); always 0
+   * on iOS, where AVSampleBufferAudioRenderer does not expose starvation.
+   */
   audioUnderruns: number
   videoFramesDropped: number
-  /** Audio frames rebuilt from Opus FEC, or concealed by PLC, after a gap. */
+  /**
+   * Audio frames rebuilt from Opus FEC, or concealed by PLC, after a gap.
+   * iOS only; always 0 on Android, where ExoPlayer conceals internally without
+   * reporting.
+   */
   audioFramesRecovered: number
   videoWidth: number
   videoHeight: number
