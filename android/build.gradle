@@ -43,7 +43,6 @@ android {
 
   defaultConfig {
     minSdkVersion getExtOrIntegerDefault("minSdkVersion")
-    targetSdkVersion getExtOrIntegerDefault("targetSdkVersion")
     buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", isNewArchitectureEnabled().toString()
 
     externalNativeBuild {
@@ -70,25 +69,33 @@ android {
     }
   }
 
-  packagingOptions {
-    excludes = [
-        "META-INF",
-        "META-INF/**",
-        "**/libc++_shared.so",
-        "**/libfbjni.so",
-        "**/libjsi.so",
-        "**/libfolly_json.so",
-        "**/libfolly_runtime.so",
-        "**/libglog.so",
-        "**/libhermes.so",
-        "**/libhermes-executor-debug.so",
-        "**/libhermes_executor.so",
-        "**/libreactnative.so",
-        "**/libreactnativejni.so",
-        "**/libturbomodulejsijni.so",
-        "**/libreact_nativemodule_core.so",
-        "**/libjscexecutor.so"
-    ]
+  packaging {
+    resources {
+      excludes += [
+          "META-INF",
+          "META-INF/**"
+      ]
+    }
+    // The app (React Native) ships these; packaging them again in the AAR
+    // would collide at app merge time.
+    jniLibs {
+      excludes += [
+          "**/libc++_shared.so",
+          "**/libfbjni.so",
+          "**/libjsi.so",
+          "**/libfolly_json.so",
+          "**/libfolly_runtime.so",
+          "**/libglog.so",
+          "**/libhermes.so",
+          "**/libhermes-executor-debug.so",
+          "**/libhermes_executor.so",
+          "**/libreactnative.so",
+          "**/libreactnativejni.so",
+          "**/libturbomodulejsijni.so",
+          "**/libreact_nativemodule_core.so",
+          "**/libjscexecutor.so"
+      ]
+    }
   }
 
   buildFeatures {
@@ -102,8 +109,8 @@ android {
     }
   }
 
-  lintOptions {
-    disable "GradleCompatible"
+  lint {
+    disable += "GradleCompatible"
   }
 
   compileOptions {
