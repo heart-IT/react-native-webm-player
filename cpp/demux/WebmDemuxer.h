@@ -24,7 +24,7 @@ namespace media::demux {
 // Opus audio packet extracted from WebM. Points into demuxer's internal buffer —
 // valid only until the next feedData() or reset() call.
 struct AudioPacket {
-    const uint8_t* data;      // Raw Opus packet bytes (into ring or scratch buffer)
+    const uint8_t* data;      // Raw Opus packet bytes (into the demuxer's window)
     size_t size;              // Packet size in bytes (max 1275 per Opus spec)
     int64_t ptsUs;            // Presentation timestamp in microseconds
     int64_t durationUs;       // Packet duration in microseconds (typically 20000)
@@ -33,7 +33,7 @@ struct AudioPacket {
 
 // VP9 video packet extracted from WebM. Same lifetime rules as AudioPacket.
 struct VideoPacket {
-    const uint8_t* data;      // Raw VP9 frame bytes (into ring or scratch buffer)
+    const uint8_t* data;      // Raw VP9 frame bytes (into the demuxer's window)
     size_t size;              // Frame size in bytes (up to ~512KB for 4K keyframes)
     int64_t ptsUs;            // Presentation timestamp in microseconds
     bool isKeyFrame;          // True for keyframes (decoder can start from here)
@@ -139,11 +139,9 @@ public:
     }
 
     ParseState parseState() const noexcept { return state_.load(std::memory_order_acquire); }
-    uint64_t overflowCount() const noexcept { return overflowCount_.load(std::memory_order_relaxed); }
 
     size_t bufferBytes() const noexcept;
 
-    [[nodiscard]] int64_t feedJitterUs() const noexcept { return feedJitterUs_.load(std::memory_order_relaxed); }
 
     DemuxerMetrics demuxerMetrics() const noexcept {
         DemuxerMetrics m{};
@@ -239,13 +237,6 @@ private:
     std::atomic<int64_t> feedJitterUs_{0};
     std::atomic<int64_t> feedDataLatencyUs_{0};
     std::atomic<size_t> cachedBufferBytes_{0};
-
-    // Per-packet scratch slots for packets that span the ring wrap boundary.
-    // One slot per wrap-read so that each packet's data pointer remains stable
-    // across subsequent wrap-reads in the same feedData() call. Slots are
-    // reused across calls; inner buffers grow to peak usage.
-    std::vector<std::vector<uint8_t>> scratchBuffers_;
-    size_t scratchCursor_ = 0;  // next slot to fill within the current feedData()
 };
 
 }  // namespace media::demux

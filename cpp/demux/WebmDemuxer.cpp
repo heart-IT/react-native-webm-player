@@ -21,13 +21,6 @@ WebmDemuxer::WebmDemuxer()
     cachedResult_.audioPackets.reserve(kMaxAudioPacketsPerFeed);
     cachedResult_.videoPackets.reserve(kMaxVideoPacketsPerFeed);
     cachedResult_.newClusterPositions.reserve(kMaxClustersPerFeed);
-    // Pre-reserve a typical worst case so outer vector growth is rare. The
-    // reservation is a hint, not a safety contract: even if scratchCursor_
-    // exceeds the reservation and the outer vector reallocates, std::vector's
-    // move ctor for the inner std::vector<uint8_t> elements transfers heap-
-    // pointer ownership without copying, so frameData = slot.data() taken
-    // before the reallocation remains valid for the rest of the feedData() call.
-    scratchBuffers_.reserve(kMaxAudioPacketsPerFeed + kMaxVideoPacketsPerFeed);
 }
 
 WebmDemuxer::~WebmDemuxer() = default;
@@ -76,31 +69,24 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         if (!data || len == 0) {
             return cachedResult_;
         }
-        size_t totalAccepted = 0;
         size_t accepted = reader_->append(data, len);
-        totalAccepted += accepted;
-
-        if (totalAccepted < len) {
-            if (state_ == ParseState::Streaming) {
-                parseBlocks(cachedResult_);
-            }
-            if (pendingCompactPos_ > 0) {
-                reader_->compact(pendingCompactPos_);
-                pendingCompactPos_ = 0;
-            }
-            accepted = reader_->append(data + totalAccepted, len - totalAccepted);
-            totalAccepted += accepted;
-
-            if (totalAccepted < len) {
-                partialDropCount_.fetch_add(1, std::memory_order_relaxed);
-                appendBackpressureDrops_.fetch_add(1, std::memory_order_relaxed);
-                MEDIA_LOG_W("WebmDemuxer: partial drop %zu/%zu bytes (count=%llu)",
-                            len - totalAccepted, len,
-                            static_cast<unsigned long long>(partialDropCount_.load(std::memory_order_relaxed)));
-            }
+        if (accepted < len) {
+            // Drop-new, the same policy as the ring. There used to be a
+            // parse-and-compact rescue here, but that parse emitted zero-copy
+            // packets pointing into the window and the compact/append that
+            // followed shifted or reallocated the very bytes those packets
+            // referenced — the caller received dangling pointers in this
+            // call's result. The window is trimmed by deferred compaction at
+            // the top of the next call, so a full window recovers one feed
+            // later at the cost of a counted gap.
+            partialDropCount_.fetch_add(1, std::memory_order_relaxed);
+            appendBackpressureDrops_.fetch_add(1, std::memory_order_relaxed);
+            MEDIA_LOG_W("WebmDemuxer: window full, dropped %zu/%zu bytes (count=%llu)",
+                        len - accepted, len,
+                        static_cast<unsigned long long>(partialDropCount_.load(std::memory_order_relaxed)));
         }
 
-        if (totalAccepted == 0) {
+        if (accepted == 0) {
             cachedResult_.error = "demuxer buffer overflow";
             overflowCount_.fetch_add(1, std::memory_order_relaxed);
             return cachedResult_;
@@ -109,12 +95,12 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
 
     // Advance parse state as far as possible
     int64_t parseStart = nowUs();
-    switch (state_) {
+    switch (state_.load(std::memory_order_relaxed)) {
     case ParseState::WaitingForEBML:
         if (!parseEBMLHeader()) {
             if (!parseError_.empty()) {
                 if (++parseRetryCount_ >= kMaxParseRetries) {
-                    state_ = ParseState::Error;
+                    state_.store(ParseState::Error, std::memory_order_release);
                     errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
                     cachedResult_.error = "permanent parse failure: " + parseError_;
                 } else {
@@ -124,14 +110,14 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             return cachedResult_;
         }
         parseRetryCount_ = 0;
-        state_ = ParseState::WaitingForSegment;
+        state_.store(ParseState::WaitingForSegment, std::memory_order_release);
         [[fallthrough]];
 
     case ParseState::WaitingForSegment:
         if (!parseSegment()) {
             if (!parseError_.empty()) {
                 if (++parseRetryCount_ >= kMaxParseRetries) {
-                    state_ = ParseState::Error;
+                    state_.store(ParseState::Error, std::memory_order_release);
                     errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
                     cachedResult_.error = "permanent parse failure: " + parseError_;
                 } else {
@@ -141,17 +127,17 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             return cachedResult_;
         }
         parseRetryCount_ = 0;
-        state_ = ParseState::ParsingTracks;
+        state_.store(ParseState::ParsingTracks, std::memory_order_release);
         [[fallthrough]];
 
     case ParseState::ParsingTracks:
         if (!parseTracks()) {
-            if (state_ == ParseState::Error) {
+            if (state_.load(std::memory_order_relaxed) == ParseState::Error) {
                 cachedResult_.error = "permanent parse failure: " + parseError_;
             }
             return cachedResult_;
         }
-        state_ = ParseState::Streaming;
+        state_.store(ParseState::Streaming, std::memory_order_release);
         // Record first cluster position for ClipIndex
         if (cluster_ && !cluster_->EOS()) {
             cachedResult_.newClusterPositions.push_back(cluster_->GetPosition());
@@ -163,17 +149,23 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         parseBlocks(cachedResult_);
         break;
 
-    case ParseState::Error:
+    case ParseState::Error: {
         // Auto-reset and re-feed the incoming data immediately.
         MEDIA_LOG_W("WebmDemuxer: auto-resetting from error state on new feedData");
         reset();
-        reader_->append(data, len);
+        // reset() emptied the window, so this only comes up short for a feed
+        // larger than the whole window — still a counted drop, never silent.
+        size_t reAccepted = reader_->append(data, len);
+        if (reAccepted < len) {
+            partialDropCount_.fetch_add(1, std::memory_order_relaxed);
+            appendBackpressureDrops_.fetch_add(1, std::memory_order_relaxed);
+        }
         if (parseEBMLHeader()) {
-            state_ = ParseState::WaitingForSegment;
+            state_.store(ParseState::WaitingForSegment, std::memory_order_release);
             if (parseSegment()) {
-                state_ = ParseState::ParsingTracks;
+                state_.store(ParseState::ParsingTracks, std::memory_order_release);
                 if (parseTracks()) {
-                    state_ = ParseState::Streaming;
+                    state_.store(ParseState::Streaming, std::memory_order_release);
                     parseBlocks(cachedResult_);
                 }
             }
@@ -181,11 +173,13 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         // If the re-parse did not reach Streaming, surface that explicitly so the
         // JS-thread feedData caller can distinguish "no data parsed yet" from
         // "auto-reset is stalled awaiting a valid header".
-        if (state_ != ParseState::Streaming) {
+        if (state_.load(std::memory_order_relaxed) != ParseState::Streaming) {
             cachedResult_.error = "auto-reset awaiting valid stream (state=" +
-                                  std::to_string(static_cast<int>(state_.load())) + ")";
+                                  std::to_string(static_cast<int>(
+                                      state_.load(std::memory_order_relaxed))) + ")";
         }
         break;
+    }
     }
 
     {
@@ -261,39 +255,34 @@ void WebmDemuxer::reset() {
         trackInfo_ = TrackInfo{};
         streamHeader_.clear();
     }
-    state_ = ParseState::WaitingForEBML;
+    state_.store(ParseState::WaitingForEBML, std::memory_order_release);
     parseError_.clear();
     parseRetryCount_ = 0;
     ebmlHeaderEndPos_ = 0;
     compactOffset_ = 0;
     pendingCompactPos_ = 0;
-    overflowCount_ = 0;
-    partialDropCount_ = 0;
-    oversizedFrameDrops_ = 0;
-    packetCapDrops_ = 0;
-    appendBackpressureDrops_ = 0;
-    errorEntryUs_ = 0;
-    totalBytesFed_ = 0;
-    feedDataCalls_ = 0;
-    audioPacketsEmitted_ = 0;
-    videoPacketsEmitted_ = 0;
-    blockStallCount_ = 0;
-    parseErrorCount_ = 0;
+    overflowCount_.store(0, std::memory_order_relaxed);
+    partialDropCount_.store(0, std::memory_order_relaxed);
+    oversizedFrameDrops_.store(0, std::memory_order_relaxed);
+    packetCapDrops_.store(0, std::memory_order_relaxed);
+    appendBackpressureDrops_.store(0, std::memory_order_relaxed);
+    errorEntryUs_.store(0, std::memory_order_relaxed);
+    totalBytesFed_.store(0, std::memory_order_relaxed);
+    feedDataCalls_.store(0, std::memory_order_relaxed);
+    audioPacketsEmitted_.store(0, std::memory_order_relaxed);
+    videoPacketsEmitted_.store(0, std::memory_order_relaxed);
+    blockStallCount_.store(0, std::memory_order_relaxed);
+    parseErrorCount_.store(0, std::memory_order_relaxed);
     lastEmittedAudioPtsUs_ = -1;
     lastEmittedVideoPtsUs_ = -1;
     lastFeedTimeUs_ = 0;
     lastFeedIntervalUs_ = 0;
-    feedJitterUs_ = 0;
+    feedJitterUs_.store(0, std::memory_order_relaxed);
     cachedResult_.audioPackets.clear();
     cachedResult_.videoPackets.clear();
     cachedResult_.error.clear();
     cachedResult_.newClusterCount = 0;
     cachedResult_.newClusterPositions.clear();
-    scratchBuffers_.clear();
-    // Preserve reserved capacity — constructor reserved kMaxAudioPacketsPerFeed +
-    // kMaxVideoPacketsPerFeed; shrink_to_fit would let the next feedData reallocate
-    // mid-parse and invalidate the slot reference held in the block loop.
-    scratchCursor_ = 0;
     // Monotonic across the session: cumulativeParseErrorCount_ and
     // sessionResetCount_ are NOT zeroed here.
     sessionResetCount_.fetch_add(1, std::memory_order_relaxed);

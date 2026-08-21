@@ -36,7 +36,7 @@ bool WebmDemuxer::parseTracks() {
             parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
             cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
             if (++parseRetryCount_ >= kMaxParseRetries) {
-                state_ = ParseState::Error;
+                state_.store(ParseState::Error, std::memory_order_release);
                 errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
             }
         }
@@ -62,7 +62,7 @@ bool WebmDemuxer::parseTracks() {
         const unsigned char* codecPrivate = track->GetCodecPrivate(codecPrivateSize);
 
         if (trackType == mkvparser::Track::kAudio &&
-            codecId && std::strcmp(codecId, "A_OPUS") == 0) {
+            std::strcmp(codecId, "A_OPUS") == 0) {
             trackInfo_.audioTrackNum = static_cast<int>(track->GetNumber());
             trackInfo_.audioCodecId = codecId;
             if (codecPrivate && codecPrivateSize > 0) {
@@ -76,7 +76,7 @@ bool WebmDemuxer::parseTracks() {
             trackInfo_.audioChannels =
                 static_cast<int>(audioTrack->GetChannels());
         } else if (trackType == mkvparser::Track::kVideo &&
-                   codecId && std::strcmp(codecId, "V_VP9") == 0) {
+                   std::strcmp(codecId, "V_VP9") == 0) {
             trackInfo_.videoTrackNum = static_cast<int>(track->GetNumber());
             trackInfo_.videoCodecId = codecId;
             if (codecPrivate && codecPrivateSize > 0) {
@@ -94,7 +94,7 @@ bool WebmDemuxer::parseTracks() {
         parseError_ = "no supported tracks (need A_OPUS or V_VP9)";
         parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
         cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-        state_ = ParseState::Error;
+        state_.store(ParseState::Error, std::memory_order_release);
         errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
         return false;
     }

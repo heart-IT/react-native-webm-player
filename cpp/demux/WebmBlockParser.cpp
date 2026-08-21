@@ -1,7 +1,6 @@
 // parseBlocks() — iterates clusters/blocks from the current position, emits
-// AudioPacket + VideoPacket entries into the result, dedupes against the
-// last-emitted PTS, handles wrap-reads via per-packet scratch slots, and
-// schedules ring compaction.
+// AudioPacket + VideoPacket entries into the result, dedupes duplicate blocks
+// against the last-emitted PTS, and schedules window compaction.
 //
 // Member of WebmDemuxer; class definition lives in WebmDemuxer.h.
 #include "WebmDemuxer.h"
@@ -71,7 +70,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
 
     long long latestConsumedPos = compactOffset_;
     int consecutiveBlockErrors = 0;
-    scratchCursor_ = 0;
 
     while (cluster_ && !cluster_->EOS()) {
         // If we haven't started iterating this cluster's blocks, get the first entry
@@ -122,39 +120,24 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
             for (int f = 0; f < frameCount; ++f) {
                 const mkvparser::Block::Frame& frame = block->GetFrame(f);
 
-                // Zero-copy path: get direct pointer into the buffer.
-                // Falls back to a per-packet scratch slot when data wraps the
-                // ring boundary (dataAt returns nullptr). Each wrap-read lands
-                // in its own slot so pkt.data pointers from earlier packets in
-                // the same feedData() are not clobbered by later wrap-reads.
+                // Zero-copy: a direct pointer into the linear window. There is
+                // no fallback read path — StreamReader::Read applies the same
+                // bounds as dataAt, so a range dataAt rejects cannot be read at
+                // all. Count the loss and skip: drop-and-continue policy.
                 const uint8_t* frameData = readerDataAt(frame.pos, frame.len);
                 if (!frameData) {
-                    if (frame.len > 0 && static_cast<size_t>(frame.len) <= kMaxVideoFrameSize) {
-                        if (scratchCursor_ >= scratchBuffers_.size()) {
-                            scratchBuffers_.emplace_back();
-                        }
-                        auto& slot = scratchBuffers_[scratchCursor_];
-                        if (slot.size() < static_cast<size_t>(frame.len)) {
-                            slot.resize(static_cast<size_t>(frame.len));
-                        }
-                        if (activeReader()->Read(frame.pos, static_cast<long>(frame.len),
-                                                  slot.data()) == 0) {
-                            frameData = slot.data();
-                            ++scratchCursor_;
-                        }
-                    }
-                    if (!frameData) {
-                        // Frame-read failure inside a batch: make the loss
-                        // observable even when the rest of the batch succeeded.
-                        parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-                        cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-                        ++consecutiveBlockErrors;
-                        break;
-                    }
+                    parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+                    cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+                    ++consecutiveBlockErrors;
+                    break;
                 }
 
                 if (trackNum == trackInfo_.audioTrackNum) {
-                    if (ptsUs == lastEmittedAudioPtsUs_) continue;
+                    // Dedup is per block (Hypercore delivery retries), decided at
+                    // the first frame only: in a laced block every frame carries
+                    // the block's one PTS, so a per-frame comparison against the
+                    // just-updated last-emitted PTS silently dropped frames 2..n.
+                    if (f == 0 && ptsUs == lastEmittedAudioPtsUs_) break;
                     if (result.audioPackets.size() >= kMaxAudioPacketsPerFeed) {
                         // Cap reached: the remaining blocks in this feed are
                         // silently lost (we cannot hold them and the iterator
@@ -179,7 +162,8 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                         oversizedFrameDrops_.fetch_add(1, std::memory_order_relaxed);
                         continue;  // Reject oversized frames
                     }
-                    if (ptsUs == lastEmittedVideoPtsUs_) continue;
+                    // Same block-level dedup contract as the audio path above.
+                    if (f == 0 && ptsUs == lastEmittedVideoPtsUs_) break;
                     if (result.videoPackets.size() >= kMaxVideoPacketsPerFeed) {
                         partialDropCount_.fetch_add(1, std::memory_order_relaxed);
                         packetCapDrops_.fetch_add(1, std::memory_order_relaxed);
