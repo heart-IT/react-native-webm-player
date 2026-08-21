@@ -100,12 +100,15 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   // Presentation time the next packet is expected at, used to spot a hole.
   int64_t _expectedPtsUs;
 
+  // Atomics only where a counter crosses threads (written on _feedQueue or the
+  // demux thread, read by the JS-thread metrics getters). The log-sampling
+  // counters below them live and die on the demux thread.
   std::atomic<uint64_t> _packetsDecoded;
-  std::atomic<uint64_t> _queueOverflowDrops;
-  std::atomic<uint64_t> _decodeErrors;
-  std::atomic<uint64_t> _configFailures;
   std::atomic<uint64_t> _framesRecovered;
   std::atomic<int64_t> _lastPresentedPtsUs;
+  uint64_t _queueOverflowDrops;
+  uint64_t _decodeErrors;
+  uint64_t _configFailures;
 }
 
 - (instancetype)init {
@@ -203,7 +206,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   }
   if (!_opus.initialize(sampleRate, channels, opusHead, opusHeadSize)) {
     // Retried every packet batch while the failure persists; sample the log.
-    uint64_t fails = _configFailures.fetch_add(1) + 1;
+    uint64_t fails = ++_configFailures;
     if ((fails & kDropLogMask) == 1) {
       MEDIA_LOG_E("WebmAudioDecoder: opus init failed (%d Hz, %d ch, err %d)",
                   sampleRate, channels, _opus.lastError());
@@ -243,8 +246,8 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
       // as one for a while, which made the same metrics field mean "too much
       // data" here and "too little" on Android. Rate-limited: a stalled
       // renderer hits this fifty times a second.
-      uint64_t drops = _queueOverflowDrops.fetch_add(1) + 1;
-      if ((drops & 511) == 1) {
+      uint64_t drops = ++_queueOverflowDrops;
+      if ((drops & kDropLogMask) == 1) {
         MEDIA_LOG_W("WebmAudioDecoder: pending queue full, %llu packets dropped",
                     static_cast<unsigned long long>(drops));
       }
@@ -290,7 +293,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   int frames = _opus.decode(data, length, _pcm.data(), kMaxOpusFrames);
   if (frames <= 0) {
     // Error table: log, drop, continue — with a count, not silently.
-    uint64_t errs = _decodeErrors.fetch_add(1) + 1;
+    uint64_t errs = ++_decodeErrors;
     if ((errs & kDropLogMask) == 1) {
       MEDIA_LOG_W("WebmAudioDecoder: opus decode failed (err %d, %llu total)",
                   _opus.lastError(), static_cast<unsigned long long>(errs));
