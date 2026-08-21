@@ -91,8 +91,15 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       failOnMain(handle, "no application context")
       return
     }
+    // The lifecycle observer only reports transitions, so a start() issued
+    // while already backgrounded must derive the current state itself or the
+    // pause-on-background policy is skipped for this session.
+    if (context.lifecycleState != com.facebook.react.common.LifecycleState.RESUMED) {
+      backgrounded.set(true)
+    }
+    var exo: ExoPlayer? = null
     try {
-      val exo = ExoPlayer.Builder(context)
+      exo = ExoPlayer.Builder(context)
         .setLoadControl(WebmMediaPipeline.loadControl())
         .build()
         .apply {
@@ -119,11 +126,14 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
       exo.setMediaSource(buildMediaSource(handle))
       exo.prepare()
-      exo.playWhenReady = true
+      exo.playWhenReady = !paused.get() && !backgrounded.get()
       player = exo
       surface?.player = exo
     } catch (e: Exception) {
       Log.e(TAG, "start failed", e)
+      // Not yet assigned to `player`, so releaseOnMain cannot reach it — a
+      // built instance carries a live playback thread until released.
+      exo?.release()
       failOnMain(handle, e.message ?: e.javaClass.simpleName)
     }
   }
@@ -214,6 +224,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       stats.failed.get() -> WebmPlaybackState.FAILED
       !running.get() -> WebmPlaybackState.IDLE
       paused.get() -> WebmPlaybackState.PAUSED
+      // Halted by the platform (audio-focus loss, background) rather than by
+      // JS — still PAUSED, distinguishable via isPaused staying false.
+      stats.isHalted -> WebmPlaybackState.PAUSED
       stats.isReady -> WebmPlaybackState.PLAYING
       else -> WebmPlaybackState.BUFFERING
     }
@@ -253,6 +266,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       exo.setMediaSource(buildMediaSource(handle))
       exo.prepare()
       stats.rebase()
+      // A failure belonging to the torn-down stream must not outlive the reset,
+      // or playbackState stays FAILED while the new stream plays.
+      stats.failed.set(false)
       exo.playWhenReady = !paused.get() && !backgrounded.get()
       fireHealth(WebmHealthStatus.BUFFERING, "stream reset")
     }
@@ -320,6 +336,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   /** Fires only on transition, so a stalled stream does not spam the callback. */
   private fun fireHealth(status: WebmHealthStatus, detail: String) {
+    // stop() drains the extractor to end-of-input before the posted release
+    // runs; that ENDED belongs to the teardown, not to the broadcast.
+    if (status == WebmHealthStatus.ENDED && !running.get()) return
     if (lastHealth == status) return
     lastHealth = status
     healthCallback?.invoke(WebmHealthEvent(status, detail))

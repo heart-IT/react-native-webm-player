@@ -28,6 +28,11 @@ class PlaybackStats(private val mainHandler: Handler) {
   val bytesFed = AtomicLong(0)
   val failed = AtomicBoolean(false)
 
+  // ExoPlayer halts playback itself on audio-focus loss (and we pause it on
+  // background) by dropping playWhenReady; without this mirror those pauses
+  // are invisible to the synchronous getters and playbackState lies PLAYING.
+  private val playWhenReady = AtomicBoolean(true)
+
   private val audioPackets = AtomicLong(0)
   private val videoPackets = AtomicLong(0)
   private val audioUnderruns = AtomicLong(0)
@@ -49,13 +54,21 @@ class PlaybackStats(private val mainHandler: Handler) {
   val isReady: Boolean
     get() = exoState.get() == Player.STATE_READY
 
+  val isHalted: Boolean
+    get() = !playWhenReady.get()
+
   /** Wires listeners and starts the counter poll. Main thread only. */
   fun attach(exo: ExoPlayer, onHealth: (WebmHealthStatus, String) -> Unit) {
     rebase()
     // A stale READY from the previous cycle would read as PLAYING before this
     // player's first onPlaybackStateChanged.
     exoState.set(Player.STATE_IDLE)
+    playWhenReady.set(exo.playWhenReady)
     exo.addListener(object : Player.Listener {
+      override fun onPlayWhenReadyChanged(value: Boolean, reason: Int) {
+        playWhenReady.set(value)
+      }
+
       override fun onPlaybackStateChanged(state: Int) {
         exoState.set(state)
         when (state) {

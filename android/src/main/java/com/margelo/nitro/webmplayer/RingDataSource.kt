@@ -23,7 +23,14 @@ internal class RingDataSource(
 ) : DataSource {
   @Volatile private var opened = false
 
+  @Throws(IOException::class)
   override fun open(dataSpec: DataSpec): Long {
+    // A live ring has no random access. ExoPlayer only passes a position when
+    // retrying a failed load from an offset; serving sequential bytes as if
+    // they were that offset would silently corrupt the extractor, so fail loud.
+    if (dataSpec.position != 0L) {
+      throw IOException("ring source is not seekable (requested position ${dataSpec.position})")
+    }
     opened = true
     return C.LENGTH_UNSET.toLong()
   }

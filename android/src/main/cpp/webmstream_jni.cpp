@@ -79,7 +79,9 @@ Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeRead(
   int got = ring->read(reinterpret_cast<uint8_t*>(bytes + offset),
                        static_cast<size_t>(length),
                        static_cast<uint64_t>(timeoutMs));
-  env->ReleaseByteArrayElements(dst, bytes, 0);
+  // JNI_ABORT skips the copy-back a copying JVM would otherwise do for a read
+  // that wrote nothing.
+  env->ReleaseByteArrayElements(dst, bytes, got > 0 ? 0 : JNI_ABORT);
   return static_cast<jint>(got);
 }
 
