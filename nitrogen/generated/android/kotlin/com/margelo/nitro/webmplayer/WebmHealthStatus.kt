@@ -19,7 +19,8 @@ enum class WebmHealthStatus(@DoNotStrip @Keep val value: Int) {
   BUFFERING(0),
   PLAYING(1),
   ENDED(2),
-  FAILED(3);
+  FAILED(3),
+  INTERRUPTED(4);
 
   companion object
 }

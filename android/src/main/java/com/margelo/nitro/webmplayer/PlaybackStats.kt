@@ -67,6 +67,15 @@ class PlaybackStats(private val mainHandler: Handler) {
     exo.addListener(object : Player.Listener {
       override fun onPlayWhenReadyChanged(value: Boolean, reason: Int) {
         playWhenReady.set(value)
+        // ExoPlayer reports both the loss-driven pause and the regain-driven
+        // resume under this one reason.
+        if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS) {
+          if (value) {
+            onHealth(WebmHealthStatus.PLAYING, "audio focus regained")
+          } else {
+            onHealth(WebmHealthStatus.INTERRUPTED, "audio focus loss")
+          }
+        }
       }
 
       override fun onPlaybackStateChanged(state: Int) {
@@ -117,8 +126,16 @@ class PlaybackStats(private val mainHandler: Handler) {
     videoDroppedBase = videoDropped.get()
   }
 
-  fun snapshot(rate: Double, muted: Boolean, gain: Double) = WebmPlayerMetrics(
+  fun snapshot(
+    rate: Double,
+    muted: Boolean,
+    gain: Double,
+    bytesDropped: Long,
+    ringFillRatio: Double,
+  ) = WebmPlayerMetrics(
     bytesFedTotal = bytesFed.get().toDouble(),
+    bytesDropped = bytesDropped.toDouble(),
+    ringFillRatio = ringFillRatio,
     audioPacketsDecoded = audioPackets.get().toDouble(),
     videoPacketsDecoded = videoPackets.get().toDouble(),
     audioUnderruns = audioUnderruns.get().toDouble(),

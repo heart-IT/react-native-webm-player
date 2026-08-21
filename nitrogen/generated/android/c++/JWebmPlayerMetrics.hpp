@@ -33,6 +33,10 @@ namespace margelo::nitro::webmplayer {
       static const auto clazz = javaClassStatic();
       static const auto fieldBytesFedTotal = clazz->getField<double>("bytesFedTotal");
       double bytesFedTotal = this->getFieldValue(fieldBytesFedTotal);
+      static const auto fieldBytesDropped = clazz->getField<double>("bytesDropped");
+      double bytesDropped = this->getFieldValue(fieldBytesDropped);
+      static const auto fieldRingFillRatio = clazz->getField<double>("ringFillRatio");
+      double ringFillRatio = this->getFieldValue(fieldRingFillRatio);
       static const auto fieldAudioPacketsDecoded = clazz->getField<double>("audioPacketsDecoded");
       double audioPacketsDecoded = this->getFieldValue(fieldAudioPacketsDecoded);
       static const auto fieldVideoPacketsDecoded = clazz->getField<double>("videoPacketsDecoded");
@@ -57,6 +61,8 @@ namespace margelo::nitro::webmplayer {
       double gain = this->getFieldValue(fieldGain);
       return WebmPlayerMetrics(
         bytesFedTotal,
+        bytesDropped,
+        ringFillRatio,
         audioPacketsDecoded,
         videoPacketsDecoded,
         audioUnderruns,
@@ -77,12 +83,14 @@ namespace margelo::nitro::webmplayer {
      */
     [[maybe_unused]]
     static jni::local_ref<JWebmPlayerMetrics::javaobject> fromCpp(const WebmPlayerMetrics& value) {
-      using JSignature = JWebmPlayerMetrics(double, double, double, double, double, double, double, double, double, double, jboolean, double);
+      using JSignature = JWebmPlayerMetrics(double, double, double, double, double, double, double, double, double, double, double, double, jboolean, double);
       static const auto clazz = javaClassStatic();
       static const auto create = clazz->getStaticMethod<JSignature>("fromCpp");
       return create(
         clazz,
         value.bytesFedTotal,
+        value.bytesDropped,
+        value.ringFillRatio,
         value.audioPacketsDecoded,
         value.videoPacketsDecoded,
         value.audioUnderruns,

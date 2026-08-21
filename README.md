@@ -91,6 +91,9 @@ call it once per stream.
 - **A stalled feed is visible.** Health reports `Buffering` (detail "stream
   stalled") when bytes stop arriving mid-broadcast, and `Playing` again on
   recovery.
+- **Backpressure before the wall.** `getMetrics().ringFillRatio` (0.0–1.0) is
+  the early signal: back off as it climbs instead of waiting for `feedData` to
+  reject. `bytesDropped` counts what rejection has already cost.
 
 ## API
 

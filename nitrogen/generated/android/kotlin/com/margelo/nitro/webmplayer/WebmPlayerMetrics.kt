@@ -23,6 +23,12 @@ data class WebmPlayerMetrics(
   val bytesFedTotal: Double,
   @DoNotStrip
   @Keep
+  val bytesDropped: Double,
+  @DoNotStrip
+  @Keep
+  val ringFillRatio: Double,
+  @DoNotStrip
+  @Keep
   val audioPacketsDecoded: Double,
   @DoNotStrip
   @Keep
@@ -61,6 +67,8 @@ data class WebmPlayerMetrics(
     if (this === other) return true
     if (other !is WebmPlayerMetrics) return false
     return Objects.deepEquals(this.bytesFedTotal, other.bytesFedTotal)
+      && Objects.deepEquals(this.bytesDropped, other.bytesDropped)
+      && Objects.deepEquals(this.ringFillRatio, other.ringFillRatio)
       && Objects.deepEquals(this.audioPacketsDecoded, other.audioPacketsDecoded)
       && Objects.deepEquals(this.videoPacketsDecoded, other.videoPacketsDecoded)
       && Objects.deepEquals(this.audioUnderruns, other.audioUnderruns)
@@ -77,6 +85,8 @@ data class WebmPlayerMetrics(
   override fun hashCode(): Int {
     return arrayOf<Any?>(
       bytesFedTotal,
+      bytesDropped,
+      ringFillRatio,
       audioPacketsDecoded,
       videoPacketsDecoded,
       audioUnderruns,
@@ -99,8 +109,8 @@ data class WebmPlayerMetrics(
     @Keep
     @Suppress("unused")
     @JvmStatic
-    private fun fromCpp(bytesFedTotal: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double, playbackRate: Double, muted: Boolean, gain: Double): WebmPlayerMetrics {
-      return WebmPlayerMetrics(bytesFedTotal, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds, playbackRate, muted, gain)
+    private fun fromCpp(bytesFedTotal: Double, bytesDropped: Double, ringFillRatio: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double, playbackRate: Double, muted: Boolean, gain: Double): WebmPlayerMetrics {
+      return WebmPlayerMetrics(bytesFedTotal, bytesDropped, ringFillRatio, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds, playbackRate, muted, gain)
     }
   }
 }

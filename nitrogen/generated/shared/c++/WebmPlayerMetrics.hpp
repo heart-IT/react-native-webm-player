@@ -40,6 +40,8 @@ namespace margelo::nitro::webmplayer {
   struct WebmPlayerMetrics final {
   public:
     double bytesFedTotal     SWIFT_PRIVATE;
+    double bytesDropped     SWIFT_PRIVATE;
+    double ringFillRatio     SWIFT_PRIVATE;
     double audioPacketsDecoded     SWIFT_PRIVATE;
     double videoPacketsDecoded     SWIFT_PRIVATE;
     double audioUnderruns     SWIFT_PRIVATE;
@@ -54,7 +56,7 @@ namespace margelo::nitro::webmplayer {
 
   public:
     WebmPlayerMetrics() = default;
-    explicit WebmPlayerMetrics(double bytesFedTotal, double audioPacketsDecoded, double videoPacketsDecoded, double audioUnderruns, double videoFramesDropped, double audioFramesRecovered, double videoWidth, double videoHeight, double currentTimeSeconds, double playbackRate, bool muted, double gain): bytesFedTotal(bytesFedTotal), audioPacketsDecoded(audioPacketsDecoded), videoPacketsDecoded(videoPacketsDecoded), audioUnderruns(audioUnderruns), videoFramesDropped(videoFramesDropped), audioFramesRecovered(audioFramesRecovered), videoWidth(videoWidth), videoHeight(videoHeight), currentTimeSeconds(currentTimeSeconds), playbackRate(playbackRate), muted(muted), gain(gain) {}
+    explicit WebmPlayerMetrics(double bytesFedTotal, double bytesDropped, double ringFillRatio, double audioPacketsDecoded, double videoPacketsDecoded, double audioUnderruns, double videoFramesDropped, double audioFramesRecovered, double videoWidth, double videoHeight, double currentTimeSeconds, double playbackRate, bool muted, double gain): bytesFedTotal(bytesFedTotal), bytesDropped(bytesDropped), ringFillRatio(ringFillRatio), audioPacketsDecoded(audioPacketsDecoded), videoPacketsDecoded(videoPacketsDecoded), audioUnderruns(audioUnderruns), videoFramesDropped(videoFramesDropped), audioFramesRecovered(audioFramesRecovered), videoWidth(videoWidth), videoHeight(videoHeight), currentTimeSeconds(currentTimeSeconds), playbackRate(playbackRate), muted(muted), gain(gain) {}
 
   public:
     friend bool operator==(const WebmPlayerMetrics& lhs, const WebmPlayerMetrics& rhs) = default;
@@ -71,6 +73,8 @@ namespace margelo::nitro {
       jsi::Object obj = arg.asObject(runtime);
       return margelo::nitro::webmplayer::WebmPlayerMetrics(
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "bytesFedTotal"))),
+        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "bytesDropped"))),
+        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "ringFillRatio"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "audioPacketsDecoded"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "videoPacketsDecoded"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "audioUnderruns"))),
@@ -87,6 +91,8 @@ namespace margelo::nitro {
     static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::webmplayer::WebmPlayerMetrics& arg) {
       jsi::Object obj(runtime);
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "bytesFedTotal"), JSIConverter<double>::toJSI(runtime, arg.bytesFedTotal));
+      obj.setProperty(runtime, PropNameIDCache::get(runtime, "bytesDropped"), JSIConverter<double>::toJSI(runtime, arg.bytesDropped));
+      obj.setProperty(runtime, PropNameIDCache::get(runtime, "ringFillRatio"), JSIConverter<double>::toJSI(runtime, arg.ringFillRatio));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "audioPacketsDecoded"), JSIConverter<double>::toJSI(runtime, arg.audioPacketsDecoded));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "videoPacketsDecoded"), JSIConverter<double>::toJSI(runtime, arg.videoPacketsDecoded));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "audioUnderruns"), JSIConverter<double>::toJSI(runtime, arg.audioUnderruns));
@@ -109,6 +115,8 @@ namespace margelo::nitro {
         return false;
       }
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "bytesFedTotal")))) return false;
+      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "bytesDropped")))) return false;
+      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "ringFillRatio")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "audioPacketsDecoded")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "videoPacketsDecoded")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "audioUnderruns")))) return false;

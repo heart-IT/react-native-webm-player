@@ -1,4 +1,4 @@
-// JNI bridge between HybridWebmPlayer (Kotlin) and WebMStreamBuffer.
+// JNI bridge between RingBridge (Kotlin) and WebMStreamBuffer.
 //
 // Three deliberate differences from the predecessor's bridge:
 //
@@ -29,8 +29,7 @@
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeCreateRing(JNIEnv*,
-                                                                    jobject) {
+Java_com_margelo_nitro_webmplayer_RingBridge_create(JNIEnv*, jobject) {
   // Capacity and tuning both come from the shared config so the two platforms
   // cannot drift apart.
   return static_cast<jlong>(media::RingRegistry::instance().create(
@@ -39,13 +38,13 @@ Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeCreateRing(JNIEnv*,
 }
 
 JNIEXPORT void JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeDestroyRing(
+Java_com_margelo_nitro_webmplayer_RingBridge_destroy(
     JNIEnv*, jobject, jlong handle) {
   media::RingRegistry::instance().release(static_cast<int64_t>(handle));
 }
 
 JNIEXPORT jint JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeWrite(
+Java_com_margelo_nitro_webmplayer_RingBridge_write(
     JNIEnv* env, jobject, jlong handle, jobject directBuffer, jint length) {
   auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle));
   if (!ring || !directBuffer || length <= 0) return 0;
@@ -62,7 +61,7 @@ Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeWrite(
 // ExoPlayer's DataSource hands us a byte[], so this side cannot avoid the JNI
 // array access. It runs on the loader thread, never on an audio callback.
 JNIEXPORT jint JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeRead(
+Java_com_margelo_nitro_webmplayer_RingBridge_read(
     JNIEnv* env, jobject, jlong handle, jbyteArray dst, jint offset, jint length,
     jint timeoutMs) {
   auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle));
@@ -85,8 +84,29 @@ Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeRead(
   return static_cast<jint>(got);
 }
 
+JNIEXPORT jlong JNICALL
+Java_com_margelo_nitro_webmplayer_RingBridge_droppedBytes(
+    JNIEnv*, jobject, jlong handle) {
+  if (auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle))) {
+    return static_cast<jlong>(ring->getStats().droppedBytes);
+  }
+  return 0;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_margelo_nitro_webmplayer_RingBridge_fillRatio(
+    JNIEnv*, jobject, jlong handle) {
+  if (auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle))) {
+    auto s = ring->getStats();
+    return s.capacityBytes
+               ? static_cast<jdouble>(s.currentSizeBytes) / s.capacityBytes
+               : 0.0;
+  }
+  return 0.0;
+}
+
 JNIEXPORT void JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeSetEndOfStream(
+Java_com_margelo_nitro_webmplayer_RingBridge_setEndOfStream(
     JNIEnv*, jobject, jlong handle) {
   if (auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle))) {
     ring->setEndOfStream(true);
@@ -94,7 +114,7 @@ Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeSetEndOfStream(
 }
 
 JNIEXPORT void JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeClear(JNIEnv*, jobject,
+Java_com_margelo_nitro_webmplayer_RingBridge_clear(JNIEnv*, jobject,
                                                                jlong handle) {
   if (auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle))) {
     ring->clear();
@@ -102,7 +122,7 @@ Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeClear(JNIEnv*, jobject,
 }
 
 JNIEXPORT void JNICALL
-Java_com_margelo_nitro_webmplayer_HybridWebmPlayer_nativeShutdown(JNIEnv*, jobject,
+Java_com_margelo_nitro_webmplayer_RingBridge_shutdown(JNIEnv*, jobject,
                                                                   jlong handle) {
   if (auto ring = media::RingRegistry::instance().acquire(static_cast<int64_t>(handle))) {
     ring->shutdown();

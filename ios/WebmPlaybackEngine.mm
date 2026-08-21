@@ -50,8 +50,8 @@ void RunOnMain(void (^block)(void)) {
   // Backgrounded is kept apart from _paused: resuming must not start playing a
   // stream the user had explicitly paused before backgrounding.
   std::atomic<bool> _backgrounded;
-  // An active audio-session interruption (phone call). resume() and rate
-  // changes must not restart the host clock while the system holds the session.
+  // Active audio-session interruption (phone call): resume() and rate changes
+  // must not restart the host clock while the system holds the session.
   std::atomic<bool> _interrupted;
   // Latched from the pump's terminal-parse-error health event, so a failure
   // survives stop() as it does on Android. start() clears it.
@@ -153,10 +153,8 @@ void RunOnMain(void (^block)(void)) {
   _clockStarted = false;
   _running = true;
   [_pump startWithAudioDecoder:_audioDecoder videoDecoder:_videoDecoder];
-  // The lifecycle observer reports transitions only, so a start() issued while
-  // already backgrounded must derive the current state itself or this session
-  // plays through the trip. UIApplication is main-thread-only; suspend is
-  // idempotent.
+  // The lifecycle observer reports transitions only: a start() issued while
+  // already backgrounded must derive the current state itself (main-only API).
   dispatch_async(dispatch_get_main_queue(), ^{
     if (UIApplication.sharedApplication.applicationState ==
         UIApplicationStateBackground) {
@@ -217,9 +215,8 @@ void RunOnMain(void (^block)(void)) {
   return YES;
 }
 
-// Records app state unconditionally — the flag must stay truthful across
-// stop()/start() cycles — and parks playback only when running. Every apply
-// step is idempotent, so the start() probe may call this redundantly.
+// Records app state unconditionally (the flag survives stop()/start()), parks
+// playback only when running. Apply steps are idempotent for the start probe.
 - (void)suspendForBackground {
   _backgrounded.store(true);
   if (!_running.load()) return;
@@ -262,6 +259,7 @@ void RunOnMain(void (^block)(void)) {
   // the bytes stay in the ring instead of being decoded into queues nobody
   // drains — the same silent hole the pause() parking exists to prevent.
   [_pump setPaused:YES];
+  [self fireHealth:@"interrupted" detail:@"audio session interruption"];
 }
 
 - (void)interruptionEnded:(BOOL)shouldResume {
@@ -269,13 +267,16 @@ void RunOnMain(void (^block)(void)) {
   if (!_running.load() || _backgrounded.load()) return;
   // The interruption deactivated the session; reactivate before restoring rate.
   [_session activate];
-  // Without ShouldResume the system says playback must wait for the user;
-  // a JS resume() unparks the pump in that case.
-  if (!shouldResume || _paused.load()) return;
+  if (!shouldResume || _paused.load()) {
+    // System says wait for the user: record the (real) pause; resume() recovers.
+    _paused = true;
+    return;
+  }
   [_pump setPaused:NO];
   if (_synchronizer && _clockStarted.load()) {
     [_synchronizer setRate:_playbackRate.load()];
   }
+  [self fireHealth:@"playing" detail:@"interruption ended"];
 }
 
 - (BOOL)isRunning {
@@ -334,8 +335,7 @@ void RunOnMain(void (^block)(void)) {
   if (_failed.load()) return WebmPlaybackStateFailed;
   if (!_running) return WebmPlaybackStateIdle;
   if (_paused) return WebmPlaybackStatePaused;
-  // Halted by the platform (background, interruption) rather than by JS —
-  // still PAUSED, distinguishable via isPaused staying false. Matches Android.
+  // Platform-halted (background, interruption): PAUSED with isPaused false.
   if (_backgrounded.load() || _interrupted.load()) return WebmPlaybackStatePaused;
   // Read from the decoders, not from mirrored counters: an audio-only stream
   // must leave Buffering too.
@@ -391,7 +391,7 @@ void RunOnMain(void (^block)(void)) {
 
 #pragma mark - WebmDemuxPumpDelegate
 
-- (void)demuxPump:(id)pump didDecodeFirstAudioAtPts:(int64_t)ptsUs {
+- (void)demuxPump:(id)pump didDecodeFirstSampleAtPts:(int64_t)ptsUs {
   [self startClockAtPts:ptsUs];
 }
 

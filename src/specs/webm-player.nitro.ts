@@ -24,6 +24,13 @@ export enum WebmHealthStatus {
   Playing = 1,
   Ended = 2,
   Failed = 3,
+  /**
+   * The platform halted playback for an audio interruption (phone call) or
+   * audio-focus loss. Playback resumes automatically when the system allows
+   * it; if the system requires user action instead, `isPaused` becomes true
+   * and a `resume()` is needed.
+   */
+  Interrupted = 4,
 }
 
 export interface WebmHealthEvent {
@@ -34,6 +41,17 @@ export interface WebmHealthEvent {
 
 export interface WebmPlayerMetrics {
   bytesFedTotal: number
+  /**
+   * Muxed bytes rejected because the ring was full. Rejections are whole-chunk;
+   * a climbing value means the feeder is outrunning the demuxer and must
+   * re-send what was rejected (see feedData).
+   */
+  bytesDropped: number
+  /**
+   * Ring occupancy, 0.0–1.0. The feeder's backpressure signal: back off as
+   * this approaches 1.0 rather than waiting for feedData to start rejecting.
+   */
+  ringFillRatio: number
   audioPacketsDecoded: number
   videoPacketsDecoded: number
   /**

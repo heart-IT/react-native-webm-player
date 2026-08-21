@@ -21,9 +21,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @protocol WebmDemuxPumpDelegate <NSObject>
 
-/// First audio packet of the stream decoded. The media clock starts here rather
+/// First sample of the stream decoded — audio when the stream has an audio
+/// track, otherwise the first video frame. The media clock starts here rather
 /// than at start(), so it never runs ahead of the data.
-- (void)demuxPump:(id)pump didDecodeFirstAudioAtPts:(int64_t)ptsUs;
+- (void)demuxPump:(id)pump didDecodeFirstSampleAtPts:(int64_t)ptsUs;
 
 /// A health transition. Delivered on the main queue.
 - (void)demuxPump:(id)pump
@@ -74,6 +75,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)requestReset;
 
 @property(nonatomic, readonly) uint64_t bytesFedTotal;
+/// Muxed bytes rejected whole at feedData because the ring was full.
+@property(nonatomic, readonly) uint64_t bytesDropped;
+/// Ring occupancy 0.0–1.0 — the feeder's backpressure signal.
+@property(nonatomic, readonly) double ringFillRatio;
 @property(nonatomic, readonly) uint64_t videoFramesDropped;
 @property(nonatomic, readonly) int videoWidth;
 @property(nonatomic, readonly) int videoHeight;

@@ -10,6 +10,8 @@ WebmPlaybackMetrics WebmCollectMetrics(WebmDemuxPump* pump,
                                        float gain, bool muted, float rate) {
   WebmPlaybackMetrics m = {0};
   m.bytesFedTotal = pump.bytesFedTotal;
+  m.bytesDropped = pump.bytesDropped;
+  m.ringFillRatio = pump.ringFillRatio;
   // Read from the decoders rather than mirroring into atomics on the demux
   // thread: the renderer keeps draining after the last packet is fed, so a
   // mirror updated only while demuxing freezes mid-playback.

@@ -27,24 +27,6 @@ import java.util.concurrent.atomic.AtomicLong
 @UnstableApi
 class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
-  private external fun nativeCreateRing(): Long
-  private external fun nativeDestroyRing(handle: Long)
-  private external fun nativeWrite(
-    handle: Long,
-    directBuffer: java.nio.ByteBuffer,
-    length: Int,
-  ): Int
-  private external fun nativeRead(
-    handle: Long,
-    dst: ByteArray,
-    offset: Int,
-    length: Int,
-    timeoutMs: Int,
-  ): Int
-  private external fun nativeSetEndOfStream(handle: Long)
-  private external fun nativeClear(handle: Long)
-  private external fun nativeShutdown(handle: Long)
-
   private val mainHandler = Handler(Looper.getMainLooper())
 
   private val ringHandle = AtomicLong(0L)
@@ -57,6 +39,10 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   private val running = AtomicBoolean(false)
   private val paused = AtomicBoolean(false)
+  // True from resetStream() until its main-thread teardown finishes; feedData
+  // rejects while set so no bytes reach the doomed extractor or the pre-clear
+  // ring.
+  private val resetPending = AtomicBoolean(false)
   // Kept apart from `paused`: returning to the foreground must not start playing
   // a stream JS had explicitly paused before the app went away.
   private val backgrounded = AtomicBoolean(false)
@@ -74,11 +60,14 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     if (running.get()) return true
     lastHealth = null
     // Created synchronously so feedData() can buffer while ExoPlayer spins up.
-    val handle = nativeCreateRing()
+    val handle = RingBridge.create()
     if (handle == 0L) return false
     ringHandle.set(handle)
     running.set(true)
     paused.set(false)
+    // A reset whose teardown never ran (player already released) must not gate
+    // this fresh session's feed.
+    resetPending.set(false)
     stats.failed.set(false)
     mainHandler.post { startOnMain() }
     return true
@@ -149,14 +138,14 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     fireHealth(WebmHealthStatus.FAILED, detail)
     releaseOnMain()
     if (handle != 0L && ringHandle.compareAndSet(handle, 0L)) {
-      nativeShutdown(handle)
-      nativeDestroyRing(handle)
+      RingBridge.shutdown(handle)
+      RingBridge.destroy(handle)
     }
   }
 
   private fun buildMediaSource(handle: Long): MediaSource =
     WebmMediaPipeline.mediaSource {
-      RingDataSource { buf, off, len -> nativeRead(handle, buf, off, len, READ_TIMEOUT_MS) }
+      RingDataSource { buf, off, len -> RingBridge.read(handle, buf, off, len, READ_TIMEOUT_MS) }
     }
 
   override fun stop(): Boolean {
@@ -165,12 +154,12 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     paused.set(false)
     backgrounded.set(false)
     val handle = ringHandle.get()
-    if (handle != 0L) nativeShutdown(handle)  // unblocks a reader inside DataSource.read
+    if (handle != 0L) RingBridge.shutdown(handle)  // unblocks a reader inside DataSource.read
     mainHandler.post {
       releaseOnMain()
       // Freed only after the player (and its loader thread) is gone. The CAS
       // leaves a ring a newer start() created alone.
-      if (handle != 0L) nativeDestroyRing(handle)
+      if (handle != 0L) RingBridge.destroy(handle)
       ringHandle.compareAndSet(handle, 0L)
     }
     return true
@@ -235,7 +224,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   override fun feedData(data: ArrayBuffer): Boolean {
     val handle = ringHandle.get()
-    if (handle == 0L) return false
+    if (handle == 0L || resetPending.get()) return false
     val size = data.size
     if (size == 0) return false
     // A JS ArrayBuffer is non-owning: getBuffer(false) wraps its memory in a
@@ -243,26 +232,32 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     // return, so nothing outlives it.
     val buffer = data.getBuffer(false)
     if (!buffer.isDirect) return false
-    val wrote = nativeWrite(handle, buffer, size)
+    val wrote = RingBridge.write(handle, buffer, size)
     stats.bytesFed.addAndGet(wrote.toLong())
     return wrote == size
   }
 
   override fun setEndOfStream() {
     val handle = ringHandle.get()
-    if (handle != 0L) nativeSetEndOfStream(handle)
+    if (handle != 0L) RingBridge.setEndOfStream(handle)
   }
 
   override fun resetStream() {
     val handle = ringHandle.get()
     if (handle == 0L) return
-    nativeClear(handle)
+    // Gate feeding until the teardown below has run: bytes accepted before the
+    // old extractor stops are destructively consumed by it (most damagingly the
+    // new stream's EBML header), and bytes accepted before the clear are wiped.
+    // The feeder sees false and re-sends, per the feedData contract.
+    resetPending.set(true)
     mainHandler.post {
-      val exo = player ?: return@post
+      val exo = player ?: run { resetPending.set(false); return@post }
       // A new stream begins with its own EBML header, and the running
       // MatroskaExtractor is mid-cluster — rebuild the pipeline rather than
       // feed a header into it. Mirrors the iOS pump's demuxer.reset().
+      // Cleared only after stop(): a clear before it feeds the doomed loader.
       exo.stop()
+      RingBridge.clear(handle)
       exo.setMediaSource(buildMediaSource(handle))
       exo.prepare()
       stats.rebase()
@@ -270,6 +265,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
       // or playbackState stays FAILED while the new stream plays.
       stats.failed.set(false)
       exo.playWhenReady = !paused.get() && !backgrounded.get()
+      resetPending.set(false)
       fireHealth(WebmHealthStatus.BUFFERING, "stream reset")
     }
   }
@@ -367,8 +363,16 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   // MARK: - Metrics
 
-  override fun getMetrics(): WebmPlayerMetrics =
-    stats.snapshot(currentRate, currentMuted, currentGain)
+  override fun getMetrics(): WebmPlayerMetrics {
+    val handle = ringHandle.get()
+    return stats.snapshot(
+      currentRate,
+      currentMuted,
+      currentGain,
+      bytesDropped = if (handle != 0L) RingBridge.droppedBytes(handle) else 0L,
+      ringFillRatio = if (handle != 0L) RingBridge.fillRatio(handle) else 0.0,
+    )
+  }
 
   // MARK: - Main-thread wiring
 

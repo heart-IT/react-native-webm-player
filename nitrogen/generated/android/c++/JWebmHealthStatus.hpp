@@ -54,6 +54,9 @@ namespace margelo::nitro::webmplayer {
         case WebmHealthStatus::FAILED:
           static const auto fieldFAILED = clazz->getStaticField<JWebmHealthStatus>("FAILED");
           return clazz->getStaticFieldValue(fieldFAILED);
+        case WebmHealthStatus::INTERRUPTED:
+          static const auto fieldINTERRUPTED = clazz->getStaticField<JWebmHealthStatus>("INTERRUPTED");
+          return clazz->getStaticFieldValue(fieldINTERRUPTED);
         default:
           std::string stringValue = std::to_string(static_cast<int>(value));
           throw std::invalid_argument("Invalid enum value (" + stringValue + "!");

@@ -18,13 +18,23 @@ public extension WebmPlayerMetrics {
   /**
    * Create a new instance of `WebmPlayerMetrics`.
    */
-  init(bytesFedTotal: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double, playbackRate: Double, muted: Bool, gain: Double) {
-    self.init(bytesFedTotal, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds, playbackRate, muted, gain)
+  init(bytesFedTotal: Double, bytesDropped: Double, ringFillRatio: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double, playbackRate: Double, muted: Bool, gain: Double) {
+    self.init(bytesFedTotal, bytesDropped, ringFillRatio, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds, playbackRate, muted, gain)
   }
 
   @inline(__always)
   var bytesFedTotal: Double {
     return self.__bytesFedTotal
+  }
+  
+  @inline(__always)
+  var bytesDropped: Double {
+    return self.__bytesDropped
+  }
+  
+  @inline(__always)
+  var ringFillRatio: Double {
+    return self.__ringFillRatio
   }
   
   @inline(__always)

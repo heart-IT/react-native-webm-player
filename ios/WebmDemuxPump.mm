@@ -149,9 +149,31 @@ constexpr uint64_t kErrorLogMask = 511;
 }
 
 - (uint64_t)bytesFedTotal { return _bytesFed.load(); }
+
+- (uint64_t)bytesDropped {
+  return _ring ? _ring->getStats().droppedBytes : 0;
+}
+
+- (double)ringFillRatio {
+  if (!_ring) return 0.0;
+  auto s = _ring->getStats();
+  return s.capacityBytes ? static_cast<double>(s.currentSizeBytes) / s.capacityBytes : 0.0;
+}
+
 - (uint64_t)videoFramesDropped { return _videoFramesDropped.load(); }
 - (int)videoWidth { return _videoWidth.load(); }
 - (int)videoHeight { return _videoHeight.load(); }
+
+// Starts the engine's media clock. Same last-strong-reference hazard as
+// reportHealth: weak-load the delegate on main.
+- (void)notifyFirstSampleAtPts:(int64_t)ptsUs {
+  __weak WebmDemuxPump* weakSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    WebmDemuxPump* self_ = weakSelf;
+    if (!self_) return;
+    [self_.delegate demuxPump:self_ didDecodeFirstSampleAtPts:ptsUs];
+  });
+}
 
 - (void)reportHealth:(NSString*)status detail:(NSString*)detail {
   // Async to main, weak-loading the delegate there rather than here: loading a
@@ -311,14 +333,7 @@ constexpr uint64_t kErrorLogMask = 511;
     }
     if (!*firstAudioSeen) {
       *firstAudioSeen = true;
-      // Same last-strong-reference hazard as reportHealth: weak-load on main.
-      __weak WebmDemuxPump* weakSelf = self;
-      int64_t ptsUs = pkt.ptsUs;
-      dispatch_async(dispatch_get_main_queue(), ^{
-        WebmDemuxPump* self_ = weakSelf;
-        if (!self_) return;
-        [self_.delegate demuxPump:self_ didDecodeFirstAudioAtPts:ptsUs];
-      });
+      [self notifyFirstSampleAtPts:pkt.ptsUs];
       [self reportHealth:@"playing" detail:@"first audio frame"];
     }
   }
@@ -342,6 +357,9 @@ constexpr uint64_t kErrorLogMask = 511;
     if (ok) {
       if (!*firstVideoSeen) {
         *firstVideoSeen = true;
+        // A video-only stream has no first audio packet to anchor the clock;
+        // without this the synchronizer stays at rate 0 and nothing presents.
+        if (info.audioTrackNum < 0) [self notifyFirstSampleAtPts:pkt.ptsUs];
         [self reportHealth:@"playing" detail:@"first video frame"];
       }
     } else {

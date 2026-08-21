@@ -109,6 +109,7 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
     case "playing": return .playing
     case "ended": return .ended
     case "failed": return .failed
+    case "interrupted": return .interrupted
     default: return .buffering
     }
   }
@@ -119,6 +120,8 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
     let m = engine.metrics()
     return WebmPlayerMetrics(
       bytesFedTotal: Double(m.bytesFedTotal),
+      bytesDropped: Double(m.bytesDropped),
+      ringFillRatio: m.ringFillRatio,
       audioPacketsDecoded: Double(m.audioPacketsDecoded),
       videoPacketsDecoded: Double(m.videoPacketsDecoded),
       audioUnderruns: Double(m.audioUnderruns),

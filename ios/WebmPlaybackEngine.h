@@ -26,6 +26,8 @@ typedef NS_ENUM(NSInteger, WebmPlaybackState) {
 
 typedef struct {
   uint64_t bytesFedTotal;
+  uint64_t bytesDropped;
+  double ringFillRatio;
   uint64_t audioPacketsDecoded;
   uint64_t videoPacketsDecoded;
   uint64_t audioUnderruns;
