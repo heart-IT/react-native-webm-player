@@ -80,15 +80,40 @@ export interface WebmPlayer extends HybridObject<{
   readonly playbackState: WebmPlaybackState
 
   /**
-   * Feed muxed WebM bytes. Returns false when the ring is full, meaning the
-   * producer is outrunning the demuxer.
+   * Feed muxed WebM bytes. The buffer is copied before this returns; the
+   * caller may reuse it immediately.
+   *
+   * The stream must begin with a complete WebM header (EBML + Segment +
+   * Tracks). A feeder joining a broadcast mid-stream must prepend the stream's
+   * header before the first cluster it forwards.
+   *
+   * Returns false when the bytes were NOT accepted. Writes are all-or-nothing:
+   * a rejected chunk was dropped whole, and because the bytes feed a container
+   * parser, the feeder MUST re-send the same chunk before any newer data —
+   * feeding the next chunk instead corrupts the stream from that point on.
+   * False means either the ring is full (producer outrunning the demuxer —
+   * back off and retry) or the player is not running (start() not called, or
+   * stop() already called — stop feeding).
    */
   feedData(data: ArrayBuffer): boolean
+  /**
+   * No more bytes are coming. Playback drains what is buffered and reports
+   * health `Ended`. To play again after this, call resetStream() and feed a
+   * fresh stream, or stop() and start().
+   */
   setEndOfStream(): void
+  /**
+   * Abandon the current stream: buffered bytes are discarded and the parser
+   * rebuilt. The next feedData() must begin a new stream with its own complete
+   * WebM header. Use on broadcast reconnect.
+   */
   resetStream(): void
 
   muted: boolean
-  /** 0.0–2.0 */
+  /**
+   * 0.0–1.0. Values above 1.0 are clamped: neither platform's renderer
+   * amplifies.
+   */
   gain: number
   /** 0.5–2.0 */
   playbackRate: number

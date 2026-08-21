@@ -53,10 +53,14 @@ import { createWebmPlayer, WebmPlaybackState } from '@heartit/webm-player'
 const player = createWebmPlayer()
 player.start()
 
-// Each chunk is muxed WebM. Returns false when the ring is full, meaning the
-// producer is outrunning the demuxer.
+// Each chunk is muxed WebM. Writes are all-or-nothing: false means the chunk
+// was dropped whole and MUST be re-sent before any newer data — the bytes feed
+// a container parser, so skipping a chunk corrupts the stream from then on.
+let backlog: Uint8Array | null = null
 socket.on('data', (chunk: Uint8Array) => {
-  player.feedData(chunk.buffer)
+  backlog = backlog ? concat(backlog, chunk) : chunk
+  if (player.feedData(backlog.buffer)) backlog = null
+  // else: ring full (back off, retry on the next tick) or player stopped.
 })
 
 player.gain = 1.0
@@ -73,16 +77,31 @@ player.stop()
 `createWebmPlayer()` returns an independent instance with its own stream buffer;
 call it once per stream.
 
+### Feeder contract
+
+- **Header first.** A stream must begin with its complete WebM header (EBML +
+  Segment + Tracks). Joining a broadcast mid-stream, prepend the stream's
+  header before the first cluster you forward — a cluster with no header fails
+  permanently on both platforms.
+- **Retry rejected chunks.** `feedData` returning `false` means the chunk was
+  dropped whole (never split). Re-send the same bytes before anything newer.
+- **Reconnect via `resetStream()`.** It discards buffered bytes and rebuilds
+  the parser; the next `feedData` must begin a new stream, header included.
+  This is also the recovery path after `setEndOfStream()`.
+- **A stalled feed is visible.** Health reports `Buffering` (detail "stream
+  stalled") when bytes stop arriving mid-broadcast, and `Playing` again on
+  recovery.
+
 ## API
 
-| Member                                          | Notes                                                       |
-| ----------------------------------------------- | ----------------------------------------------------------- |
-| `start()` / `stop()` / `pause()` / `resume()`   | Returns `boolean`                                           |
-| `feedData(data: ArrayBuffer)`                   | Muxed WebM. `false` means the ring is full                  |
-| `setEndOfStream()` / `resetStream()`            |                                                             |
-| `isRunning` / `isPaused` / `playbackState`      | Read-only                                                   |
-| `muted` / `gain` (0–2) / `playbackRate` (0.5–2) | Read-write                                                  |
-| `getMetrics()`                                  | Bytes fed, packets decoded, underruns, frame size, position |
+| Member                                          | Notes                                                                                                           |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `start()` / `stop()` / `pause()` / `resume()`   | Returns `boolean`                                                                                               |
+| `feedData(data: ArrayBuffer)`                   | Muxed WebM. `false` = dropped whole; re-send (see contract)                                                     |
+| `setEndOfStream()` / `resetStream()`            | Drain and end / abandon stream, expect a fresh header                                                           |
+| `isRunning` / `isPaused` / `playbackState`      | Read-only. `Paused` with `isPaused === false` means the platform halted playback (background, call, focus loss) |
+| `muted` / `gain` (0–1) / `playbackRate` (0.5–2) | Read-write                                                                                                      |
+| `getMetrics()`                                  | Bytes fed, packets decoded, underruns, frame size, position                                                     |
 
 ## Development
 

@@ -286,7 +286,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   override var gain: Double
     get() = currentGain
     set(value) {
-      val clamped = value.coerceIn(0.0, 2.0)
+      // media3 clamps volume to [0,1]; mirroring a larger value would report a
+      // gain the platform is not applying.
+      val clamped = value.coerceIn(0.0, 1.0)
       currentGain = clamped
       mainHandler.post { if (!currentMuted) player?.volume = clamped.toFloat() }
     }
