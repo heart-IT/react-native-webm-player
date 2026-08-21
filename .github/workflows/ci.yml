@@ -75,24 +75,9 @@ jobs:
       - name: Build
         run: cmake --build tests/build
 
-      - name: Shared byte ring
-        run: ./tests/build/test_stream_buffer
-
-      - name: WebM demuxer end-to-end
-        run: ./tests/build/test_e2e_demux
-
-      # Regression tests for confirmed P0s: the ring's all-or-nothing write
-      # contract, and destroying the ring under an in-flight consumer.
-      - name: Audit regressions
-        run: ./tests/build/test_audit_proof
-
-      - name: Ring handle registry
-        run: ./tests/build/test_ring_registry
-
-      - name: Ring lifetime under concurrent destroy
-        run: ./tests/build/test_ring_lifetime
-
-      # The demuxer is the untrusted-input boundary: these bytes come from
-      # remote peers.
-      - name: Demuxer fuzzing
-        run: ./tests/build/fuzz_demuxer
+      # The binary list lives in run-suites.sh, shared with package.json's
+      # test:asan/tsan/ubsan. Enumerating binaries here instead let the two
+      # lists drift: CI silently skipped test_demux_hostile and
+      # test_demux_lacing, the suites that caught R3-23.
+      - name: Run all suites
+        run: sh tests/run-suites.sh tests/build
