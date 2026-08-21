@@ -19,6 +19,11 @@ constexpr int kMaxOpusFrames = 5760;
 // shallow enough that a stalled renderer does not accumulate unbounded latency.
 constexpr size_t kMaxPendingBuffers = 100;
 
+// OpusHead permits up to 255 channels, and pending-buffer size scales with the
+// count — a hostile 255-channel header could pin ~590 MB in the pending queue
+// (100 × 120 ms × 255 ch × 4 B). 8 covers 7.1, the widest real layout.
+constexpr int kMaxChannels = 8;
+
 // Per-packet logs sample every 512th occurrence — these paths run at packet
 // rate (~50/s) when stuck.
 constexpr uint64_t kDropLogMask = 511;
@@ -192,7 +197,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
                        channels:(int)channels
                        opusHead:(const uint8_t*)opusHead
                    opusHeadSize:(size_t)opusHeadSize {
-  if (sampleRate <= 0 || channels <= 0) return NO;
+  if (sampleRate <= 0 || channels <= 0 || channels > kMaxChannels) return NO;
   if (_opus.isValid() && sampleRate == _sampleRate && channels == _channels) {
     return YES;
   }
