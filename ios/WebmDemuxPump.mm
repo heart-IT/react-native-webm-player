@@ -26,6 +26,10 @@ constexpr int kRingReadTimeoutMs = 50;
 // A live feed that goes quiet for 2 s is already a visible stall.
 constexpr int kStallReadTimeouts = 40;
 
+// Per-pass logs sample every 512th occurrence: sustained corruption reports an
+// error on every demux pass, ~10+/s at stream bitrate.
+constexpr uint64_t kErrorLogMask = 511;
+
 }  // namespace
 
 @interface WebmDemuxPump ()
@@ -44,6 +48,9 @@ constexpr int kStallReadTimeouts = 40;
   WebmVideoDecoder* _videoDecoder;
 
   std::thread _thread;
+  // True while run() is executing. The thread exits on end-of-stream, so a
+  // later requestReset must know whether anyone is left to consume the flag.
+  std::atomic<bool> _threadLive;
   std::atomic<bool> _stop;
   std::atomic<bool> _paused;
   // Set by requestReset() on the JS thread, consumed by the demux thread.
@@ -59,6 +66,7 @@ constexpr int kStallReadTimeouts = 40;
 - (instancetype)init {
   self = [super init];
   if (!self) return nil;
+  _threadLive = false;
   _stop = false;
   _paused = false;
   _resetRequested = false;
@@ -84,6 +92,11 @@ constexpr int kStallReadTimeouts = 40;
       media::WebMStreamBuffer::broadcastConfig());
   _stop = false;
   _failed = false;
+  // The pump object is reused across start/stop cycles: a pause or pending
+  // reset from the previous session must not leak into this one, or the new
+  // thread parks forever on a flag nothing will clear.
+  _paused = false;
+  _resetRequested = false;
   _thread = std::thread([self] { [self run]; });
 }
 
@@ -99,6 +112,7 @@ constexpr int kStallReadTimeouts = 40;
 
 - (size_t)feedData:(const uint8_t*)bytes length:(size_t)length {
   if (!_ring) return 0;
+  if (_resetRequested.load(std::memory_order_relaxed)) [self restartIfExited];
   // Synthetic chunk boundaries, not cluster-aligned — skip the debug validator.
   size_t wrote = _ring->write(bytes, length, /*isClusterBoundary=*/false);
   _bytesFed.fetch_add(wrote);
@@ -120,6 +134,18 @@ constexpr int kStallReadTimeouts = 40;
   // appended to a demuxer still mid-cluster and every subsequent parse fails.
   if (_ring) _ring->clear();
   _resetRequested.store(true, std::memory_order_release);
+  [self restartIfExited];
+}
+
+// The demux thread exits at end-of-stream, so a post-EOS reset (broadcast
+// reconnect) has nobody left to consume the flag — restart the thread. Runs on
+// the JS thread only, the same thread as start/stop/requestReset/feedData, so
+// there is no lifecycle race with those. A thread observed live here can still
+// be mid-exit; the same check in feedData retries on the next chunk.
+- (void)restartIfExited {
+  if (!_ring || _stop.load() || _threadLive.load()) return;
+  if (_thread.joinable()) _thread.join();
+  _thread = std::thread([self] { [self run]; });
 }
 
 - (uint64_t)bytesFedTotal { return _bytesFed.load(); }
@@ -145,6 +171,7 @@ constexpr int kStallReadTimeouts = 40;
 - (void)run {
   pthread_setname_np("webmplayer.demux");
   if (!_ring) return;
+  _threadLive.store(true);
 
   media::demux::WebmDemuxer demuxer;
   std::vector<uint8_t> chunk(kPumpChunkBytes);
@@ -155,6 +182,7 @@ constexpr int kStallReadTimeouts = 40;
 
   int emptyReads = 0;
   bool stalled = false;
+  uint64_t demuxErrorLogs = 0;
 
   // The pool drains every pass: this thread sends Objective-C messages whose
   // autoreleased returns would otherwise have no pool on a bare std::thread.
@@ -173,6 +201,14 @@ constexpr int kStallReadTimeouts = 40;
       firstAudioSeen = false;
       firstVideoSeen = false;
       _failed.store(false);
+      // The engine flushes the renderers and re-anchors the clock — same
+      // weak-load-on-main pattern as reportHealth.
+      __weak WebmDemuxPump* weakSelf = self;
+      dispatch_async(dispatch_get_main_queue(), ^{
+        WebmDemuxPump* self_ = weakSelf;
+        if (!self_) return;
+        [self_.delegate demuxPumpDidResetStream:self_];
+      });
       [self reportHealth:@"buffering" detail:@"stream reset"];
     }
 
@@ -180,6 +216,12 @@ constexpr int kStallReadTimeouts = 40;
     if (got <= 0) {
       // read() returns -1 once the ring is shut down or drained at EOS.
       if (got < 0) {
+        // A shutdown-woken read exits silently: that "end" belongs to stop(),
+        // not the broadcast, and Android's stop() emits nothing either.
+        if (_stop.load()) break;
+        // A reset that raced the EOS drain re-arms the ring; consume it at the
+        // loop top instead of exiting with the flag stranded.
+        if (_resetRequested.load(std::memory_order_acquire)) continue;
         [self reportHealth:@"ended" detail:@"end of stream"];
         break;
       }
@@ -218,7 +260,12 @@ constexpr int kStallReadTimeouts = 40;
     }
 
     if (!result.error.empty()) {
-      MEDIA_LOG_W("WebmDemuxPump: demux error: %s", result.error.c_str());
+      // Sustained corruption reports an error every pass; log a sample, not all.
+      if ((demuxErrorLogs++ & kErrorLogMask) == 0) {
+        MEDIA_LOG_W("WebmDemuxPump: demux error: %s (%llu so far)",
+                    result.error.c_str(),
+                    static_cast<unsigned long long>(demuxErrorLogs));
+      }
     }
 
     // A transient parse error is normal on a lossy feed and is logged above.
@@ -232,6 +279,7 @@ constexpr int kStallReadTimeouts = 40;
     }
     }  // @autoreleasepool
   }
+  _threadLive.store(false);
 }
 
 - (void)consumeAudio:(const std::vector<media::demux::AudioPacket>&)packets
@@ -244,6 +292,14 @@ constexpr int kStallReadTimeouts = 40;
                                                   ? nullptr
                                                   : info.audioCodecPrivate.data()
                                  opusHeadSize:info.audioCodecPrivate.size()]) {
+    // The track parameters come from the stream and will not change until a
+    // reset, so this failure is permanent: without surfacing it the clock
+    // never starts, queued video never presents, and health sits at
+    // "buffering" forever over a silently dead pipeline.
+    if (!_failed.exchange(true)) {
+      MEDIA_LOG_E("WebmDemuxPump: audio decoder configuration failed permanently");
+      [self reportHealth:@"failed" detail:@"audio decoder configuration failed"];
+    }
     return;
   }
   for (const auto& pkt : packets) {

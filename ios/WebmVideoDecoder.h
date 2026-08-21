@@ -40,8 +40,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// count means frames are decoding but never reaching the screen.
 @property(nonatomic, readonly) uint64_t framesPresented;
 
-/// Drain in-flight frames, invalidate the session, release format desc.
-/// Safe to call multiple times.
+/// Decoded frames discarded because the pending queue was full — the layer
+/// stopped pulling. Renderer-stage drops, the peer of Android's
+/// droppedBufferCount.
+@property(nonatomic, readonly) uint64_t pendingCapDrops;
+
 /// Release decoder resources for a background trip. iOS revokes them anyway;
 /// doing it explicitly keeps the invalid session from being reused. Frames are
 /// refused until resume(), then decoding restarts at the next keyframe.
@@ -50,6 +53,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Allow decoding again. The session is rebuilt on the next keyframe.
 - (void)resume;
 
+/// Discard the session, the decoded backlog, and the layer's queue: everything
+/// belonging to the previous stream's timeline. For stream reset.
+- (void)resetForNewStream;
+
+/// Drain in-flight frames, invalidate the session, release the format desc.
+/// Safe to call multiple times.
 - (void)shutdown;
 
 @end

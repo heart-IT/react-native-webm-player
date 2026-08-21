@@ -40,7 +40,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)reset;
 
 @property(nonatomic, readonly) uint64_t packetsDecoded;
-/// Packets the renderer was not ready to accept.
 /// Frames reconstructed from FEC or concealed by PLC after a detected gap.
 @property(nonatomic, readonly) uint64_t framesRecovered;
 /// Presentation time of the most recent buffer handed to the renderer, in

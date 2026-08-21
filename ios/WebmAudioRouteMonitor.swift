@@ -8,6 +8,9 @@ import Foundation
 /// — adopting that category on a receive-only player would prompt for
 /// microphone access it never uses. Output selection stays with the user.
 final class WebmAudioRouteMonitor {
+  // Main-thread only: setCallback arrives on the JS thread and hops; the
+  // notification block already runs on main. An unsynchronized closure property
+  // crossing threads is a data race even when the window is one assignment.
   private var onChange: ((WebmAudioRoute) -> Void)?
   private var observer: NSObjectProtocol?
 
@@ -36,15 +39,18 @@ final class WebmAudioRouteMonitor {
   }
 
   func setCallback(_ callback: @escaping (WebmAudioRoute) -> Void) {
-    onChange = callback
-    if observer == nil {
-      observer = NotificationCenter.default.addObserver(
-        forName: AVAudioSession.routeChangeNotification,
-        object: AVAudioSession.sharedInstance(),
-        queue: .main
-      ) { [weak self] _ in
-        guard let self else { return }
-        self.onChange?(self.currentRoute)
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.onChange = callback
+      if self.observer == nil {
+        self.observer = NotificationCenter.default.addObserver(
+          forName: AVAudioSession.routeChangeNotification,
+          object: AVAudioSession.sharedInstance(),
+          queue: .main
+        ) { [weak self] _ in
+          guard let self else { return }
+          self.onChange?(self.currentRoute)
+        }
       }
     }
   }

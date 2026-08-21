@@ -17,6 +17,18 @@ namespace {
 // this fills the CMSampleTimingInfo duration field for a nominal 30 fps stream.
 constexpr CMTime kNominalFrameDuration = {1, 30, kCMTimeFlags_Valid, 0};
 
+// Bounds the decoded-frame backlog at ~1s of 30fps video; a layer that stops
+// pulling must not grow it without limit.
+constexpr size_t kMaxPendingFrames = 30;
+
+// Drop logs sample every 512th occurrence: a wedged layer drops ~30/s.
+constexpr uint64_t kDropLogMask = 511;
+
+// Marks _renderQueue so teardown can detect it is already running on it — a
+// dispatch_sync from the queue onto itself deadlocks, and dealloc can land
+// here when a queued block held the last strong reference.
+void* const kRenderQueueKey = (void*)&kRenderQueueKey;
+
 NSData* BuildVpcCConfig(int profile) {
     uint8_t buf[12] = {0};
     buf[0] = 0x01;
@@ -59,6 +71,7 @@ NSData* BuildVpcCConfig(int profile) {
     self = [super init];
     if (!self) return nil;
     _renderQueue = dispatch_queue_create("webmplayer.video.render", DISPATCH_QUEUE_SERIAL);
+    dispatch_queue_set_specific(_renderQueue, kRenderQueueKey, (void*)1, nullptr);
     constexpr CMVideoCodecType kVP9CodecType = 'vp09';
     if (@available(iOS 26.2, *)) {
         VTRegisterSupplementalVideoDecoderIfAvailable(kVP9CodecType);
@@ -75,6 +88,8 @@ NSData* BuildVpcCConfig(int profile) {
 - (BOOL)hardwareDecodeSupported { return _hwSupported; }
 
 - (uint64_t)framesPresented { return _framesPresented.load(); }
+
+- (uint64_t)pendingCapDrops { return _pendingCapDrops.load(); }
 
 - (void)armRequest {
     AVSampleBufferDisplayLayer* layer = _layer;
@@ -265,16 +280,14 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
 
     {
         std::lock_guard<std::mutex> lock(self_->_pendingMutex);
-        // Bound the backlog at ~1s of 30fps video; a layer that stops pulling
-        // must not grow this without limit.
-        if (self_->_pending.size() >= 30) {
+        if (self_->_pending.size() >= kMaxPendingFrames) {
             CFRelease(sample);
             // A pinned-full queue with every new frame discarded is exactly the
             // frozen-layer signature, and it was previously invisible: counted
             // nowhere, logged never. Rate-limited so a wedged layer logs about
             // four lines a minute, not thirty a second.
             uint64_t drops = self_->_pendingCapDrops.fetch_add(1) + 1;
-            if ((drops & 511) == 1) {
+            if ((drops & kDropLogMask) == 1) {
                 MEDIA_LOG_W("WebmVideoDecoder: pending queue full, %llu frames dropped",
                             static_cast<unsigned long long>(drops));
             }
@@ -360,6 +373,24 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     });
 }
 
+// Discards everything belonging to the previous stream: the session (in-flight
+// callbacks fenced by shutdownSession; the next keyframe rebuilds), the decoded
+// backlog, and the frames already enqueued on the layer. Called on stream
+// reset — the old timeline's frames would present as late against the
+// re-anchored clock.
+- (void)resetForNewStream {
+    {
+        std::lock_guard<std::mutex> lock(_sessionMutex);
+        [self shutdownSession];
+    }
+    [self drainPending];
+    AVSampleBufferDisplayLayer* layer = _layer;
+    if (!layer) return;
+    dispatch_async(_renderQueue, ^{
+        [layer flush];
+    });
+}
+
 - (void)shutdown {
     std::lock_guard<std::mutex> lock(_sessionMutex);
     [self shutdownSession];
@@ -368,8 +399,15 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
         _requesting = NO;
     }
     [self drainPending];
-    // Flush the render queue to ensure no enqueued blocks reference stale buffers.
-    dispatch_sync(_renderQueue, ^{});
+    // Flush the render queue so no enqueued block still references stale
+    // buffers — unless this IS the render queue (dealloc ran from a queued
+    // block's last strong reference), where the sync would deadlock and is
+    // also unnecessary: a serial queue runs nothing else while this executes,
+    // and no queued block can reference self after it, or dealloc could not
+    // be running.
+    if (!dispatch_get_specific(kRenderQueueKey)) {
+        dispatch_sync(_renderQueue, ^{});
+    }
 }
 
 @end

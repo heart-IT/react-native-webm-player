@@ -1,11 +1,13 @@
 #import "WebmPlaybackEngine.h"
 #import "WebmAudioDecoder.h"
+#import "WebmAudioSessionController.h"
 #import "WebmDemuxPump.h"
+#import "WebmEngineMetrics.h"
 #import "WebmInterruptionObserver.h"
 #import "WebmLifecycleObserver.h"
 #import "WebmVideoDecoder.h"
 
-#import <AudioToolbox/AudioToolbox.h>
+#import <UIKit/UIKit.h>
 #include <algorithm>
 #include <atomic>
 
@@ -15,9 +17,18 @@ namespace {
 // Spec ranges (webm-player.nitro.ts); Android clamps to the same values, so an
 // out-of-range value must read back identically on both platforms.
 constexpr float kMinGain = 0.0f;
-constexpr float kMaxGain = 2.0f;
+// 1.0, not 2.0: media3 clamps volume to [0,1], so >1 was iOS-only behavior.
+constexpr float kMaxGain = 1.0f;
 constexpr float kMinPlaybackRate = 0.5f;
 constexpr float kMaxPlaybackRate = 2.0f;
+
+void RunOnMain(void (^block)(void)) {
+  if ([NSThread isMainThread]) {
+    block();
+  } else {
+    dispatch_async(dispatch_get_main_queue(), block);
+  }
+}
 }  // namespace
 
 @interface WebmPlaybackEngine () <WebmDemuxPumpDelegate>
@@ -25,6 +36,7 @@ constexpr float kMaxPlaybackRate = 2.0f;
 
 @implementation WebmPlaybackEngine {
   WebmDemuxPump* _pump;
+  WebmAudioSessionController* _session;
   WebmLifecycleObserver* _lifecycle;
   WebmInterruptionObserver* _interruption;
   AVSampleBufferDisplayLayer* _displayLayer;
@@ -38,6 +50,9 @@ constexpr float kMaxPlaybackRate = 2.0f;
   // Backgrounded is kept apart from _paused: resuming must not start playing a
   // stream the user had explicitly paused before backgrounding.
   std::atomic<bool> _backgrounded;
+  // An active audio-session interruption (phone call). resume() and rate
+  // changes must not restart the host clock while the system holds the session.
+  std::atomic<bool> _interrupted;
   // Latched from the pump's terminal-parse-error health event, so a failure
   // survives stop() as it does on Android. start() clears it.
   std::atomic<bool> _failed;
@@ -65,7 +80,9 @@ constexpr float kMaxPlaybackRate = 2.0f;
   _gain = 1.0f;
   _muted = false;
   _playbackRate = 1.0f;
+  _interrupted = false;
   _lastHealthStatus = @"idle";
+  _session = [[WebmAudioSessionController alloc] init];
   // Outlives start/stop cycles so its cumulative counters do too.
   _pump = [[WebmDemuxPump alloc] init];
   _pump.delegate = self;
@@ -90,7 +107,7 @@ constexpr float kMaxPlaybackRate = 2.0f;
   // CALayer parenting and the synchronizer's renderer set are main-thread only,
   // so dispatch unconditionally — callers include the RN view manager and the
   // demux thread.
-  void (^apply)(void) = ^{
+  RunOnMain(^{
     AVSampleBufferDisplayLayer* previous = self->_displayLayer;
     if (previous == layer) return;
 
@@ -103,24 +120,14 @@ constexpr float kMaxPlaybackRate = 2.0f;
     // videoGravity belongs to the view, not the engine.
     if (self->_videoDecoder) [self->_videoDecoder setOutputLayer:layer];
     if (self->_synchronizer && layer) [self->_synchronizer addRenderer:layer];
-  };
-  if ([NSThread isMainThread]) {
-    apply();
-  } else {
-    dispatch_async(dispatch_get_main_queue(), apply);
-  }
+  });
 }
 
 - (void)detachDisplayLayer:(AVSampleBufferDisplayLayer*)layer {
-  void (^apply)(void) = ^{
+  RunOnMain(^{
     if (self->_displayLayer != layer) return;
     [self setDisplayLayer:nil];
-  };
-  if ([NSThread isMainThread]) {
-    apply();
-  } else {
-    dispatch_async(dispatch_get_main_queue(), apply);
-  }
+  });
 }
 
 - (BOOL)start {
@@ -138,14 +145,24 @@ constexpr float kMaxPlaybackRate = 2.0f;
   _audioDecoder = [[WebmAudioDecoder alloc] init];
   [_audioDecoder setRenderer:_audioRenderer];
 
-  [self setupAudioSession];
+  [_session activate];
 
   _paused = false;
-  _backgrounded = false;
+  _interrupted = false;
   _failed = false;
   _clockStarted = false;
   _running = true;
   [_pump startWithAudioDecoder:_audioDecoder videoDecoder:_videoDecoder];
+  // The lifecycle observer reports transitions only, so a start() issued while
+  // already backgrounded must derive the current state itself or this session
+  // plays through the trip. UIApplication is main-thread-only; suspend is
+  // idempotent.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (UIApplication.sharedApplication.applicationState ==
+        UIApplicationStateBackground) {
+      [self suspendForBackground];
+    }
+  });
   return YES;
 }
 
@@ -172,10 +189,11 @@ constexpr float kMaxPlaybackRate = 2.0f;
   _audioDecoder = nil;
   _audioRenderer = nil;
   _synchronizer = nil;
-  // Cleared so isPaused does not report a stale pause on a stopped player;
-  // Android clears both in stop() and the spec getters must agree.
+  [_session deactivate];
+  // Cleared so the getters do not report a stale pause on a stopped player.
+  // _backgrounded deliberately survives: it mirrors app state, not the session.
   _paused = false;
-  _backgrounded = false;
+  _interrupted = false;
   return YES;
 }
 
@@ -188,9 +206,10 @@ constexpr float kMaxPlaybackRate = 2.0f;
 
 - (BOOL)resume {
   _paused = false;
-  // Backgrounded playback stays stopped until the app returns, whatever JS asks
-  // for: the decoder has no session and the audio session may be inactive.
-  if (_backgrounded.load()) return YES;
+  // Backgrounded or interrupted playback stays stopped until the app returns /
+  // the call ends, whatever JS asks for: the decoder has no session and the
+  // audio session belongs to the system.
+  if (_backgrounded.load() || _interrupted.load()) return YES;
   [_pump setPaused:NO];
   if (_synchronizer && _clockStarted.load()) {
     [_synchronizer setRate:_playbackRate.load()];
@@ -198,8 +217,12 @@ constexpr float kMaxPlaybackRate = 2.0f;
   return YES;
 }
 
+// Records app state unconditionally — the flag must stay truthful across
+// stop()/start() cycles — and parks playback only when running. Every apply
+// step is idempotent, so the start() probe may call this redundantly.
 - (void)suspendForBackground {
-  if (!_running.load() || _backgrounded.exchange(true)) return;
+  _backgrounded.store(true);
+  if (!_running.load()) return;
   // Rate 0 rather than leaving it running: the synchronizer's timebase is driven
   // by the host clock and keeps advancing while the process is suspended, so a
   // running rate would return from a 30s background trip 30s ahead of the audio
@@ -212,7 +235,8 @@ constexpr float kMaxPlaybackRate = 2.0f;
 }
 
 - (void)resumeFromForeground {
-  if (!_running.load() || !_backgrounded.exchange(false)) return;
+  if (!_backgrounded.exchange(false)) return;
+  if (!_running.load()) return;
   // Paired with the background line: if the clock moved across the trip, the
   // suspension did not actually stop the timebase and queued frames are late.
   MEDIA_LOG_I("WebmPlaybackEngine: foreground at clock %.3fs, layer %d",
@@ -225,7 +249,7 @@ constexpr float kMaxPlaybackRate = 2.0f;
   if (!_paused.load()) [_pump setPaused:NO];
   // iOS may have deactivated the session while we were away; reactivating is a
   // no-op if it did not.
-  [self setupAudioSession];
+  [_session activate];
   if (_synchronizer && _clockStarted.load() && !_paused.load()) {
     [_synchronizer setRate:_playbackRate.load()];
   }
@@ -233,6 +257,7 @@ constexpr float kMaxPlaybackRate = 2.0f;
 
 - (void)interruptionBegan {
   if (!_running.load() || _backgrounded.load()) return;
+  _interrupted.store(true);
   // The system already forced the synchronizer's rate to zero. Park the pump so
   // the bytes stay in the ring instead of being decoded into queues nobody
   // drains — the same silent hole the pause() parking exists to prevent.
@@ -240,9 +265,10 @@ constexpr float kMaxPlaybackRate = 2.0f;
 }
 
 - (void)interruptionEnded:(BOOL)shouldResume {
+  _interrupted.store(false);
   if (!_running.load() || _backgrounded.load()) return;
   // The interruption deactivated the session; reactivate before restoring rate.
-  [self setupAudioSession];
+  [_session activate];
   // Without ShouldResume the system says playback must wait for the user;
   // a JS resume() unparks the pump in that case.
   if (!shouldResume || _paused.load()) return;
@@ -271,6 +297,8 @@ constexpr float kMaxPlaybackRate = 2.0f;
 }
 
 - (BOOL)resetStream {
+  // A failure belonging to the torn-down stream must not outlive the reset.
+  _failed = false;
   [_pump requestReset];
   return YES;
 }
@@ -291,7 +319,10 @@ constexpr float kMaxPlaybackRate = 2.0f;
 - (BOOL)setPlaybackRate:(float)rate {
   rate = std::clamp(rate, kMinPlaybackRate, kMaxPlaybackRate);
   _playbackRate = rate;
-  if (_synchronizer && _running && !_paused && _clockStarted.load()) {
+  // Backgrounded/interrupted playback holds rate 0 on purpose: restarting the
+  // host clock mid-suspension recreates exactly the drift the suspend prevents.
+  if (_synchronizer && _running && !_paused && !_backgrounded.load() &&
+      !_interrupted.load() && _clockStarted.load()) {
     [_synchronizer setRate:rate];
   }
   return YES;
@@ -303,6 +334,9 @@ constexpr float kMaxPlaybackRate = 2.0f;
   if (_failed.load()) return WebmPlaybackStateFailed;
   if (!_running) return WebmPlaybackStateIdle;
   if (_paused) return WebmPlaybackStatePaused;
+  // Halted by the platform (background, interruption) rather than by JS —
+  // still PAUSED, distinguishable via isPaused staying false. Matches Android.
+  if (_backgrounded.load() || _interrupted.load()) return WebmPlaybackStatePaused;
   // Read from the decoders, not from mirrored counters: an audio-only stream
   // must leave Buffering too.
   if (_videoDecoder.framesPresented == 0 && _audioDecoder.packetsDecoded == 0) {
@@ -312,71 +346,24 @@ constexpr float kMaxPlaybackRate = 2.0f;
 }
 
 - (WebmPlaybackMetrics)metrics {
-  WebmPlaybackMetrics m = {0};
-  m.bytesFedTotal = _pump.bytesFedTotal;
-  // Read from the decoders rather than mirroring into atomics on the demux
-  // thread: the renderer keeps draining after the last packet is fed, so a
-  // mirror updated only while demuxing freezes mid-playback.
-  m.audioPacketsDecoded = _audioDecoder ? _audioDecoder.packetsDecoded : 0;
-  // Frames that reached the display layer, not frames handed to VideoToolbox.
-  // Android reports renderedOutputBufferCount, so submitting-but-never-showing
-  // would otherwise look identical to playing on one platform and not the other.
-  m.videoPacketsDecoded = _videoDecoder ? _videoDecoder.framesPresented : 0;
-  // Renderer starvation is not observable through AVSampleBufferAudioRenderer,
-  // so iOS reports 0 rather than a different quantity under the same name —
-  // Android reports ExoPlayer's genuine underrun events. The old value here
-  // was the decoder's queue-overflow count, the exact opposite condition.
-  m.audioUnderruns = 0;
-  m.videoFramesDropped = _pump.videoFramesDropped;
-  m.audioFramesRecovered = _audioDecoder ? _audioDecoder.framesRecovered : 0;
-  m.videoWidth = _pump.videoWidth;
-  m.videoHeight = _pump.videoHeight;
-  m.gain = _gain.load();
-  m.muted = _muted.load();
-  m.playbackRate = _playbackRate.load();
-  // The synchronizer's clock keeps advancing once started, so after a stream
-  // ends it reports wall-clock rather than position. The last presented
-  // timestamp is the stream's own timeline, and matches what Android reports.
-  int64_t lastPts = _audioDecoder ? _audioDecoder.lastPresentedPtsUs : -1;
-  if (lastPts >= 0) m.currentTimeSeconds = static_cast<double>(lastPts) / 1000000.0;
-  return m;
+  return WebmCollectMetrics(_pump, _audioDecoder, _videoDecoder, _gain.load(),
+                            _muted.load(), _playbackRate.load());
 }
 
 - (void)fireHealth:(NSString*)status detail:(NSString*)detail {
   // Transition tracking and the callback both run on main, so _lastHealthStatus
   // needs no lock. Health events are rare enough that the hop is free.
-  void (^run)(void) = ^{
+  RunOnMain(^{
     void (^cb)(NSString*, NSString*) = self->_healthCallback;
     if (!cb) return;
     if ([self->_lastHealthStatus isEqualToString:status]) return;
     self->_lastHealthStatus = status;
     cb(status, detail ?: @"");
-  };
-  if ([NSThread isMainThread]) {
-    run();
-  } else {
-    dispatch_async(dispatch_get_main_queue(), run);
-  }
+  });
 }
 
 - (void)setHealthCallback:(void (^)(NSString*, NSString*))callback {
   _healthCallback = [callback copy];
-}
-
-- (void)setupAudioSession {
-  AVAudioSession* session = [AVAudioSession sharedInstance];
-  NSError* err = nil;
-  if (![session setCategory:AVAudioSessionCategoryPlayback
-                       mode:AVAudioSessionModeDefault
-                    options:0
-                      error:&err]) {
-    MEDIA_LOG_E("WebmPlaybackEngine: audio session category failed: %s",
-                err.localizedDescription.UTF8String);
-  }
-  if (![session setActive:YES error:&err]) {
-    MEDIA_LOG_E("WebmPlaybackEngine: audio session activate failed: %s",
-                err.localizedDescription.UTF8String);
-  }
 }
 
 // Anchors the media timeline to the stream's own timestamps. Without this the
@@ -393,7 +380,11 @@ constexpr float kMaxPlaybackRate = 2.0f;
     if (!self_) return;
     // Rate is read here, not captured at the call site: a pause() landing
     // between the two would otherwise be overwritten by a stale nonzero rate.
-    float rate = self_->_paused.load() ? 0.0f : self_->_playbackRate.load();
+    // Backgrounded/interrupted hold rate 0 for the same reason as pause.
+    float rate = (self_->_paused.load() || self_->_backgrounded.load() ||
+                  self_->_interrupted.load())
+                     ? 0.0f
+                     : self_->_playbackRate.load();
     [sync setRate:rate time:start];
   });
 }
@@ -402,6 +393,15 @@ constexpr float kMaxPlaybackRate = 2.0f;
 
 - (void)demuxPump:(id)pump didDecodeFirstAudioAtPts:(int64_t)ptsUs {
   [self startClockAtPts:ptsUs];
+}
+
+// Delivered on main after the demux thread has consumed a reset. The new
+// stream carries its own timeline: without re-anchoring, its timestamps land
+// behind the still-latched clock and every buffer presents as late.
+- (void)demuxPumpDidResetStream:(id)pump {
+  _clockStarted = false;
+  [_audioRenderer flush];
+  [_videoDecoder resetForNewStream];
 }
 
 - (void)demuxPump:(id)pump

@@ -30,6 +30,11 @@ NS_ASSUME_NONNULL_BEGIN
     didReportHealth:(NSString*)status
              detail:(NSString*)detail;
 
+/// The demux thread consumed a requestReset. Delivered on the main queue.
+/// The engine re-anchors the media clock and flushes the renderers here — the
+/// new stream carries its own timeline.
+- (void)demuxPumpDidResetStream:(id)pump;
+
 @end
 
 @interface WebmDemuxPump : NSObject

@@ -19,6 +19,10 @@ constexpr int kMaxOpusFrames = 5760;
 // shallow enough that a stalled renderer does not accumulate unbounded latency.
 constexpr size_t kMaxPendingBuffers = 100;
 
+// Per-packet logs sample every 512th occurrence — these paths run at packet
+// rate (~50/s) when stuck.
+constexpr uint64_t kDropLogMask = 511;
+
 CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
                                         int sampleRate, int channels,
                                         int64_t ptsUs) {
@@ -56,7 +60,10 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   }
 
   CMSampleTimingInfo timing;
-  timing.duration = CMTimeMake(frameCount, sampleRate);
+  // With a single timing entry covering all samples, `duration` is the duration
+  // of ONE sample (CMSampleBufferCreate contract) — one PCM frame, not the
+  // whole packet.
+  timing.duration = CMTimeMake(1, sampleRate);
   timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
   timing.decodeTimeStamp = kCMTimeInvalid;
 
@@ -90,6 +97,8 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
   std::atomic<uint64_t> _packetsDecoded;
   std::atomic<uint64_t> _queueOverflowDrops;
+  std::atomic<uint64_t> _decodeErrors;
+  std::atomic<uint64_t> _configFailures;
   std::atomic<uint64_t> _framesRecovered;
   std::atomic<int64_t> _lastPresentedPtsUs;
 }
@@ -102,6 +111,8 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   _expectedPtsUs = -1;
   _packetsDecoded = 0;
   _queueOverflowDrops = 0;
+  _decodeErrors = 0;
+  _configFailures = 0;
   _framesRecovered = 0;
   _lastPresentedPtsUs = -1;
   _pcm.resize(static_cast<size_t>(kMaxOpusFrames) * 2);
@@ -186,8 +197,12 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
     return YES;
   }
   if (!_opus.initialize(sampleRate, channels, opusHead, opusHeadSize)) {
-    MEDIA_LOG_E("WebmAudioDecoder: opus init failed (%d Hz, %d ch, err %d)",
-                sampleRate, channels, _opus.lastError());
+    // Retried every packet batch while the failure persists; sample the log.
+    uint64_t fails = _configFailures.fetch_add(1) + 1;
+    if ((fails & kDropLogMask) == 1) {
+      MEDIA_LOG_E("WebmAudioDecoder: opus init failed (%d Hz, %d ch, err %d)",
+                  sampleRate, channels, _opus.lastError());
+    }
     return NO;
   }
   _sampleRate = sampleRate;
@@ -268,7 +283,15 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   }
 
   int frames = _opus.decode(data, length, _pcm.data(), kMaxOpusFrames);
-  if (frames <= 0) return NO;
+  if (frames <= 0) {
+    // Error table: log, drop, continue — with a count, not silently.
+    uint64_t errs = _decodeErrors.fetch_add(1) + 1;
+    if ((errs & kDropLogMask) == 1) {
+      MEDIA_LOG_W("WebmAudioDecoder: opus decode failed (err %d, %llu total)",
+                  _opus.lastError(), static_cast<unsigned long long>(errs));
+    }
+    return NO;
+  }
 
   BOOL accepted = [self enqueue:frames atPts:ptsUs];
 
