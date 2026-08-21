@@ -69,10 +69,10 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
     // error, not a droppable block. Found by fuzzing a mutated laced stream.
     if (cluster_ && !cluster_->EOS() && !segment_->GetInfo()) {
         parseError_ = "stream has clusters but no SegmentInfo";
-        parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-        cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+        ++parseErrorCount_;
+        ++cumulativeParseErrorCount_;
         state_.store(ParseState::Error, std::memory_order_release);
-        errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+        errorEntryUs_ = nowUs();
         result.error = "permanent parse failure: " + parseError_;
         return;
     }
@@ -95,10 +95,10 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 parseError_ = "cluster exceeds parse window (" +
                               std::to_string(declaredSize) + " > " +
                               std::to_string(StreamReader::kMaxBufferSize) + " bytes)";
-                parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-                cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+                ++parseErrorCount_;
+                ++cumulativeParseErrorCount_;
                 state_.store(ParseState::Error, std::memory_order_release);
-                errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+                errorEntryUs_ = nowUs();
                 result.error = "permanent parse failure: " + parseError_;
                 return;
             }
@@ -150,8 +150,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
 
             // Detect large backward PTS jump (broadcaster restart within same segment).
             // Reset dedup state so early frames after restart are not silently dropped.
-            // Threshold shared with AudioDecodeChannel's discontinuity detection so the two
-            // stay in lockstep — drift between them would cause silent dedup of valid frames.
             if (trackNum == trackInfo_.audioTrackNum &&
                 lastEmittedAudioPtsUs_ >= 0 && ptsUs >= 0 &&
                 lastEmittedAudioPtsUs_ - ptsUs > kMaxBackwardJumpUs) {
@@ -173,8 +171,8 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 // all. Count the loss and skip: drop-and-continue policy.
                 const uint8_t* frameData = readerDataAt(frame.pos, frame.len);
                 if (!frameData) {
-                    parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-                    cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+                    ++parseErrorCount_;
+                    ++cumulativeParseErrorCount_;
                     ++consecutiveBlockErrors;
                     break;
                 }
@@ -189,8 +187,8 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                         // Cap reached: the remaining blocks in this feed are
                         // silently lost (we cannot hold them and the iterator
                         // advances). Make the drop observable via metrics.
-                        partialDropCount_.fetch_add(1, std::memory_order_relaxed);
-                        packetCapDrops_.fetch_add(1, std::memory_order_relaxed);
+                        ++partialDropCount_;
+                        ++packetCapDrops_;
                         continue;
                     }
                     AudioPacket pkt;
@@ -199,20 +197,20 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.ptsUs = ptsUs;
                     pkt.durationUs = kDefaultAudioDurationUs;
                     result.audioPackets.push_back(pkt);
-                    audioPacketsEmitted_.fetch_add(1, std::memory_order_relaxed);
+                    ++audioPacketsEmitted_;
                     lastEmittedAudioPtsUs_ = ptsUs;
                 } else if (trackNum == trackInfo_.videoTrackNum) {
                     auto frameSize = static_cast<size_t>(frame.len);
                     if (frameSize > kMaxVideoFrameSize) {
-                        partialDropCount_.fetch_add(1, std::memory_order_relaxed);
-                        oversizedFrameDrops_.fetch_add(1, std::memory_order_relaxed);
+                        ++partialDropCount_;
+                        ++oversizedFrameDrops_;
                         continue;  // Reject oversized frames
                     }
                     // Same block-level dedup contract as the audio path above.
                     if (f == 0 && ptsUs == lastEmittedVideoPtsUs_) break;
                     if (result.videoPackets.size() >= kMaxVideoPacketsPerFeed) {
-                        partialDropCount_.fetch_add(1, std::memory_order_relaxed);
-                        packetCapDrops_.fetch_add(1, std::memory_order_relaxed);
+                        ++partialDropCount_;
+                        ++packetCapDrops_;
                         continue;
                     }
                     VideoPacket pkt;
@@ -221,7 +219,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.ptsUs = ptsUs;
                     pkt.isKeyFrame = block->IsKey();
                     result.videoPackets.push_back(pkt);
-                    videoPacketsEmitted_.fetch_add(1, std::memory_order_relaxed);
+                    ++videoPacketsEmitted_;
                     lastEmittedVideoPtsUs_ = ptsUs;
                 }
 
@@ -282,7 +280,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
     // Report if blocks are consistently unparseable despite data being available
     if (consecutiveBlockErrors >= kMaxConsecutiveBlockErrors && result.audioPackets.empty() && result.videoPackets.empty()) {
         result.error = "block parse stall: consecutive unparseable blocks";
-        blockStallCount_.fetch_add(1, std::memory_order_relaxed);
+        ++blockStallCount_;
     }
 
     // Schedule compaction for the start of the next feedData() call.

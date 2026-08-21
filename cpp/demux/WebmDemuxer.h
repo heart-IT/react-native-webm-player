@@ -123,26 +123,28 @@ public:
     size_t bufferBytes() const noexcept;
 
 
+    // Ingest-thread only, like every counter it reads: production consumes
+    // parseState() and trackInfoSnapshot(); this getter exists for the test
+    // and fuzz suites, which feed and read on one thread.
     DemuxerMetrics demuxerMetrics() const noexcept {
         DemuxerMetrics m{};
-        m.totalBytesFed = totalBytesFed_.load(std::memory_order_relaxed);
-        m.feedDataCalls = feedDataCalls_.load(std::memory_order_relaxed);
-        m.audioPacketsEmitted = audioPacketsEmitted_.load(std::memory_order_relaxed);
-        m.videoPacketsEmitted = videoPacketsEmitted_.load(std::memory_order_relaxed);
-        m.overflowCount = overflowCount_.load(std::memory_order_relaxed);
-        m.partialDropCount = partialDropCount_.load(std::memory_order_relaxed);
-        m.oversizedFrameDrops = oversizedFrameDrops_.load(std::memory_order_relaxed);
-        m.packetCapDrops = packetCapDrops_.load(std::memory_order_relaxed);
-        m.appendBackpressureDrops = appendBackpressureDrops_.load(std::memory_order_relaxed);
-        m.blockStallCount = blockStallCount_.load(std::memory_order_relaxed);
-        m.parseErrorCount = parseErrorCount_.load(std::memory_order_relaxed);
-        m.cumulativeParseErrorCount = cumulativeParseErrorCount_.load(std::memory_order_relaxed);
-        m.sessionResetCount = sessionResetCount_.load(std::memory_order_relaxed);
+        m.totalBytesFed = totalBytesFed_;
+        m.feedDataCalls = feedDataCalls_;
+        m.audioPacketsEmitted = audioPacketsEmitted_;
+        m.videoPacketsEmitted = videoPacketsEmitted_;
+        m.overflowCount = overflowCount_;
+        m.partialDropCount = partialDropCount_;
+        m.oversizedFrameDrops = oversizedFrameDrops_;
+        m.packetCapDrops = packetCapDrops_;
+        m.appendBackpressureDrops = appendBackpressureDrops_;
+        m.blockStallCount = blockStallCount_;
+        m.parseErrorCount = parseErrorCount_;
+        m.cumulativeParseErrorCount = cumulativeParseErrorCount_;
+        m.sessionResetCount = sessionResetCount_;
         m.bufferBytes = bufferBytes();
         m.parseState = state_.load(std::memory_order_relaxed);
-        if (m.parseState == ParseState::Error) {
-            int64_t entry = errorEntryUs_.load(std::memory_order_relaxed);
-            if (entry > 0) m.timeInErrorMs = (nowUs() - entry) / 1000;
+        if (m.parseState == ParseState::Error && errorEntryUs_ > 0) {
+            m.timeInErrorMs = (nowUs() - errorEntryUs_) / 1000;
         }
         return m;
     }
@@ -182,23 +184,24 @@ private:
     // Track the lowest buffer offset still needed so we can compact
     long long compactOffset_ = 0;
     long long pendingCompactPos_ = 0;  // Deferred compaction target (applied at next feedData)
-    std::atomic<uint64_t> overflowCount_{0};
-    std::atomic<uint64_t> partialDropCount_{0};
-    std::atomic<uint64_t> oversizedFrameDrops_{0};
-    std::atomic<uint64_t> packetCapDrops_{0};
-    std::atomic<uint64_t> appendBackpressureDrops_{0};
-
-    // Metrics counters (atomic: written by ingest thread, read by JS via getMetrics)
-    std::atomic<uint64_t> totalBytesFed_{0};
-    std::atomic<uint64_t> feedDataCalls_{0};
-    std::atomic<uint64_t> audioPacketsEmitted_{0};
-    std::atomic<uint64_t> videoPacketsEmitted_{0};
-    std::atomic<uint64_t> blockStallCount_{0};
-    std::atomic<uint64_t> parseErrorCount_{0};
+    // Metrics counters. Plain integers on purpose: written and read only on
+    // the ingest thread (feedData/demuxerMetrics callers). Only state_ crosses
+    // threads.
+    uint64_t overflowCount_ = 0;
+    uint64_t partialDropCount_ = 0;
+    uint64_t oversizedFrameDrops_ = 0;
+    uint64_t packetCapDrops_ = 0;
+    uint64_t appendBackpressureDrops_ = 0;
+    uint64_t totalBytesFed_ = 0;
+    uint64_t feedDataCalls_ = 0;
+    uint64_t audioPacketsEmitted_ = 0;
+    uint64_t videoPacketsEmitted_ = 0;
+    uint64_t blockStallCount_ = 0;
+    uint64_t parseErrorCount_ = 0;
     // Cumulative (never zeroed by reset()) — see DemuxerMetrics.
-    std::atomic<uint64_t> cumulativeParseErrorCount_{0};
-    std::atomic<uint64_t> sessionResetCount_{0};
-    std::atomic<int64_t> errorEntryUs_{0};  // nowUs() when state last transitioned to Error
+    uint64_t cumulativeParseErrorCount_ = 0;
+    uint64_t sessionResetCount_ = 0;
+    int64_t errorEntryUs_ = 0;  // nowUs() when state last transitioned to Error
 
     // PTS dedup: skip duplicate blocks from Hypercore retries
     int64_t lastEmittedAudioPtsUs_ = -1;
@@ -209,7 +212,6 @@ private:
     // or looping through auto-reset; the drop counters stay exact regardless.
     int64_t lastWindowFullLogUs_ = 0;
     int64_t lastAutoResetLogUs_ = 0;
-    std::atomic<size_t> cachedBufferBytes_{0};
 };
 
 }  // namespace media::demux

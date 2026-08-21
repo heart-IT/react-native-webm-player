@@ -21,7 +21,10 @@ inline constexpr int kMaxParseRetries = 3;
 // Consecutive unparseable blocks before reporting a stall.
 inline constexpr int kMaxConsecutiveBlockErrors = 3;
 
-// Reject video frames larger than this (matches VideoConfig::kMaxEncodedFrameSize).
+// Reject video frames larger than this before zero-copy emission. The value is
+// inherited from v1's encoder-side frame cap; it is generous for broadcast VP9
+// (keyframes are typically tens of KB) but has never been validated against a
+// worst-case legitimate keyframe — an oversized one is counted and dropped.
 inline constexpr size_t kMaxVideoFrameSize = 512 * 1024;
 
 // Cap packets per feedData() call to bound vector growth from malformed input.
@@ -37,11 +40,6 @@ inline constexpr double kMaxAudioSampleRate = 192'000.0;
 // stream bitrate, so an unratelimited warning on a backpressured path floods
 // the log. Matches the ring's logMinIntervalMs precedent (5 s).
 inline constexpr int64_t kThrottledLogIntervalUs = 5'000'000;
-
-// Max tracks to iterate during parseTracks(). A valid broadcast WebM has 1–2
-// (one Opus, one VP9). Defends against pathological inputs forcing a long
-// linear scan in the track-classification loop.
-inline constexpr unsigned long kMaxTracks = 32;
 
 // Backward PTS tolerance before a block is treated as a discontinuity rather
 // than packet reordering. Was config::epoch::kMaxBackwardJumpUs in v1; it is

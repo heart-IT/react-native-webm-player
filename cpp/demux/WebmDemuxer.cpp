@@ -44,7 +44,7 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     cachedResult_.videoPackets.clear();
     cachedResult_.error.clear();
 
-    feedDataCalls_.fetch_add(1, std::memory_order_relaxed);
+    ++feedDataCalls_;
 
     // Compact data from the previous feedData call. Deferred here so that
     // packet pointers returned in the previous DemuxResult remain valid
@@ -54,7 +54,7 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         pendingCompactPos_ = 0;
     }
 
-    totalBytesFed_.fetch_add(len, std::memory_order_relaxed);
+    totalBytesFed_ += len;
 
     {
         if (!data || len == 0) {
@@ -70,18 +70,18 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             // call's result. The window is trimmed by deferred compaction at
             // the top of the next call, so a full window recovers one feed
             // later at the cost of a counted gap.
-            partialDropCount_.fetch_add(1, std::memory_order_relaxed);
-            appendBackpressureDrops_.fetch_add(1, std::memory_order_relaxed);
+            ++partialDropCount_;
+            ++appendBackpressureDrops_;
             if (throttledLog(lastWindowFullLogUs_)) {
                 MEDIA_LOG_W("WebmDemuxer: window full, dropped %zu/%zu bytes (count=%llu)",
                             len - accepted, len,
-                            static_cast<unsigned long long>(partialDropCount_.load(std::memory_order_relaxed)));
+                            static_cast<unsigned long long>(partialDropCount_));
             }
         }
 
         if (accepted == 0) {
             cachedResult_.error = "demuxer buffer overflow";
-            overflowCount_.fetch_add(1, std::memory_order_relaxed);
+            ++overflowCount_;
             return cachedResult_;
         }
     }
@@ -93,7 +93,7 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             if (!parseError_.empty()) {
                 if (++parseRetryCount_ >= kMaxParseRetries) {
                     state_.store(ParseState::Error, std::memory_order_release);
-                    errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+                    errorEntryUs_ = nowUs();
                     cachedResult_.error = "permanent parse failure: " + parseError_;
                 } else {
                     cachedResult_.error = parseError_;
@@ -110,7 +110,7 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             if (!parseError_.empty()) {
                 if (++parseRetryCount_ >= kMaxParseRetries) {
                     state_.store(ParseState::Error, std::memory_order_release);
-                    errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+                    errorEntryUs_ = nowUs();
                     cachedResult_.error = "permanent parse failure: " + parseError_;
                 } else {
                     cachedResult_.error = parseError_;
@@ -148,8 +148,8 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         // larger than the whole window — still a counted drop, never silent.
         size_t reAccepted = reader_->append(data, len);
         if (reAccepted < len) {
-            partialDropCount_.fetch_add(1, std::memory_order_relaxed);
-            appendBackpressureDrops_.fetch_add(1, std::memory_order_relaxed);
+            ++partialDropCount_;
+            ++appendBackpressureDrops_;
         }
         if (parseEBMLHeader()) {
             state_.store(ParseState::WaitingForSegment, std::memory_order_release);
@@ -172,9 +172,6 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         break;
     }
     }
-
-    cachedBufferBytes_.store(reader_ ? reader_->bufferSize() : 0,
-                             std::memory_order_relaxed);
 
     return cachedResult_;
 }
@@ -200,8 +197,8 @@ bool WebmDemuxer::parseEBMLHeader() {
         // Distinguish "need more data" from "bad stream"
         if (readerBytesAvailable() >= kMinBytesForEBML) {
             parseError_ = "invalid EBML header";
-            parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-            cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+            ++parseErrorCount_;
+            ++cumulativeParseErrorCount_;
         }
         return false;
     }
@@ -218,8 +215,8 @@ bool WebmDemuxer::parseSegment() {
     if (ret != 0 || !rawSegment) {
         if (readerBytesAvailable() >= kMinBytesForSegment) {
             parseError_ = "invalid WebM segment";
-            parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-            cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+            ++parseErrorCount_;
+            ++cumulativeParseErrorCount_;
         }
         return false;
     }
@@ -245,18 +242,18 @@ void WebmDemuxer::reset() {
     ebmlHeaderEndPos_ = 0;
     compactOffset_ = 0;
     pendingCompactPos_ = 0;
-    overflowCount_.store(0, std::memory_order_relaxed);
-    partialDropCount_.store(0, std::memory_order_relaxed);
-    oversizedFrameDrops_.store(0, std::memory_order_relaxed);
-    packetCapDrops_.store(0, std::memory_order_relaxed);
-    appendBackpressureDrops_.store(0, std::memory_order_relaxed);
-    errorEntryUs_.store(0, std::memory_order_relaxed);
-    totalBytesFed_.store(0, std::memory_order_relaxed);
-    feedDataCalls_.store(0, std::memory_order_relaxed);
-    audioPacketsEmitted_.store(0, std::memory_order_relaxed);
-    videoPacketsEmitted_.store(0, std::memory_order_relaxed);
-    blockStallCount_.store(0, std::memory_order_relaxed);
-    parseErrorCount_.store(0, std::memory_order_relaxed);
+    overflowCount_ = 0;
+    partialDropCount_ = 0;
+    oversizedFrameDrops_ = 0;
+    packetCapDrops_ = 0;
+    appendBackpressureDrops_ = 0;
+    errorEntryUs_ = 0;
+    totalBytesFed_ = 0;
+    feedDataCalls_ = 0;
+    audioPacketsEmitted_ = 0;
+    videoPacketsEmitted_ = 0;
+    blockStallCount_ = 0;
+    parseErrorCount_ = 0;
     lastEmittedAudioPtsUs_ = -1;
     lastEmittedVideoPtsUs_ = -1;
     cachedResult_.audioPackets.clear();
@@ -264,11 +261,11 @@ void WebmDemuxer::reset() {
     cachedResult_.error.clear();
     // Monotonic across the session: cumulativeParseErrorCount_ and
     // sessionResetCount_ are NOT zeroed here.
-    sessionResetCount_.fetch_add(1, std::memory_order_relaxed);
+    ++sessionResetCount_;
 }
 
 size_t WebmDemuxer::bufferBytes() const noexcept {
-    return cachedBufferBytes_.load(std::memory_order_relaxed);
+    return reader_ ? reader_->bufferSize() : 0;
 }
 
 }  // namespace media::demux

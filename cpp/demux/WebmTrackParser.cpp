@@ -33,18 +33,17 @@ bool WebmDemuxer::parseTracks() {
                 return false;  // Need more data
             }
             parseError_ = "segment load failed";
-            parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-            cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+            ++parseErrorCount_;
+            ++cumulativeParseErrorCount_;
             if (++parseRetryCount_ >= kMaxParseRetries) {
                 state_.store(ParseState::Error, std::memory_order_release);
-                errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+                errorEntryUs_ = nowUs();
             }
         }
         return false;
     }
 
     unsigned long trackCount = tracks->GetTracksCount();
-    if (trackCount > kMaxTracks) trackCount = kMaxTracks;
     std::lock_guard<std::mutex> trackLk(trackMtx_);
     for (unsigned long i = 0; i < trackCount; ++i) {
         const mkvparser::Track* track = tracks->GetTrackByIndex(i);
@@ -103,10 +102,10 @@ bool WebmDemuxer::parseTracks() {
 
     if (trackInfo_.audioTrackNum < 0 && trackInfo_.videoTrackNum < 0) {
         parseError_ = "no supported tracks (need A_OPUS or V_VP9)";
-        parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
-        cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+        ++parseErrorCount_;
+        ++cumulativeParseErrorCount_;
         state_.store(ParseState::Error, std::memory_order_release);
-        errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+        errorEntryUs_ = nowUs();
         return false;
     }
 
