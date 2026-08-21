@@ -23,44 +23,27 @@
 #include <random>
 
 #include "demux/WebmDemuxer.h"
+#include "webm_synth.h"
 
-// Minimal valid WebM header: EBML header + Segment + Tracks with one Opus audio track.
-// This is the smallest byte sequence that gets the demuxer into Streaming state.
-// Generated from a real WebM file and trimmed to the minimum viable header.
-static const uint8_t kMinimalWebmHeader[] = {
-    // EBML Header
-    0x1A, 0x45, 0xDF, 0xA3,  // EBML element ID
-    0x93,                      // size = 19
-    0x42, 0x86, 0x81, 0x01,  // EBMLVersion = 1
-    0x42, 0xF7, 0x81, 0x01,  // EBMLReadVersion = 1
-    0x42, 0xF2, 0x81, 0x04,  // EBMLMaxIDLength = 4
-    0x42, 0xF3, 0x81, 0x08,  // EBMLMaxSizeLength = 8
-    0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6D,  // DocType = "webm"
-    0x42, 0x87, 0x81, 0x04,  // DocTypeVersion = 4
-    0x42, 0x85, 0x81, 0x02,  // DocTypeReadVersion = 2
-    // Segment (unknown size)
-    0x18, 0x53, 0x80, 0x67,  // Segment element ID
-    0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // size = unknown
-    // Segment Info
-    0x15, 0x49, 0xA9, 0x66,  // Info element ID
-    0x8B,                      // size = 11
-    0x2A, 0xD7, 0xB1, 0x83, 0x0F, 0x42, 0x40,  // TimecodeScale = 1000000
-    0x44, 0x89, 0x81, 0x00,  // Duration (0, streaming)
-    // Tracks
-    0x16, 0x54, 0xAE, 0x6B,  // Tracks element ID
-    0xA2,                      // size = 34
-    // TrackEntry (audio)
-    0xAE, 0x9F,              // TrackEntry, size = 31
-    0xD7, 0x81, 0x01,        // TrackNumber = 1
-    0x73, 0xC5, 0x81, 0x01,  // TrackUID = 1
-    0x83, 0x81, 0x02,        // TrackType = audio (2)
-    0x86, 0x86, 0x41, 0x5F, 0x4F, 0x50, 0x55, 0x53,  // CodecID = "A_OPUS"
-    // Audio settings
-    0xE1, 0x8A,              // Audio element, size = 10
-    0xB5, 0x84, 0x47, 0x3B, 0x80, 0x00,  // SamplingFrequency = 48000.0
-    0x9F, 0x81, 0x02,        // Channels = 2
-    0x62, 0x64, 0x81, 0x10,  // BitDepth = 16 (not used for Opus but valid)
-};
+// The seed header lives in webm_synth.h, shared with the deterministic demux
+// tests so its sizes are exercised from both directions.
+static const uint8_t* const kMinimalWebmHeader = webm_synth::kMinimalWebmHeader;
+static constexpr size_t kMinimalWebmHeaderSize = sizeof(webm_synth::kMinimalWebmHeader);
+
+// Startup self-check: the pristine seed must genuinely reach Streaming, or
+// every header-based phase silently degrades to fuzzing the first parser
+// stage only (R3-6 — a broken seed hid R3-20 from 100k CI iterations).
+static void verifySeedReachesStreaming() {
+    media::demux::WebmDemuxer demuxer;
+    demuxer.feedData(kMinimalWebmHeader, kMinimalWebmHeaderSize);
+    if (demuxer.parseState() != media::demux::ParseState::Streaming) {
+        fprintf(stderr,
+                "FATAL: fuzz seed no longer reaches ParseState::Streaming "
+                "(state=%d) — fix the element sizes in tests/webm_synth.h\n",
+                static_cast<int>(demuxer.parseState()));
+        abort();
+    }
+}
 
 // Exercises the demuxer with a single contiguous input.
 // Returns false if ASAN/UBSAN would have already aborted on a real bug.
@@ -91,7 +74,6 @@ static void fuzzOnce(const uint8_t* data, size_t size) {
     (void)metrics.totalBytesFed;
     (void)metrics.bufferBytes;
     (void)demuxer.trackInfoSnapshot();
-    (void)demuxer.hasStreamHeader();
     (void)demuxer.parseState();
 }
 
@@ -159,6 +141,11 @@ static void fuzzResetDuring(const uint8_t* data, size_t size, std::mt19937& rng)
 }
 
 // --- libFuzzer entry point ---
+extern "C" int LLVMFuzzerInitialize(int*, char***) {
+    verifySeedReachesStreaming();
+    return 0;
+}
+
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     // Cap input size to prevent OOM (demuxer caps at 2MB internally)
     if (size > 2 * 1024 * 1024) return 0;
@@ -226,6 +213,8 @@ static void mutate(std::vector<uint8_t>& data, std::mt19937& rng) {
 int main(int argc, char** argv) {
     constexpr int kIterations = 100000;
 
+    verifySeedReachesStreaming();
+
     printf("WebmDemuxer fuzz test (standalone mode, %d iterations)\n\n", kIterations);
 
     std::mt19937 rng(42);  // deterministic for CI
@@ -244,7 +233,7 @@ int main(int argc, char** argv) {
     printf("  Phase 2: mutated valid header...\n");
     for (int i = 0; i < kIterations / 4; ++i) {
         std::vector<uint8_t> data(kMinimalWebmHeader,
-                                   kMinimalWebmHeader + sizeof(kMinimalWebmHeader));
+                                   kMinimalWebmHeader + kMinimalWebmHeaderSize);
         int mutations = 1 + static_cast<int>(rng() % 5);
         for (int m = 0; m < mutations; ++m) mutate(data, rng);
         LLVMFuzzerTestOneInput(data.data(), data.size());
@@ -255,7 +244,7 @@ int main(int argc, char** argv) {
     printf("  Phase 3: valid header + random cluster data...\n");
     for (int i = 0; i < kIterations / 4; ++i) {
         std::vector<uint8_t> data(kMinimalWebmHeader,
-                                   kMinimalWebmHeader + sizeof(kMinimalWebmHeader));
+                                   kMinimalWebmHeader + kMinimalWebmHeaderSize);
         // Append random "cluster" data
         size_t extraLen = rng() % 8192;
         for (size_t j = 0; j < extraLen; ++j)
@@ -282,7 +271,7 @@ int main(int argc, char** argv) {
     }
 
     // EBML ID bytes only (truncated)
-    for (size_t len = 1; len <= sizeof(kMinimalWebmHeader) && len <= 64; ++len) {
+    for (size_t len = 1; len <= kMinimalWebmHeaderSize && len <= 64; ++len) {
         LLVMFuzzerTestOneInput(kMinimalWebmHeader, len);
         edgeCases++;
     }
@@ -297,7 +286,7 @@ int main(int argc, char** argv) {
     // Valid header, then 2MB of zeros (exercises buffer overflow path)
     {
         std::vector<uint8_t> data(kMinimalWebmHeader,
-                                   kMinimalWebmHeader + sizeof(kMinimalWebmHeader));
+                                   kMinimalWebmHeader + kMinimalWebmHeaderSize);
         data.resize(data.size() + 2 * 1024 * 1024, 0);
         LLVMFuzzerTestOneInput(data.data(), data.size());
         edgeCases++;
@@ -308,14 +297,32 @@ int main(int argc, char** argv) {
     for (int i = 0; i < remaining; ++i) {
         // Alternate between header-based and random mutations
         std::vector<uint8_t> data(kMinimalWebmHeader,
-                                   kMinimalWebmHeader + sizeof(kMinimalWebmHeader));
+                                   kMinimalWebmHeader + kMinimalWebmHeaderSize);
         int mutations = 1 + static_cast<int>(rng() % 10);
         for (int m = 0; m < mutations; ++m) mutate(data, rng);
         LLVMFuzzerTestOneInput(data.data(), data.size());
     }
     printf("    %d iterations OK\n", kIterations / 4);
 
-    printf("\n  ALL PHASES PASSED (%d total iterations)\n", kIterations);
+    // Phase 5: header + Xiph-laced clusters, mutated — fuzzes the lacing and
+    // block-iteration paths, which none of the earlier phases could reach.
+    printf("  Phase 5: mutated laced-cluster stream...\n");
+    std::vector<uint8_t> lacedSeed(kMinimalWebmHeader,
+                                   kMinimalWebmHeader + kMinimalWebmHeaderSize);
+    lacedSeed.insert(lacedSeed.end(), webm_synth::kXiphLacedCluster,
+                     webm_synth::kXiphLacedCluster + sizeof(webm_synth::kXiphLacedCluster));
+    lacedSeed.insert(lacedSeed.end(), webm_synth::kXiphLacedCluster2,
+                     webm_synth::kXiphLacedCluster2 + sizeof(webm_synth::kXiphLacedCluster2));
+    LLVMFuzzerTestOneInput(lacedSeed.data(), lacedSeed.size());  // pristine first
+    for (int i = 0; i < kIterations / 4; ++i) {
+        std::vector<uint8_t> data = lacedSeed;
+        int mutations = 1 + static_cast<int>(rng() % 5);
+        for (int m = 0; m < mutations; ++m) mutate(data, rng);
+        LLVMFuzzerTestOneInput(data.data(), data.size());
+    }
+    printf("    %d iterations OK\n", kIterations / 4);
+
+    printf("\n  ALL PHASES PASSED (%d total iterations)\n", kIterations + kIterations / 4);
     return 0;
 }
 #endif

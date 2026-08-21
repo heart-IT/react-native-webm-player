@@ -99,6 +99,26 @@ if(FUZZ)
     target_compile_definitions(fuzz_demuxer PRIVATE FUZZING_BUILD_MODE_INSTRUMENTATION)
 endif()
 
+# ---- Hostile-input demux tests (R3-20 UB clamp, R3-5 oversized cluster) ----
+add_executable(test_demux_hostile
+    test_demux_hostile.cpp
+    ${CPP_ROOT}/demux/WebmDemuxer.cpp
+    ${CPP_ROOT}/demux/WebmTrackParser.cpp
+    ${CPP_ROOT}/demux/WebmBlockParser.cpp
+    ${CPP_ROOT}/third_party/libwebm/mkvparser/mkvparser.cc
+)
+target_link_libraries(test_demux_hostile PRIVATE Threads::Threads)
+
+# ---- Laced-block demux tests (Xiph lacing, block-level dedup contract) ----
+add_executable(test_demux_lacing
+    test_demux_lacing.cpp
+    ${CPP_ROOT}/demux/WebmDemuxer.cpp
+    ${CPP_ROOT}/demux/WebmTrackParser.cpp
+    ${CPP_ROOT}/demux/WebmBlockParser.cpp
+    ${CPP_ROOT}/third_party/libwebm/mkvparser/mkvparser.cc
+)
+target_link_libraries(test_demux_lacing PRIVATE Threads::Threads)
+
 # ---- WebM demuxer end-to-end (real VP9+Opus fixture) ----
 # Opus is only needed to prove the demuxed audio packets actually decode.
 find_path(OPUS_INCLUDE_DIR opus/opus.h HINTS /opt/homebrew/include /usr/local/include)

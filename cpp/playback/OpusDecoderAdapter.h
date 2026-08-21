@@ -217,17 +217,9 @@ public:
     }
 
     [[nodiscard]] int lastError() const noexcept { return lastError_; }
-    [[nodiscard]] int consecutiveErrors() const noexcept { return consecutiveErrors_; }
     [[nodiscard]] bool isValid() const noexcept {
         return decoder_ != nullptr || msDecoder_ != nullptr;
     }
-
-    /// Channel layout in force. `streams == 0` when nothing is initialised.
-    [[nodiscard]] const OpusChannelMapping& channelMapping() const noexcept {
-        return mapping_;
-    }
-    [[nodiscard]] int sampleRate() const noexcept { return sampleRate_; }
-    [[nodiscard]] int channels() const noexcept { return channels_; }
 
 private:
     void destroy() noexcept {

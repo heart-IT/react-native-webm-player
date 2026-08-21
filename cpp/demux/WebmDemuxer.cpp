@@ -16,11 +16,21 @@
 
 namespace media::demux {
 
+namespace {
+// Ring-style shouldLog for the ingest thread (single-threaded, so a plain
+// timestamp suffices where the ring needs a CAS).
+bool throttledLog(int64_t& lastLogUs) {
+    int64_t now = nowUs();
+    if (now - lastLogUs < kThrottledLogIntervalUs) return false;
+    lastLogUs = now;
+    return true;
+}
+}  // namespace
+
 WebmDemuxer::WebmDemuxer()
     : reader_(std::make_unique<StreamReader>()) {
     cachedResult_.audioPackets.reserve(kMaxAudioPacketsPerFeed);
     cachedResult_.videoPackets.reserve(kMaxVideoPacketsPerFeed);
-    cachedResult_.newClusterPositions.reserve(kMaxClustersPerFeed);
 }
 
 WebmDemuxer::~WebmDemuxer() = default;
@@ -33,11 +43,8 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     cachedResult_.audioPackets.clear();
     cachedResult_.videoPackets.clear();
     cachedResult_.error.clear();
-    cachedResult_.newClusterCount = 0;
-    cachedResult_.newClusterPositions.clear();
 
     feedDataCalls_.fetch_add(1, std::memory_order_relaxed);
-
 
     // Compact data from the previous feedData call. Deferred here so that
     // packet pointers returned in the previous DemuxResult remain valid
@@ -45,22 +52,6 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     if (pendingCompactPos_ > 0) {
         reader_->compact(pendingCompactPos_);
         pendingCompactPos_ = 0;
-    }
-
-    // Track inter-feedData arrival jitter.
-    {
-        int64_t now = nowUs();
-        if (lastFeedTimeUs_ > 0) {
-            int64_t interval = now - lastFeedTimeUs_;
-            if (lastFeedIntervalUs_ > 0 && interval > 0) {
-                int64_t deviation = interval - lastFeedIntervalUs_;
-                int64_t absDeviation = deviation < 0 ? -deviation : deviation;
-                int64_t prev = feedJitterUs_.load(std::memory_order_relaxed);
-                feedJitterUs_.store(prev + (absDeviation - prev) / 8, std::memory_order_relaxed);
-            }
-            lastFeedIntervalUs_ = interval;
-        }
-        lastFeedTimeUs_ = now;
     }
 
     totalBytesFed_.fetch_add(len, std::memory_order_relaxed);
@@ -81,9 +72,11 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             // later at the cost of a counted gap.
             partialDropCount_.fetch_add(1, std::memory_order_relaxed);
             appendBackpressureDrops_.fetch_add(1, std::memory_order_relaxed);
-            MEDIA_LOG_W("WebmDemuxer: window full, dropped %zu/%zu bytes (count=%llu)",
-                        len - accepted, len,
-                        static_cast<unsigned long long>(partialDropCount_.load(std::memory_order_relaxed)));
+            if (throttledLog(lastWindowFullLogUs_)) {
+                MEDIA_LOG_W("WebmDemuxer: window full, dropped %zu/%zu bytes (count=%llu)",
+                            len - accepted, len,
+                            static_cast<unsigned long long>(partialDropCount_.load(std::memory_order_relaxed)));
+            }
         }
 
         if (accepted == 0) {
@@ -94,7 +87,6 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
     }
 
     // Advance parse state as far as possible
-    int64_t parseStart = nowUs();
     switch (state_.load(std::memory_order_relaxed)) {
     case ParseState::WaitingForEBML:
         if (!parseEBMLHeader()) {
@@ -138,11 +130,6 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
             return cachedResult_;
         }
         state_.store(ParseState::Streaming, std::memory_order_release);
-        // Record first cluster position for ClipIndex
-        if (cluster_ && !cluster_->EOS()) {
-            cachedResult_.newClusterPositions.push_back(cluster_->GetPosition());
-            ++cachedResult_.newClusterCount;
-        }
         [[fallthrough]];
 
     case ParseState::Streaming:
@@ -150,8 +137,12 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         break;
 
     case ParseState::Error: {
-        // Auto-reset and re-feed the incoming data immediately.
-        MEDIA_LOG_W("WebmDemuxer: auto-resetting from error state on new feedData");
+        // Auto-reset and re-feed the incoming data immediately. Throttled: a
+        // stream that keeps failing (e.g. mid-cluster bytes after an
+        // oversized-cluster error) loops error→reset→error once per few feeds.
+        if (throttledLog(lastAutoResetLogUs_)) {
+            MEDIA_LOG_W("WebmDemuxer: auto-resetting from error state on new feedData");
+        }
         reset();
         // reset() emptied the window, so this only comes up short for a feed
         // larger than the whole window — still a counted drop, never silent.
@@ -180,12 +171,6 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         }
         break;
     }
-    }
-
-    {
-        int64_t elapsed = nowUs() - parseStart;
-        int64_t prevLatency = feedDataLatencyUs_.load(std::memory_order_relaxed);
-        feedDataLatencyUs_.store(prevLatency + (elapsed - prevLatency) / 8, std::memory_order_relaxed);
     }
 
     cachedBufferBytes_.store(reader_ ? reader_->bufferSize() : 0,
@@ -253,7 +238,6 @@ void WebmDemuxer::reset() {
     {
         std::lock_guard<std::mutex> lk(trackMtx_);
         trackInfo_ = TrackInfo{};
-        streamHeader_.clear();
     }
     state_.store(ParseState::WaitingForEBML, std::memory_order_release);
     parseError_.clear();
@@ -275,14 +259,9 @@ void WebmDemuxer::reset() {
     parseErrorCount_.store(0, std::memory_order_relaxed);
     lastEmittedAudioPtsUs_ = -1;
     lastEmittedVideoPtsUs_ = -1;
-    lastFeedTimeUs_ = 0;
-    lastFeedIntervalUs_ = 0;
-    feedJitterUs_.store(0, std::memory_order_relaxed);
     cachedResult_.audioPackets.clear();
     cachedResult_.videoPackets.clear();
     cachedResult_.error.clear();
-    cachedResult_.newClusterCount = 0;
-    cachedResult_.newClusterPositions.clear();
     // Monotonic across the session: cumulativeParseErrorCount_ and
     // sessionResetCount_ are NOT zeroed here.
     sessionResetCount_.fetch_add(1, std::memory_order_relaxed);

@@ -5,7 +5,9 @@
 // Member of WebmDemuxer; class definition lives in WebmDemuxer.h.
 #include "WebmDemuxer.h"
 #include "DemuxLimits.h"
+#include "WebmReaders.h"
 
+#include "common/MediaTime.h"
 
 #include "mkvparser/mkvparser.h"
 
@@ -41,10 +43,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         if (!cluster_ || cluster_->EOS()) {
             return;  // Still no clusters loaded; retry on the next feedData().
         }
-        if (result.newClusterPositions.size() < kMaxClustersPerFeed) {
-            result.newClusterPositions.push_back(cluster_->GetPosition());
-        }
-        ++result.newClusterCount;
     }
 
     // Sequential wedge recovery — the previous parseBlocks() drained
@@ -62,16 +60,49 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         cluster_ = nextCluster;
         blockEntry_ = nullptr;
         clusterDrained_ = false;
-        if (result.newClusterPositions.size() < kMaxClustersPerFeed) {
-            result.newClusterPositions.push_back(cluster_->GetPosition());
-        }
-        ++result.newClusterCount;
+    }
+
+    // A cluster is ready but the segment carries no SegmentInfo: mkvparser
+    // tolerates the omission until Block::GetTime(), which asserts on it in
+    // debug builds and null-derefs in release. Without a timecode scale no
+    // timestamp in this stream can ever be computed, so this is a permanent
+    // error, not a droppable block. Found by fuzzing a mutated laced stream.
+    if (cluster_ && !cluster_->EOS() && !segment_->GetInfo()) {
+        parseError_ = "stream has clusters but no SegmentInfo";
+        parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+        cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+        state_.store(ParseState::Error, std::memory_order_release);
+        errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+        result.error = "permanent parse failure: " + parseError_;
+        return;
     }
 
     long long latestConsumedPos = compactOffset_;
     int consecutiveBlockErrors = 0;
 
     while (cluster_ && !cluster_->EOS()) {
+        // Permanent-wedge guard: compaction never trims past the current
+        // cluster's own start (the safePos floor below), so at most
+        // kMaxBufferSize bytes from that start can ever be resident. A cluster
+        // whose declared element size exceeds that can never be fully parsed:
+        // append capacity reaches zero, reads inside the tail fail forever,
+        // and parse state would stay Streaming over frozen A/V. Surface it as
+        // a permanent error per the error table. (Unknown size, -1, is exempt
+        // — those clusters are parsed and trimmed block by block.)
+        {
+            long long declaredSize = cluster_->GetElementSize();
+            if (declaredSize > static_cast<long long>(StreamReader::kMaxBufferSize)) {
+                parseError_ = "cluster exceeds parse window (" +
+                              std::to_string(declaredSize) + " > " +
+                              std::to_string(StreamReader::kMaxBufferSize) + " bytes)";
+                parseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+                cumulativeParseErrorCount_.fetch_add(1, std::memory_order_relaxed);
+                state_.store(ParseState::Error, std::memory_order_release);
+                errorEntryUs_.store(nowUs(), std::memory_order_relaxed);
+                result.error = "permanent parse failure: " + parseError_;
+                return;
+            }
+        }
         // If we haven't started iterating this cluster's blocks, get the first entry
         if (!blockEntry_) {
             long status = cluster_->GetFirst(blockEntry_);
@@ -151,7 +182,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.size = static_cast<size_t>(frame.len);
                     pkt.ptsUs = ptsUs;
                     pkt.durationUs = kDefaultAudioDurationUs;
-                    pkt.absOffset = frame.pos;
                     result.audioPackets.push_back(pkt);
                     audioPacketsEmitted_.fetch_add(1, std::memory_order_relaxed);
                     lastEmittedAudioPtsUs_ = ptsUs;
@@ -174,7 +204,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     pkt.size = frameSize;
                     pkt.ptsUs = ptsUs;
                     pkt.isKeyFrame = block->IsKey();
-                    pkt.absOffset = frame.pos;
                     result.videoPackets.push_back(pkt);
                     videoPacketsEmitted_.fetch_add(1, std::memory_order_relaxed);
                     lastEmittedVideoPtsUs_ = ptsUs;
@@ -216,11 +245,14 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
             break;
         }
 
-        // Check if the next cluster's data is available
+        // Check if the next cluster's data is available. The loop-top guard
+        // catches an oversized declared size on the next iteration (this call
+        // or the next feedData), so waiting here cannot wedge permanently.
         long long clusterPos = nextCluster->GetPosition();
         long long clusterSize = nextCluster->GetElementSize();
         // If element size is unknown yet, just try — GetFirst will fail if data is missing
-        if (clusterSize > 0 && readerTotalAvailable() < clusterPos + clusterSize) {
+        if (clusterSize > 0 && readerTotalAvailable() < clusterPos + clusterSize &&
+            clusterSize <= static_cast<long long>(StreamReader::kMaxBufferSize)) {
             // Not enough data for this cluster yet; stay put
             cluster_ = nextCluster;
             blockEntry_ = nullptr;
@@ -229,10 +261,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
 
         cluster_ = nextCluster;
         blockEntry_ = nullptr;
-        if (result.newClusterPositions.size() < kMaxClustersPerFeed) {
-            result.newClusterPositions.push_back(clusterPos);
-        }
-        ++result.newClusterCount;
     }
 
     // Report if blocks are consistently unparseable despite data being available

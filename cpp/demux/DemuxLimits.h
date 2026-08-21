@@ -24,14 +24,19 @@ inline constexpr int kMaxConsecutiveBlockErrors = 3;
 // Reject video frames larger than this (matches VideoConfig::kMaxEncodedFrameSize).
 inline constexpr size_t kMaxVideoFrameSize = 512 * 1024;
 
-// Cap packets/clusters per feedData() call to bound vector growth from malformed input.
+// Cap packets per feedData() call to bound vector growth from malformed input.
 inline constexpr size_t kMaxAudioPacketsPerFeed = 256;
 inline constexpr size_t kMaxVideoPacketsPerFeed = 128;
-inline constexpr size_t kMaxClustersPerFeed = 64;
 
-// Maximum allowed stream header (EBML + Segment + Tracks, before first cluster).
-// Normal WebM headers are 1-10 KB. Cap defends against malformed cluster positions.
-inline constexpr size_t kMaxStreamHeaderSize = 64 * 1024;
+// Highest container SamplingFrequency accepted as valid (192 kHz covers every
+// real-world rate; WebM/Opus mandates 48 kHz). Values outside (0, this] are
+// attacker-chosen doubles whose int cast would be UB — treated as invalid.
+inline constexpr double kMaxAudioSampleRate = 192'000.0;
+
+// Minimum interval between repeats of a per-feed warning. feedData() runs at
+// stream bitrate, so an unratelimited warning on a backpressured path floods
+// the log. Matches the ring's logMinIntervalMs precedent (5 s).
+inline constexpr int64_t kThrottledLogIntervalUs = 5'000'000;
 
 // Max tracks to iterate during parseTracks(). A valid broadcast WebM has 1–2
 // (one Opus, one VP9). Defends against pathological inputs forcing a long

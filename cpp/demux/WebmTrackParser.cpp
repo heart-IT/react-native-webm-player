@@ -1,11 +1,11 @@
-// parseTracks() — walks the segment's track list, fills TrackInfo for the
-// supported codecs (A_OPUS + V_VP9), and captures the WebM stream header
-// bytes (EBML + Segment + Tracks) for clip extraction.
+// parseTracks() — walks the segment's track list and fills TrackInfo for the
+// supported codecs (A_OPUS + V_VP9).
 //
 // Member of WebmDemuxer; class definition lives in WebmDemuxer.h.
 #include "WebmDemuxer.h"
 #include "DemuxLimits.h"
 
+#include "common/MediaLog.h"
 #include "common/MediaTime.h"
 
 #include "mkvparser/mkvparser.h"
@@ -71,8 +71,19 @@ bool WebmDemuxer::parseTracks() {
             }
             const mkvparser::AudioTrack* audioTrack =
                 static_cast<const mkvparser::AudioTrack*>(track);
-            trackInfo_.audioSampleRate =
-                static_cast<int>(audioTrack->GetSamplingRate());
+            // mkvparser only rejects SamplingFrequency <= 0; the double is
+            // otherwise attacker-chosen, and casting it to int is UB outside
+            // int's range (and for NaN, which passes the <= 0 check too).
+            // Out of the sane range → 0, which the decoder configuration
+            // downstream rejects cleanly (opus_decoder_create fails).
+            const double samplingRate = audioTrack->GetSamplingRate();
+            if (samplingRate >= 1.0 && samplingRate <= kMaxAudioSampleRate) {
+                trackInfo_.audioSampleRate = static_cast<int>(samplingRate);
+            } else {
+                trackInfo_.audioSampleRate = 0;
+                MEDIA_LOG_W("WebmDemuxer: SamplingFrequency %g out of range, "
+                            "treating as invalid", samplingRate);
+            }
             trackInfo_.audioChannels =
                 static_cast<int>(audioTrack->GetChannels());
         } else if (trackType == mkvparser::Track::kVideo &&
@@ -102,22 +113,6 @@ bool WebmDemuxer::parseTracks() {
     // Initialize cluster iteration
     cluster_ = segment_->GetFirst();
     blockEntry_ = nullptr;
-
-    // Capture stream header bytes (EBML + Segment + Tracks) for clip extraction.
-    // Everything from byte 0 to the first cluster position forms a valid WebM
-    // header that can be prepended to cluster data for standalone playback.
-    if (cluster_ && !cluster_->EOS()) {
-        long long headerEnd = cluster_->GetPosition();
-        if (headerEnd > 0 && static_cast<size_t>(headerEnd) <= kMaxStreamHeaderSize
-            && streamHeader_.empty()) {
-            streamHeader_.resize(static_cast<size_t>(headerEnd));
-            int readResult = activeReader()->Read(0, static_cast<long>(headerEnd),
-                                           streamHeader_.data());
-            if (readResult != 0) {
-                streamHeader_.clear();
-            }
-        }
-    }
 
     return true;
 }

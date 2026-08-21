@@ -40,7 +40,6 @@ struct CollectedPackets {
     std::vector<std::vector<uint8_t>> videoData;
     std::vector<int64_t> videoPts;
     std::vector<bool> videoKeyFrame;
-    int clusterCount = 0;
     bool hadError = false;
     std::string lastError;
 };
@@ -64,7 +63,6 @@ static CollectedPackets feedAll(WebmDemuxer& demuxer,
             out.videoPts.push_back(pkt.ptsUs);
             out.videoKeyFrame.push_back(pkt.isKeyFrame);
         }
-        out.clusterCount += result.newClusterCount;
         if (!result.error.empty()) {
             out.hadError = true;
             out.lastError = result.error;
@@ -234,22 +232,6 @@ TEST(video_packet_sizes_reasonable) {
         // VP9 frames at 320x240 should be well under 100KB
         ASSERT_GE(100000u, data.size());
     }
-}
-
-TEST(stream_header_captured) {
-    WebmDemuxer demuxer;
-    feedAll(demuxer, fixture::kWebmData, fixture::kWebmDataSize, 65536);
-
-    ASSERT_TRUE(demuxer.hasStreamHeader());
-    auto header = demuxer.streamHeader();
-    // Header should contain EBML + Segment + Tracks (typically 100-500 bytes)
-    ASSERT_GE(header.size(), 50u);
-    ASSERT_GE(2000u, header.size());
-    // Must start with EBML magic
-    ASSERT_EQ(header[0], 0x1A);
-    ASSERT_EQ(header[1], 0x45);
-    ASSERT_EQ(header[2], 0xDF);
-    ASSERT_EQ(header[3], 0xA3);
 }
 
 TEST(incremental_feeding_produces_same_packets) {

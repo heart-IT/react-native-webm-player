@@ -28,7 +28,6 @@ struct AudioPacket {
     size_t size;              // Packet size in bytes (max 1275 per Opus spec)
     int64_t ptsUs;            // Presentation timestamp in microseconds
     int64_t durationUs;       // Packet duration in microseconds (typically 20000)
-    long long absOffset = 0;  // Absolute byte position in the stream
 };
 
 // VP9 video packet extracted from WebM. Same lifetime rules as AudioPacket.
@@ -37,7 +36,6 @@ struct VideoPacket {
     size_t size;              // Frame size in bytes (up to ~512KB for 4K keyframes)
     int64_t ptsUs;            // Presentation timestamp in microseconds
     bool isKeyFrame;          // True for keyframes (decoder can start from here)
-    long long absOffset = 0;  // Absolute byte position in the stream
 };
 
 // Packets in DemuxResult point into an internal buffer owned by WebmDemuxer.
@@ -47,8 +45,6 @@ struct DemuxResult {
     std::vector<AudioPacket> audioPackets;  // Opus packets extracted this call
     std::vector<VideoPacket> videoPackets;  // VP9 packets extracted this call
     std::string error;                      // Non-empty on parse error (logged, not fatal)
-    int newClusterCount = 0;                // New WebM clusters encountered this call
-    std::vector<long long> newClusterPositions;  // Absolute byte positions of new clusters
 };
 
 struct TrackInfo {
@@ -93,15 +89,8 @@ struct DemuxerMetrics {
     uint64_t cumulativeParseErrorCount = 0;
     uint64_t sessionResetCount = 0;
     int64_t timeInErrorMs = 0;      // milliseconds since entering ParseState::Error (0 if not in Error)
-    int64_t feedJitterUs = 0;       // network-layer feed arrival jitter (EWMA)
-    int64_t feedDataLatencyUs = 0;  // EWMA of feedData() parse duration
     size_t bufferBytes = 0;         // current StreamReader buffer size
     ParseState parseState = ParseState::WaitingForEBML;
-    // True once parseTracks() has captured the EBML+Segment+Tracks header.
-    // parseState == Error && !streamHeaderAvailable means the demuxer is wedged
-    // without a cached header for self-heal — JS must call resetStream() with
-    // a fresh EBML-prefixed stream.
-    bool streamHeaderAvailable = false;
 };
 
 // Append-only reader for streaming WebM data into libwebm's mkvparser.
@@ -129,15 +118,6 @@ public:
         return trackInfo_;
     }
 
-    std::vector<uint8_t> streamHeader() const noexcept {
-        std::lock_guard<std::mutex> lk(trackMtx_);
-        return streamHeader_;
-    }
-    bool hasStreamHeader() const noexcept {
-        std::lock_guard<std::mutex> lk(trackMtx_);
-        return !streamHeader_.empty();
-    }
-
     ParseState parseState() const noexcept { return state_.load(std::memory_order_acquire); }
 
     size_t bufferBytes() const noexcept;
@@ -158,17 +138,11 @@ public:
         m.parseErrorCount = parseErrorCount_.load(std::memory_order_relaxed);
         m.cumulativeParseErrorCount = cumulativeParseErrorCount_.load(std::memory_order_relaxed);
         m.sessionResetCount = sessionResetCount_.load(std::memory_order_relaxed);
-        m.feedJitterUs = feedJitterUs_.load(std::memory_order_relaxed);
-        m.feedDataLatencyUs = feedDataLatencyUs_.load(std::memory_order_relaxed);
         m.bufferBytes = bufferBytes();
         m.parseState = state_.load(std::memory_order_relaxed);
         if (m.parseState == ParseState::Error) {
             int64_t entry = errorEntryUs_.load(std::memory_order_relaxed);
             if (entry > 0) m.timeInErrorMs = (nowUs() - entry) / 1000;
-        }
-        {
-            std::lock_guard<std::mutex> lk(trackMtx_);
-            m.streamHeaderAvailable = !streamHeader_.empty();
         }
         return m;
     }
@@ -200,7 +174,6 @@ private:
 
     mutable std::mutex trackMtx_;
     TrackInfo trackInfo_;
-    std::vector<uint8_t> streamHeader_;
     std::atomic<ParseState> state_{ParseState::WaitingForEBML};
     std::string parseError_;
     long long ebmlHeaderEndPos_ = 0;
@@ -231,11 +204,11 @@ private:
     int64_t lastEmittedAudioPtsUs_ = -1;
     int64_t lastEmittedVideoPtsUs_ = -1;
 
-    // Feed arrival jitter tracking (network-layer signal)
-    int64_t lastFeedTimeUs_ = 0;       // ingest thread only
-    int64_t lastFeedIntervalUs_ = 0;   // ingest thread only
-    std::atomic<int64_t> feedJitterUs_{0};
-    std::atomic<int64_t> feedDataLatencyUs_{0};
+    // Per-site log throttles (ingest thread only, so no atomics needed). The
+    // paths they guard fire on every feed while the stream is backpressured
+    // or looping through auto-reset; the drop counters stay exact regardless.
+    int64_t lastWindowFullLogUs_ = 0;
+    int64_t lastAutoResetLogUs_ = 0;
     std::atomic<size_t> cachedBufferBytes_{0};
 };
 

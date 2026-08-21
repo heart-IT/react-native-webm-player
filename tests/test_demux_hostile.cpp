@@ -1,0 +1,154 @@
+// Hostile-input demux tests: untrusted track metadata (R3-20) and a cluster
+// that can never fit the parse window (R3-5). Run under all three sanitizer
+// suites; the sampling-rate test exists specifically for UBSan, which aborts
+// on the double→int cast the unfixed code performed.
+//
+// Build/run: part of the sanitizer suites (see tests/CMakeLists.txt).
+
+#include "test_common.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+#include "demux/WebmDemuxer.h"
+#include "common/MediaLog.h"
+#include "fixtures/webm_fixture.h"
+#include "webm_synth.h"
+
+namespace {
+// The wedge tests flood the window; silence the (throttled) warnings.
+struct SilenceLogs {
+  SilenceLogs() {
+    media::log::minLevel().store(media::log::Level::Error,
+                                 std::memory_order_relaxed);
+  }
+};
+SilenceLogs g_silence_logs;
+}  // namespace
+
+using namespace media::demux;
+
+// ---- R3-20: SamplingFrequency beyond int range must not be UB ----
+
+TEST(huge_sampling_frequency_is_rejected_not_ub) {
+    // The synthetic header stores 48000.0f at a known offset; raising the
+    // exponent byte 0x47 → 0x7E yields ~4.3e37 — far beyond int range. The
+    // unfixed static_cast<int> of that double is UB (UBSan aborts here).
+    std::vector<uint8_t> stream(
+        webm_synth::kMinimalWebmHeader,
+        webm_synth::kMinimalWebmHeader + sizeof(webm_synth::kMinimalWebmHeader));
+    ASSERT_EQ(stream[webm_synth::kSamplingRateExponentOffset], 0x47);
+    stream[webm_synth::kSamplingRateExponentOffset] = 0x7E;
+
+    WebmDemuxer demuxer;
+    demuxer.feedData(stream.data(), stream.size());
+
+    // The stream is otherwise valid: tracks parse, streaming begins, and the
+    // hostile rate is surfaced as 0 — the value the decoder config downstream
+    // rejects cleanly — instead of an arbitrary wrapped int.
+    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
+    auto info = demuxer.trackInfoSnapshot();
+    ASSERT_EQ(info.audioTrackNum, 1);
+    ASSERT_EQ(info.audioSampleRate, 0);
+    ASSERT_EQ(info.audioChannels, 2);
+}
+
+TEST(huge_sampling_frequency_in_real_fixture_is_rejected_not_ub) {
+    // Same repro built from the real muxer-produced fixture, as the audit did:
+    // find its SamplingFrequency element (B5, 8-byte double 48000.0) and raise
+    // the exponent byte (0x40 → 0x7E is ~1e146).
+    std::vector<uint8_t> stream(fixture::kWebmData,
+                                fixture::kWebmData + fixture::kWebmDataSize);
+    const uint8_t pattern[] = {0xB5, 0x88, 0x40, 0xE7, 0x70, 0x00};
+    auto it = std::search(stream.begin(), stream.end(),
+                          pattern, pattern + sizeof(pattern));
+    ASSERT_TRUE(it != stream.end());
+    *(it + 2) = 0x7E;
+
+    WebmDemuxer demuxer;
+    size_t offset = 0;
+    while (offset < stream.size()) {
+        size_t chunk = std::min(size_t{4096}, stream.size() - offset);
+        demuxer.feedData(stream.data() + offset, chunk);
+        offset += chunk;
+    }
+
+    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
+    ASSERT_EQ(demuxer.trackInfoSnapshot().audioSampleRate, 0);
+}
+
+TEST(valid_sampling_frequency_still_parses) {
+    // Guard the guard: the clamp must not reject the mandated 48 kHz.
+    WebmDemuxer demuxer;
+    demuxer.feedData(webm_synth::kMinimalWebmHeader,
+                     sizeof(webm_synth::kMinimalWebmHeader));
+    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
+    ASSERT_EQ(demuxer.trackInfoSnapshot().audioSampleRate, 48000);
+}
+
+// ---- R3-5: a cluster larger than the parse window must error, not wedge ----
+
+TEST(oversized_cluster_surfaces_permanent_error) {
+    // Valid header + one good cluster + a cluster declaring a 3 MiB body.
+    // Compaction cannot trim past the current cluster's start, so a cluster
+    // larger than the 2 MiB window can never be fully resident. The unfixed
+    // code waited forever: parseState stayed Streaming, no error surfaced,
+    // and only the backpressure drop counters climbed over frozen A/V.
+    std::vector<uint8_t> good(
+        webm_synth::kMinimalWebmHeader,
+        webm_synth::kMinimalWebmHeader + sizeof(webm_synth::kMinimalWebmHeader));
+    good.insert(good.end(), webm_synth::kXiphLacedCluster,
+                webm_synth::kXiphLacedCluster +
+                    sizeof(webm_synth::kXiphLacedCluster));
+
+    WebmDemuxer demuxer;
+    demuxer.feedData(good.data(), good.size());
+    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
+
+    // Now the oversized cluster arrives, followed by its body the way a live
+    // feed would deliver it. The error must surface long before the declared
+    // 3 MiB — and certainly must not leave the demuxer silently Streaming
+    // after the window has filled (64 KiB × 40 = 2.5 MiB > the 2 MiB window).
+    std::string firstError;
+    auto record = [&](const DemuxResult& result) {
+        if (!result.error.empty() && firstError.empty()) {
+            firstError = result.error;
+        }
+    };
+    record(demuxer.feedData(webm_synth::kOversizedClusterPrefix,
+                            sizeof(webm_synth::kOversizedClusterPrefix)));
+    std::vector<uint8_t> body(65536, 0x00);
+    for (int i = 0; i < 40 && demuxer.parseState() != ParseState::Error; ++i) {
+        record(demuxer.feedData(body.data(), body.size()));
+    }
+
+    ASSERT_EQ(demuxer.parseState(), ParseState::Error);
+    // The caller-visible error names the cause (the pump logs result.error
+    // and reports health "failed" off this state).
+    ASSERT_TRUE(firstError.find("cluster exceeds parse window") != std::string::npos);
+}
+
+TEST(oversized_first_cluster_surfaces_permanent_error) {
+    // Same attack without a preceding good cluster: the oversized cluster is
+    // the first one parseBlocks ever adopts.
+    std::vector<uint8_t> stream(
+        webm_synth::kMinimalWebmHeader,
+        webm_synth::kMinimalWebmHeader + sizeof(webm_synth::kMinimalWebmHeader));
+    stream.insert(stream.end(), webm_synth::kOversizedClusterPrefix,
+                  webm_synth::kOversizedClusterPrefix +
+                      sizeof(webm_synth::kOversizedClusterPrefix));
+
+    WebmDemuxer demuxer;
+    demuxer.feedData(stream.data(), stream.size());
+
+    std::vector<uint8_t> body(65536, 0x00);
+    for (int i = 0; i < 40; ++i) {
+        demuxer.feedData(body.data(), body.size());
+        if (demuxer.parseState() == ParseState::Error) break;
+    }
+    ASSERT_EQ(demuxer.parseState(), ParseState::Error);
+}
+
+TEST_MAIN("Hostile-Input Demux Tests")

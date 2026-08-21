@@ -24,9 +24,6 @@ inline int64_t nowUs() noexcept {
     return static_cast<int64_t>(ts.tv_sec) * 1000000LL + ts.tv_nsec / 1000LL;
 }
 
-// No-op on Android — CLOCK_MONOTONIC needs no priming.
-inline void primeClock() noexcept {}
-
 #elif MEDIA_PLATFORM_IOS
 
 namespace detail {
@@ -49,12 +46,6 @@ inline void primeMachTimebase() noexcept {
 
 }  // namespace detail
 
-// Call once from the JS/init thread before any audio callback fires. Safe to
-// call multiple times. After priming, nowUs() is a pure pair of atomic loads.
-inline void primeClock() noexcept {
-    detail::primeMachTimebase();
-}
-
 inline int64_t nowUs() noexcept {
     uint64_t denom = detail::g_machDenom.load(std::memory_order_acquire);
     if (denom == 0) {
@@ -75,8 +66,6 @@ inline int64_t nowUs() noexcept {
     auto now = std::chrono::steady_clock::now().time_since_epoch();
     return std::chrono::duration_cast<std::chrono::microseconds>(now).count();
 }
-
-inline void primeClock() noexcept {}
 
 #endif
 
