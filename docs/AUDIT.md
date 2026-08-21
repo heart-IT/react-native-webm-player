@@ -553,14 +553,55 @@ frozen-picture pull loop, which is off-limits before the device evidence run.
 
 **Still open after the sweep:**
 
-- E-10 (partial): iOS renderer-stage drops now reach `videoFramesDropped`;
-  ring/demux drop counters remain JS-invisible. A pre-overflow backpressure
-  watermark for feeders (R3-15's remaining half) needs a spec addition.
-- E-11: video-only stream never starts the iOS clock — needs a device decision.
-- E-16 (partial): platform halts now visible via `playbackState`; no dedicated
-  health status for interruptions (would need a spec enum addition).
-- The documented Android reset/loader residual — unchanged, C-2's latch fix
-  halves its blast radius as planned.
 - Everything device-gated: see the round-3 checklist in DEVICE_VALIDATION.md.
   Behavior-changing fixes (R3-4, R3-17/18, B-11, gain clamp) are
   build/sanitizer-verified only; the physical-device pass is the ship gate.
+- Demux-internal counters (`oversizedFrameDrops`, `packetCapDrops`) remain
+  tests-only; the ring-level signals below cover the feeder's needs.
+
+## Post-sweep API round (same day)
+
+Closed the sweep's deliberate leftovers in one spec change plus platform
+plumbing (`1c953d2`), all host gates green, both example apps built:
+
+- **E-10 / R3-15 remainder** — `WebmPlayerMetrics` gained `bytesDropped`
+  (whole-chunk feed rejections) and `ringFillRatio` (0.0–1.0 pre-overflow
+  watermark); both read the ring's own counters on both platforms. Feeder
+  contract section in the README extended to match.
+- **E-16 remainder** — new `WebmHealthStatus.Interrupted`, fired on iOS
+  audio-session interruptions and Android audio-focus loss (regain fires
+  `Playing`). An interruption iOS ends without permission-to-resume now lands
+  as a real pause (`isPaused` true) instead of a state hole.
+- **E-11** — the clock starts from the first video packet when the track list
+  has no audio (`demuxPump:didDecodeFirstSampleAtPts:`); video-only streams
+  now play on iOS. Device confirmation still listed.
+- **Android reset/loader residual** — closed: `resetStream()` now gates
+  `feedData` (returns false, per the retry contract) until the main-thread
+  teardown has stopped the extractor and cleared the ring, so the new stream's
+  header can no longer be eaten. Remaining exposure is one in-flight loader
+  read racing the source close — bounded to a single 50 ms read and
+  recoverable, versus the previous unbounded window.
+- Line budgets held by extraction: the JNI surface moved to `RingBridge.kt`
+  (player back to 392 lines); the engine sits at its 416 baseline.
+- **R3-1 verified end-to-end**: the packed tarball's own `prepare_command`
+  built the Opus XCFramework from the consumer layout (SHA check included).
+  Note `pod ipc spec` cannot evaluate the podspec standalone —
+  `min_ios_version_supported` comes from React Native's Podfile helpers, which
+  every real consumer has in scope.
+
+**R3-23 · P2 · found by the new trickle test, fixed same day ·
+`WebmBlockParser.cpp`** — a cluster-final block whose header and payload
+straddle a feed boundary was silently lost: mkvparser completes the cluster
+from the header alone, so the iterator advanced past a block whose payload had
+not arrived, and the drop path also polluted `parseErrorCount` (24k bogus
+bumps on a byte-at-a-time feed). Fixed by pre-scanning every frame's
+availability before emitting any (all-or-nothing per block — a partial emit
+would trip the block-level dedup on retry) and returning need-more-data.
+Proof: `test_demux_hostile`'s byte-at-a-time and 7-byte-chunk parity tests,
+red against the unfixed code (29/30 video packets), green after.
+
+Test gaps closed the same round: the ring destructor's `shutdownGraceMs`
+contract-violation branch (ASan-red with the consumer wait disabled) and
+header truncation at every byte boundary. Remaining gap: cross-thread
+`WebmDemuxer::reset()` vs `feedData` was re-examined and is not a production
+pattern — both platforms reset on the consuming thread — so no test models it.
