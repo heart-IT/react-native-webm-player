@@ -1,7 +1,10 @@
-// Hostile-input demux tests: untrusted track metadata (R3-20) and a cluster
-// that can never fit the parse window (R3-5). Run under all three sanitizer
-// suites; the sampling-rate test exists specifically for UBSan, which aborts
-// on the double→int cast the unfixed code performed.
+// Hostile-input demux tests: untrusted track metadata (R3-20), a cluster
+// that can never fit the parse window (R3-5), and truncation mid-header —
+// the real fixture arriving in trickles small enough that every element
+// boundary lands mid-chunk, exercising each "need more data" branch. Run
+// under all three sanitizer suites; the sampling-rate test exists
+// specifically for UBSan, which aborts on the double→int cast the unfixed
+// code performed.
 //
 // Build/run: part of the sanitizer suites (see tests/CMakeLists.txt).
 
@@ -149,6 +152,91 @@ TEST(oversized_first_cluster_surfaces_permanent_error) {
         if (demuxer.parseState() == ParseState::Error) break;
     }
     ASSERT_EQ(demuxer.parseState(), ParseState::Error);
+}
+
+// ---- Truncation mid-header: the "need more data" branches ----
+//
+// Feeding the real fixture in tiny chunks guarantees every header element
+// (EBML, Segment, Tracks) is seen truncated many times before it completes.
+// The parser must treat each truncation as "wait for more bytes" — never as a
+// parse error (three of those and the demuxer goes permanently to Error) —
+// and the packets that eventually come out must be exactly the ones a
+// single-shot feed produces.
+//
+// The two parity tests assert the behaviour the system is supposed to have,
+// and fail against unfixed code (the audit-proof convention): as of writing,
+// WebmBlockParser's readerDataAt-miss path advances past a cluster-final
+// block whose payload has not arrived yet, losing that packet forever
+// (observed: the fixture's last video frame, pts 967000, under both trickle
+// sizes).
+
+namespace {
+
+struct TrickleResult {
+    std::vector<int64_t> audioPts;
+    std::vector<int64_t> videoPts;
+    std::string firstError;
+    bool errorBeforeStreaming = false;
+    ParseState finalState = ParseState::WaitingForEBML;
+};
+
+TrickleResult feedFixtureInChunks(size_t chunkSize) {
+    WebmDemuxer demuxer;
+    TrickleResult out;
+    size_t offset = 0;
+    while (offset < fixture::kWebmDataSize) {
+        size_t chunk = std::min(chunkSize, fixture::kWebmDataSize - offset);
+        const auto& result = demuxer.feedData(fixture::kWebmData + offset, chunk);
+        for (const auto& pkt : result.audioPackets) out.audioPts.push_back(pkt.ptsUs);
+        for (const auto& pkt : result.videoPackets) out.videoPts.push_back(pkt.ptsUs);
+        if (!result.error.empty() && out.firstError.empty()) {
+            out.firstError = result.error;
+            if (demuxer.parseState() != ParseState::Streaming) {
+                out.errorBeforeStreaming = true;
+            }
+        }
+        offset += chunk;
+    }
+    out.finalState = demuxer.parseState();
+    return out;
+}
+
+}  // namespace
+
+TEST(byte_at_a_time_reaches_streaming_without_error) {
+    auto r = feedFixtureInChunks(1);
+    ASSERT_FALSE(r.errorBeforeStreaming);
+    ASSERT_EQ(r.firstError, std::string());
+    ASSERT_EQ(r.finalState, ParseState::Streaming);
+}
+
+TEST(byte_at_a_time_emits_same_packets_as_single_shot) {
+    auto whole = feedFixtureInChunks(fixture::kWebmDataSize);
+    // The baseline itself must be a real parse — equal-and-empty proves nothing.
+    ASSERT_EQ(whole.finalState, ParseState::Streaming);
+    ASSERT_EQ(whole.firstError, std::string());
+    ASSERT_GE(whole.audioPts.size(), 40u);   // ~50 Opus packets in the 1s fixture
+    ASSERT_GE(whole.videoPts.size(), 25u);   // ~30 VP9 frames
+
+    auto trickle = feedFixtureInChunks(1);
+    ASSERT_EQ(trickle.audioPts.size(), whole.audioPts.size());
+    ASSERT_EQ(trickle.videoPts.size(), whole.videoPts.size());
+    ASSERT_TRUE(trickle.audioPts == whole.audioPts);
+    ASSERT_TRUE(trickle.videoPts == whole.videoPts);
+}
+
+TEST(seven_byte_chunks_emit_same_packets_as_single_shot) {
+    // 7 is coprime to every element size in the fixture, so chunk boundaries
+    // drift through ID/size/payload positions instead of repeating one cut.
+    auto whole = feedFixtureInChunks(fixture::kWebmDataSize);
+    auto trickle = feedFixtureInChunks(7);
+    ASSERT_FALSE(trickle.errorBeforeStreaming);
+    ASSERT_EQ(trickle.firstError, std::string());
+    ASSERT_EQ(trickle.finalState, ParseState::Streaming);
+    ASSERT_EQ(trickle.audioPts.size(), whole.audioPts.size());
+    ASSERT_EQ(trickle.videoPts.size(), whole.videoPts.size());
+    ASSERT_TRUE(trickle.audioPts == whole.audioPts);
+    ASSERT_TRUE(trickle.videoPts == whole.videoPts);
 }
 
 TEST_MAIN("Hostile-Input Demux Tests")

@@ -128,6 +128,22 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
             long long trackNum = block->GetTrackNumber();
             int frameCount = block->GetFrameCount();
 
+            // A cluster-final block is iterable from its header alone while its
+            // payload is still in flight: mkvparser completes the cluster
+            // without it, so advancing past the block here loses it forever.
+            // Checked for every frame before emitting any — emission must be
+            // all-or-nothing per block, or the block-level dedup below skips
+            // the not-yet-emitted frames on the retry.
+            bool payloadPending = false;
+            for (int f = 0; f < frameCount; ++f) {
+                const mkvparser::Block::Frame& frame = block->GetFrame(f);
+                if (readerTotalAvailable() < frame.pos + frame.len) {
+                    payloadPending = true;
+                    break;
+                }
+            }
+            if (payloadPending) return;  // retry this block on the next feed
+
             // Timestamp: cluster time + block time offset, in nanoseconds
             long long timeNs = block->GetTime(cluster_);
             int64_t ptsUs = timeNs / 1000;
