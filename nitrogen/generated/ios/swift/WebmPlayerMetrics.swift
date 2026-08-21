@@ -18,8 +18,8 @@ public extension WebmPlayerMetrics {
   /**
    * Create a new instance of `WebmPlayerMetrics`.
    */
-  init(bytesFedTotal: Double, bytesDropped: Double, ringFillRatio: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double, playbackRate: Double, muted: Bool, gain: Double) {
-    self.init(bytesFedTotal, bytesDropped, ringFillRatio, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds, playbackRate, muted, gain)
+  init(bytesFedTotal: Double, bytesDropped: Double, ringFillRatio: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double) {
+    self.init(bytesFedTotal, bytesDropped, ringFillRatio, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds)
   }
 
   @inline(__always)
@@ -75,20 +75,5 @@ public extension WebmPlayerMetrics {
   @inline(__always)
   var currentTimeSeconds: Double {
     return self.__currentTimeSeconds
-  }
-  
-  @inline(__always)
-  var playbackRate: Double {
-    return self.__playbackRate
-  }
-  
-  @inline(__always)
-  var muted: Bool {
-    return self.__muted
-  }
-  
-  @inline(__always)
-  var gain: Double {
-    return self.__gain
   }
 }

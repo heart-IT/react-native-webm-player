@@ -204,10 +204,9 @@ void RunOnMain(void (^block)(void)) {
 
 - (BOOL)resume {
   _paused = false;
-  // Backgrounded or interrupted playback stays stopped until the app returns /
-  // the call ends, whatever JS asks for: the decoder has no session and the
-  // audio session belongs to the system.
-  if (_backgrounded.load() || _interrupted.load()) return YES;
+  // Held playback stays stopped until the app returns / the call ends: the
+  // decoder has no session and the audio session belongs to the system.
+  if ([self platformHeld]) return YES;
   [_pump setPaused:NO];
   if (_synchronizer && _clockStarted.load()) {
     [_synchronizer setRate:_playbackRate.load()];
@@ -279,13 +278,15 @@ void RunOnMain(void (^block)(void)) {
   [self fireHealth:@"playing" detail:@"interruption ended"];
 }
 
-- (BOOL)isRunning {
-  return _running.load();
-}
+- (BOOL)isRunning { return _running.load(); }
+- (BOOL)isPaused { return _paused.load(); }
+- (BOOL)muted { return _muted.load(); }
+- (float)gain { return _gain.load(); }
+- (float)playbackRate { return _playbackRate.load(); }
 
-- (BOOL)isPaused {
-  return _paused.load();
-}
+// The platform is holding playback (app backgrounded or session interrupted):
+// the clock must not run regardless of what JS asks for.
+- (BOOL)platformHeld { return _backgrounded.load() || _interrupted.load(); }
 
 - (size_t)feedData:(const uint8_t*)bytes length:(size_t)length {
   if (!_running) return 0;
@@ -320,10 +321,10 @@ void RunOnMain(void (^block)(void)) {
 - (BOOL)setPlaybackRate:(float)rate {
   rate = std::clamp(rate, kMinPlaybackRate, kMaxPlaybackRate);
   _playbackRate = rate;
-  // Backgrounded/interrupted playback holds rate 0 on purpose: restarting the
-  // host clock mid-suspension recreates exactly the drift the suspend prevents.
-  if (_synchronizer && _running && !_paused && !_backgrounded.load() &&
-      !_interrupted.load() && _clockStarted.load()) {
+  // Held playback keeps rate 0 on purpose: restarting the host clock
+  // mid-suspension recreates exactly the drift the suspend prevents.
+  if (_synchronizer && _running && !_paused && ![self platformHeld] &&
+      _clockStarted.load()) {
     [_synchronizer setRate:rate];
   }
   return YES;
@@ -336,7 +337,7 @@ void RunOnMain(void (^block)(void)) {
   if (!_running) return WebmPlaybackStateIdle;
   if (_paused) return WebmPlaybackStatePaused;
   // Platform-halted (background, interruption): PAUSED with isPaused false.
-  if (_backgrounded.load() || _interrupted.load()) return WebmPlaybackStatePaused;
+  if ([self platformHeld]) return WebmPlaybackStatePaused;
   // Read from the decoders, not from mirrored counters: an audio-only stream
   // must leave Buffering too.
   if (_videoDecoder.framesPresented == 0 && _audioDecoder.packetsDecoded == 0) {
@@ -346,8 +347,7 @@ void RunOnMain(void (^block)(void)) {
 }
 
 - (WebmPlaybackMetrics)metrics {
-  return WebmCollectMetrics(_pump, _audioDecoder, _videoDecoder, _gain.load(),
-                            _muted.load(), _playbackRate.load());
+  return WebmCollectMetrics(_pump, _audioDecoder, _videoDecoder);
 }
 
 - (void)fireHealth:(NSString*)status detail:(NSString*)detail {
@@ -380,9 +380,7 @@ void RunOnMain(void (^block)(void)) {
     if (!self_) return;
     // Rate is read here, not captured at the call site: a pause() landing
     // between the two would otherwise be overwritten by a stale nonzero rate.
-    // Backgrounded/interrupted hold rate 0 for the same reason as pause.
-    float rate = (self_->_paused.load() || self_->_backgrounded.load() ||
-                  self_->_interrupted.load())
+    float rate = (self_->_paused.load() || [self_ platformHeld])
                      ? 0.0f
                      : self_->_playbackRate.load();
     [sync setRate:rate time:start];

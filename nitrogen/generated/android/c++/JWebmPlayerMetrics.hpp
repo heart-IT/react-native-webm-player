@@ -53,12 +53,6 @@ namespace margelo::nitro::webmplayer {
       double videoHeight = this->getFieldValue(fieldVideoHeight);
       static const auto fieldCurrentTimeSeconds = clazz->getField<double>("currentTimeSeconds");
       double currentTimeSeconds = this->getFieldValue(fieldCurrentTimeSeconds);
-      static const auto fieldPlaybackRate = clazz->getField<double>("playbackRate");
-      double playbackRate = this->getFieldValue(fieldPlaybackRate);
-      static const auto fieldMuted = clazz->getField<jboolean>("muted");
-      jboolean muted = this->getFieldValue(fieldMuted);
-      static const auto fieldGain = clazz->getField<double>("gain");
-      double gain = this->getFieldValue(fieldGain);
       return WebmPlayerMetrics(
         bytesFedTotal,
         bytesDropped,
@@ -70,10 +64,7 @@ namespace margelo::nitro::webmplayer {
         audioFramesRecovered,
         videoWidth,
         videoHeight,
-        currentTimeSeconds,
-        playbackRate,
-        static_cast<bool>(muted),
-        gain
+        currentTimeSeconds
       );
     }
 
@@ -83,7 +74,7 @@ namespace margelo::nitro::webmplayer {
      */
     [[maybe_unused]]
     static jni::local_ref<JWebmPlayerMetrics::javaobject> fromCpp(const WebmPlayerMetrics& value) {
-      using JSignature = JWebmPlayerMetrics(double, double, double, double, double, double, double, double, double, double, double, double, jboolean, double);
+      using JSignature = JWebmPlayerMetrics(double, double, double, double, double, double, double, double, double, double, double);
       static const auto clazz = javaClassStatic();
       static const auto create = clazz->getStaticMethod<JSignature>("fromCpp");
       return create(
@@ -98,10 +89,7 @@ namespace margelo::nitro::webmplayer {
         value.audioFramesRecovered,
         value.videoWidth,
         value.videoHeight,
-        value.currentTimeSeconds,
-        value.playbackRate,
-        value.muted,
-        value.gain
+        value.currentTimeSeconds
       );
     }
   };

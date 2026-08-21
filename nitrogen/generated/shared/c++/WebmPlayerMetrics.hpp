@@ -50,13 +50,10 @@ namespace margelo::nitro::webmplayer {
     double videoWidth     SWIFT_PRIVATE;
     double videoHeight     SWIFT_PRIVATE;
     double currentTimeSeconds     SWIFT_PRIVATE;
-    double playbackRate     SWIFT_PRIVATE;
-    bool muted     SWIFT_PRIVATE;
-    double gain     SWIFT_PRIVATE;
 
   public:
     WebmPlayerMetrics() = default;
-    explicit WebmPlayerMetrics(double bytesFedTotal, double bytesDropped, double ringFillRatio, double audioPacketsDecoded, double videoPacketsDecoded, double audioUnderruns, double videoFramesDropped, double audioFramesRecovered, double videoWidth, double videoHeight, double currentTimeSeconds, double playbackRate, bool muted, double gain): bytesFedTotal(bytesFedTotal), bytesDropped(bytesDropped), ringFillRatio(ringFillRatio), audioPacketsDecoded(audioPacketsDecoded), videoPacketsDecoded(videoPacketsDecoded), audioUnderruns(audioUnderruns), videoFramesDropped(videoFramesDropped), audioFramesRecovered(audioFramesRecovered), videoWidth(videoWidth), videoHeight(videoHeight), currentTimeSeconds(currentTimeSeconds), playbackRate(playbackRate), muted(muted), gain(gain) {}
+    explicit WebmPlayerMetrics(double bytesFedTotal, double bytesDropped, double ringFillRatio, double audioPacketsDecoded, double videoPacketsDecoded, double audioUnderruns, double videoFramesDropped, double audioFramesRecovered, double videoWidth, double videoHeight, double currentTimeSeconds): bytesFedTotal(bytesFedTotal), bytesDropped(bytesDropped), ringFillRatio(ringFillRatio), audioPacketsDecoded(audioPacketsDecoded), videoPacketsDecoded(videoPacketsDecoded), audioUnderruns(audioUnderruns), videoFramesDropped(videoFramesDropped), audioFramesRecovered(audioFramesRecovered), videoWidth(videoWidth), videoHeight(videoHeight), currentTimeSeconds(currentTimeSeconds) {}
 
   public:
     friend bool operator==(const WebmPlayerMetrics& lhs, const WebmPlayerMetrics& rhs) = default;
@@ -82,10 +79,7 @@ namespace margelo::nitro {
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "audioFramesRecovered"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "videoWidth"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "videoHeight"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "currentTimeSeconds"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "playbackRate"))),
-        JSIConverter<bool>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "muted"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "gain")))
+        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "currentTimeSeconds")))
       );
     }
     static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::webmplayer::WebmPlayerMetrics& arg) {
@@ -101,9 +95,6 @@ namespace margelo::nitro {
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "videoWidth"), JSIConverter<double>::toJSI(runtime, arg.videoWidth));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "videoHeight"), JSIConverter<double>::toJSI(runtime, arg.videoHeight));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "currentTimeSeconds"), JSIConverter<double>::toJSI(runtime, arg.currentTimeSeconds));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "playbackRate"), JSIConverter<double>::toJSI(runtime, arg.playbackRate));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "muted"), JSIConverter<bool>::toJSI(runtime, arg.muted));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "gain"), JSIConverter<double>::toJSI(runtime, arg.gain));
       return obj;
     }
     static inline bool canConvert(jsi::Runtime& runtime, const jsi::Value& value) {
@@ -125,9 +116,6 @@ namespace margelo::nitro {
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "videoWidth")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "videoHeight")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "currentTimeSeconds")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "playbackRate")))) return false;
-      if (!JSIConverter<bool>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "muted")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "gain")))) return false;
       return true;
     }
   };

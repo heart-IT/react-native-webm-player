@@ -6,8 +6,7 @@
 
 WebmPlaybackMetrics WebmCollectMetrics(WebmDemuxPump* pump,
                                        WebmAudioDecoder* audio,
-                                       WebmVideoDecoder* video,
-                                       float gain, bool muted, float rate) {
+                                       WebmVideoDecoder* video) {
   WebmPlaybackMetrics m = {0};
   m.bytesFedTotal = pump.bytesFedTotal;
   m.bytesDropped = pump.bytesDropped;
@@ -31,9 +30,6 @@ WebmPlaybackMetrics WebmCollectMetrics(WebmDemuxPump* pump,
   m.audioFramesRecovered = audio ? audio.framesRecovered : 0;
   m.videoWidth = pump.videoWidth;
   m.videoHeight = pump.videoHeight;
-  m.gain = gain;
-  m.muted = muted;
-  m.playbackRate = rate;
   // The synchronizer's clock keeps advancing once started, so after a stream
   // ends it reports wall-clock rather than position. The last presented
   // timestamp is the stream's own timeline, and matches what Android reports.

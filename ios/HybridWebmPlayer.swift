@@ -54,17 +54,17 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
   // MARK: - Controls
 
   var muted: Bool {
-    get { engine.metrics().muted }
+    get { engine.muted() }
     set { _ = engine.setMuted(newValue) }
   }
 
   var gain: Double {
-    get { Double(engine.metrics().gain) }
+    get { Double(engine.gain()) }
     set { _ = engine.setGain(Float(newValue)) }
   }
 
   var playbackRate: Double {
-    get { engine.metrics().playbackRate }
+    get { Double(engine.playbackRate()) }
     set { _ = engine.setPlaybackRate(Float(newValue)) }
   }
 
@@ -129,10 +129,7 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
       audioFramesRecovered: Double(m.audioFramesRecovered),
       videoWidth: Double(m.videoWidth),
       videoHeight: Double(m.videoHeight),
-      currentTimeSeconds: m.currentTimeSeconds,
-      playbackRate: m.playbackRate,
-      muted: m.muted,
-      gain: Double(m.gain)
+      currentTimeSeconds: m.currentTimeSeconds
     )
   }
 }

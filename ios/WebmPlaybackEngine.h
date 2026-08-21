@@ -36,9 +36,6 @@ typedef struct {
   int videoWidth;
   int videoHeight;
   double currentTimeSeconds;
-  double playbackRate;
-  bool muted;
-  float gain;
 } WebmPlaybackMetrics;
 
 @interface WebmPlaybackEngine : NSObject
@@ -77,6 +74,9 @@ typedef struct {
 - (BOOL)setMuted:(BOOL)muted;
 - (BOOL)setGain:(float)gain;
 - (BOOL)setPlaybackRate:(float)rate;
+- (BOOL)muted;
+- (float)gain;
+- (float)playbackRate;
 
 - (WebmPlaybackState)playbackState;
 - (WebmPlaybackMetrics)metrics;

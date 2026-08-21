@@ -127,9 +127,6 @@ class PlaybackStats(private val mainHandler: Handler) {
   }
 
   fun snapshot(
-    rate: Double,
-    muted: Boolean,
-    gain: Double,
     bytesDropped: Long,
     ringFillRatio: Double,
   ) = WebmPlayerMetrics(
@@ -146,9 +143,6 @@ class PlaybackStats(private val mainHandler: Handler) {
     videoWidth = videoW.get().toDouble(),
     videoHeight = videoH.get().toDouble(),
     currentTimeSeconds = positionMs.get() / 1000.0,
-    playbackRate = rate,
-    muted = muted,
-    gain = gain,
   )
 
   private fun startPolling(exo: ExoPlayer) {

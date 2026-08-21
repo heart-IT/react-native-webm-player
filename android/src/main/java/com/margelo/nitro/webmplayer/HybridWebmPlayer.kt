@@ -366,9 +366,6 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   override fun getMetrics(): WebmPlayerMetrics {
     val handle = ringHandle.get()
     return stats.snapshot(
-      currentRate,
-      currentMuted,
-      currentGain,
       bytesDropped = if (handle != 0L) RingBridge.droppedBytes(handle) else 0L,
       ringFillRatio = if (handle != 0L) RingBridge.fillRatio(handle) else 0.0,
     )

@@ -14,5 +14,4 @@
 
 WebmPlaybackMetrics WebmCollectMetrics(WebmDemuxPump* _Nullable pump,
                                        WebmAudioDecoder* _Nullable audio,
-                                       WebmVideoDecoder* _Nullable video,
-                                       float gain, bool muted, float rate);
+                                       WebmVideoDecoder* _Nullable video);

@@ -69,9 +69,6 @@ export interface WebmPlayerMetrics {
   videoWidth: number
   videoHeight: number
   currentTimeSeconds: number
-  playbackRate: number
-  muted: boolean
-  gain: number
 }
 
 /**
