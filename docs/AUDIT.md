@@ -605,3 +605,68 @@ contract-violation branch (ASan-red with the consumer wait disabled) and
 header truncation at every byte boundary. Remaining gap: cross-thread
 `WebmDemuxer::reset()` vs `feedData` was re-examined and is not a production
 pattern — both platforms reset on the consuming thread — so no test models it.
+
+## 2026-08-21 round 4 — over-engineering & complexity audit (three code passes + two comparative-research passes)
+
+Different question from rounds 1–3: not "what is broken" but "what is more
+complicated than the job requires", measured against CLAUDE.md's own bar
+(simplest design that works; every guard justified by verified fact) and
+against production implementations of the same job.
+
+**Comparative verdict (research passes, sources in the session record):** the
+architecture is deliberately _less_ complex than WebRTC-class (NetEQ jitter
+buffer, RTCP lip-sync engine, own render clocks — machinery for lossy
+unordered UDP this transport doesn't have) and VLC/ijkplayer-class players
+(portability-tax sync engines). The iOS synchronizer pipeline is Apple's
+documented pattern for custom-container playback; the Android custom-DataSource
+seam is media3's sanctioned extension point; the atomic-mirror pattern is the
+strict version of expo-video's listener mirror, forced by ExoPlayer's
+threading model (google/ExoPlayer#4463). Two exposures noted, neither
+complexity: VideoToolbox VP9 registration is iOS 26.2+ (video is dead below
+that floor without a software fallback — deployment decision, not code), and
+the synchronizer's ~1 s read-ahead sets a latency floor.
+
+Fixed this round (all suites re-run green after each):
+
+| Commit    | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `696e2c0` | **CI drift (the one real defect):** ci.yml ran 6 binaries while npm ran 8 — CI never executed `test_demux_hostile` / `test_demux_lacing`, the suites that caught R3-23. Binary list now lives once, in `tests/run-suites.sh`; both callers use it.                                                                                                                                                                                                                                                                                                                                        |
+| `20ed29b` | Ring: deleted the stats-batching subsystem (6 local atomics + CAS-throttled flushes maintaining `totalBytesWritten`/`totalBytesRead` no production code reads — now direct counts, still test-pinned), the debug validators that could not fail (`validateThread`, `validateWebMClusterBoundary`, the `isClusterBoundary` write parameter every caller negated), two of three capacity floors (only the 8 MiB hard floor ever bound; `broadcastConfig`'s 4 MB was silently overridden), and cache-line padding on counters touched a few hundred times/s (kept on head/tail). −113 lines. |
+| `21e2adc` | Demux: the 14 metrics counters are plain integers (ingest-thread-only — production consumes `parseState()`/`trackInfoSnapshot()`; `demuxerMetrics()` exists for the test/fuzz suites, and its header comment claimed a JS consumer that does not exist), `bufferBytes()` reads the reader directly (cached atomic deleted), `kMaxTracks` deleted (it clamped a strcmp loop over objects libwebm had already allocated), and the two v1-ghost comments corrected (`VideoConfig::kMaxEncodedFrameSize` and `AudioDecodeChannel` do not exist in this repo).                                 |
+| `f2c1a6e` | API: `WebmPlayerMetrics` dropped `muted`/`gain`/`playbackRate` — they duplicated the read-write properties on the same object, and their only effect was making the iOS property getters assemble a 14-field snapshot (ring stats included) to read one atomic. The engine now has direct getters, and the four hand-rolled copies of "may the clock run" collapsed into one `platformHeld` predicate. Engine at 414 lines.                                                                                                                                                               |
+| `4a1059d` | iOS audio decoder: the three log-sampling counters are plain integers (demux-thread-only; the metrics-crossing three stay atomic), and the one literal `511` uses `kDropLogMask`.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `0820fda` | lint-size: deleted the ~65-line baseline ratchet built for a `.lintsize-baseline.json` that never existed; warn/fail behavior unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+Kept deliberately, with reasons:
+
+- **The ring's lock-free head/tail design.** The write path already takes
+  `cvMutex_` for the condvar, so a plain mutex ring (~120 lines) would suffice
+  at this throughput — but the current one is shared by both platforms,
+  sanitizer-green, and pinned by the P0-1/P0-3 regression tests. Carried
+  complexity, not active risk; rewrite only with a reason.
+- **The destructor drain loop** — red-proven by `test_ring_lifetime` as the
+  last line against use-after-free under misuse; the registry (Android) and
+  thread-join (iOS) are the real mechanisms.
+- **`DemuxerMetrics`** — nearly every field is asserted by `test_e2e_demux`;
+  it is a test-observability surface and now says so.
+- **Per-feed packet caps and `kMaxVideoFrameSize`** — plausibility guards at
+  an untrusted boundary; the frame cap's comment now states honestly that the
+  value is inherited and unvalidated against a worst-case legitimate keyframe.
+
+Open questions for the feeder team (blocking two possible deletions):
+
+1. Can Hypercore delivery ever hand `feedData` duplicate blocks? The PTS dedup
+   (and the backward-jump reset it forces) exists solely for that claim; no
+   test or fixture demonstrates it, and the dedup already caused one real bug
+   (the laced-frames drop).
+2. Can the feeder ever skip exactly one Opus packet? The iOS FEC/PLC gap
+   recovery (~35 lines + the `audioFramesRecovered` spec field) conceals
+   single-packet loss on a transport that is nominally lossless.
+
+Flagged as product decisions, not taken: removing `playbackRate` (speculative
+on a live broadcast that can sustain neither 0.5 nor 2.0; also a term in the
+engine's widest conditional) and `getAvailableAudioRoutes` (no actionable use
+on a read-only route surface) — both are breaking spec changes. Also flagged:
+this file has outgrown its append-only format (CLAUDE.md already warns readers
+its verdicts go stale); collapsing closed rounds to one-liners is recommended
+but was not done unilaterally.
