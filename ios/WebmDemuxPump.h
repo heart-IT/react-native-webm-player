@@ -25,7 +25,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// than at start(), so it never runs ahead of the data.
 - (void)demuxPump:(id)pump didDecodeFirstAudioAtPts:(int64_t)ptsUs;
 
-/// A health transition. Called from the demux thread.
+/// A health transition. Delivered on the main queue.
 - (void)demuxPump:(id)pump
     didReportHealth:(NSString*)status
              detail:(NSString*)detail;
@@ -69,12 +69,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)requestReset;
 
 @property(nonatomic, readonly) uint64_t bytesFedTotal;
-@property(nonatomic, readonly) uint64_t videoPacketsDecoded;
 @property(nonatomic, readonly) uint64_t videoFramesDropped;
 @property(nonatomic, readonly) int videoWidth;
 @property(nonatomic, readonly) int videoHeight;
-/// True once the demuxer has entered a terminal parse error. Survives stop().
-@property(nonatomic, readonly) BOOL failed;
 
 @end
 

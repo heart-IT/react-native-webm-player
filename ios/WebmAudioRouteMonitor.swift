@@ -58,7 +58,7 @@ final class WebmAudioRouteMonitor {
     switch portType {
     case .builtInReceiver: return .earpiece
     case .builtInSpeaker: return .speaker
-    case .headphones, .headsetMic: return .wiredheadset
+    case .headphones: return .wiredheadset
     case .bluetoothA2DP, .bluetoothLE, .bluetoothHFP: return .bluetooth
     case .usbAudio: return .usb
     default: return .unknown

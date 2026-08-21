@@ -41,7 +41,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property(nonatomic, readonly) uint64_t packetsDecoded;
 /// Packets the renderer was not ready to accept.
-@property(nonatomic, readonly) uint64_t underruns;
 /// Frames reconstructed from FEC or concealed by PLC after a detected gap.
 @property(nonatomic, readonly) uint64_t framesRecovered;
 /// Presentation time of the most recent buffer handed to the renderer, in

@@ -13,6 +13,10 @@ namespace {
 // vpcC (VP Codec Configuration Record) — 12 bytes, ISO/IEC 14496-15 Annex H.
 // Required as a SampleDescriptionExtensionAtoms entry on iOS 14+; mandatory
 // since the iOS 26.2 supplemental-decoder reclassification.
+// Advisory only — presentation order and pacing come from each sample's PTS;
+// this fills the CMSampleTimingInfo duration field for a nominal 30 fps stream.
+constexpr CMTime kNominalFrameDuration = {1, 30, kCMTimeFlags_Valid, 0};
+
 NSData* BuildVpcCConfig(int profile) {
     uint8_t buf[12] = {0};
     buf[0] = 0x01;
@@ -26,7 +30,6 @@ NSData* BuildVpcCConfig(int profile) {
 }  // namespace
 
 @implementation WebmVideoDecoder {
-    // synthesised below from _hwSupported
     __weak AVSampleBufferDisplayLayer* _layer;
     VTDecompressionSessionRef _session;
     CMVideoFormatDescriptionRef _formatDesc;
@@ -49,6 +52,7 @@ NSData* BuildVpcCConfig(int profile) {
     BOOL _suspended;
     BOOL _requesting;  // _renderQueue only
     std::atomic<uint64_t> _framesPresented;
+    std::atomic<uint64_t> _pendingCapDrops;
 }
 
 - (instancetype)init {
@@ -157,6 +161,9 @@ NSData* BuildVpcCConfig(int profile) {
         return NO;
     }
     _width = width; _height = height; _profile = profile;
+    // Once per session, and the only evidence that a post-background rebuild
+    // actually happened — the frozen-picture diagnosis hangs on this line.
+    MEDIA_LOG_I("WebmVideoDecoder: session created %dx%d profile %d", width, height, profile);
     return YES;
 }
 
@@ -189,11 +196,17 @@ NSData* BuildVpcCConfig(int profile) {
                                                     kCFAllocatorDefault, nullptr, 0, length,
                                                     kCMBlockBufferAssureMemoryNowFlag, &block);
     if (s != noErr || !block) return NO;
-    CMBlockBufferReplaceDataBytes(data, block, 0, length);
+    s = CMBlockBufferReplaceDataBytes(data, block, 0, length);
+    if (s != noErr) {
+        // Submitting the block anyway would decode uninitialized bytes.
+        MEDIA_LOG_E("WebmVideoDecoder: block buffer copy failed: %d", (int)s);
+        CFRelease(block);
+        return NO;
+    }
 
     size_t sampleSize = length;
     CMSampleTimingInfo timing;
-    timing.duration = CMTimeMake(1, 30);
+    timing.duration = kNominalFrameDuration;
     timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
     timing.decodeTimeStamp = kCMTimeInvalid;
 
@@ -219,13 +232,21 @@ NSData* BuildVpcCConfig(int profile) {
         [self shutdownSession];
         return NO;
     }
-    return s == noErr;
+    if (s != noErr) {
+        MEDIA_LOG_E("WebmVideoDecoder: decode failed: %d", (int)s);
+        return NO;
+    }
+    return YES;
 }
 
 static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus status,
                             VTDecodeInfoFlags flags, CVImageBufferRef imageBuffer,
                             CMTime, CMTime) {
-    if (status != noErr || !imageBuffer || (flags & kVTDecodeInfo_FrameDropped)) return;
+    if (status != noErr) {
+        MEDIA_LOG_E("WebmVideoDecoder: decode callback error %d", (int)status);
+        return;
+    }
+    if (!imageBuffer || (flags & kVTDecodeInfo_FrameDropped)) return;
     auto* self_ = (__bridge WebmVideoDecoder*)refCon;
     int64_t ptsUs = static_cast<int64_t>(reinterpret_cast<uintptr_t>(sourceFrameRefCon));
 
@@ -233,7 +254,7 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     if (CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &outFmt) != noErr) return;
 
     CMSampleTimingInfo timing;
-    timing.duration = CMTimeMake(1, 30);
+    timing.duration = kNominalFrameDuration;
     timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
     timing.decodeTimeStamp = kCMTimeInvalid;
 
@@ -248,6 +269,15 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
         // must not grow this without limit.
         if (self_->_pending.size() >= 30) {
             CFRelease(sample);
+            // A pinned-full queue with every new frame discarded is exactly the
+            // frozen-layer signature, and it was previously invisible: counted
+            // nowhere, logged never. Rate-limited so a wedged layer logs about
+            // four lines a minute, not thirty a second.
+            uint64_t drops = self_->_pendingCapDrops.fetch_add(1) + 1;
+            if ((drops & 511) == 1) {
+                MEDIA_LOG_W("WebmVideoDecoder: pending queue full, %llu frames dropped",
+                            static_cast<unsigned long long>(drops));
+            }
             return;
         }
         self_->_pending.push_back(sample);  // ownership moves to the queue
@@ -295,12 +325,31 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     // from is never invoked again. Waiting to be asked means never being asked, and the
     // picture stays frozen even though the decoder recovered at the next keyframe.
     dispatch_async(_renderQueue, ^{
-        MEDIA_LOG_I("WebmVideoDecoder: resume, layer status %ld requiresFlush %d",
-                    (long)layer.status, (int)layer.requiresFlushToResumeDecoding);
-        if (layer.status == AVQueuedSampleBufferRenderingStatusFailed ||
-            layer.requiresFlushToResumeDecoding) {
+        long statusBefore = (long)layer.status;
+        BOOL needsFlush = layer.status == AVQueuedSampleBufferRenderingStatusFailed ||
+                          layer.requiresFlushToResumeDecoding;
+        if (needsFlush) {
             [layer flush];
         }
+        // Pending PTS are timescale-1e6 by construction (OutputCallback), so
+        // .value reads back as microseconds directly.
+        size_t pendingCount = 0;
+        int64_t frontPtsUs = -1;
+        int64_t backPtsUs = -1;
+        {
+            std::lock_guard<std::mutex> lock(self->_pendingMutex);
+            pendingCount = self->_pending.size();
+            if (pendingCount > 0) {
+                frontPtsUs = CMSampleBufferGetPresentationTimeStamp(self->_pending.front()).value;
+                backPtsUs = CMSampleBufferGetPresentationTimeStamp(self->_pending.back()).value;
+            }
+        }
+        // Discriminates the open frozen-picture candidates: a layer still Failed
+        // after the flush needs re-adding to the synchronizer, not flushing; a
+        // pending queue whose PTS trail the resumed clock is discarded as late.
+        MEDIA_LOG_I("WebmVideoDecoder: resume: status %ld->%ld flushed %d, %zu pending pts %lld..%lld us",
+                    statusBefore, (long)layer.status, (int)needsFlush,
+                    pendingCount, (long long)frontPtsUs, (long long)backPtsUs);
         // Re-arm from scratch: the request this decoder installed before the trip is
         // dead along with the layer's old status.
         if (self->_requesting) {

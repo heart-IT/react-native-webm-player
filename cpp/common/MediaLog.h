@@ -77,7 +77,10 @@ inline os_log_type_t toOsLogType(Level level) noexcept {
     case Level::Debug:
       return OS_LOG_TYPE_DEBUG;
     case Level::Info:
-      return OS_LOG_TYPE_INFO;
+      // Not OS_LOG_TYPE_INFO: info-type messages are memory-only by default and
+      // evicted before a post-repro `log collect` can archive them. On-device
+      // diagnosis reads collected archives, so Info must persist.
+      return OS_LOG_TYPE_DEFAULT;
     case Level::Error:
       return OS_LOG_TYPE_ERROR;
     case Level::Warn:

@@ -1,13 +1,24 @@
 #import "WebmPlaybackEngine.h"
 #import "WebmAudioDecoder.h"
 #import "WebmDemuxPump.h"
+#import "WebmInterruptionObserver.h"
 #import "WebmLifecycleObserver.h"
 #import "WebmVideoDecoder.h"
 
 #import <AudioToolbox/AudioToolbox.h>
+#include <algorithm>
 #include <atomic>
 
 #include "common/MediaLog.h"
+
+namespace {
+// Spec ranges (webm-player.nitro.ts); Android clamps to the same values, so an
+// out-of-range value must read back identically on both platforms.
+constexpr float kMinGain = 0.0f;
+constexpr float kMaxGain = 2.0f;
+constexpr float kMinPlaybackRate = 0.5f;
+constexpr float kMaxPlaybackRate = 2.0f;
+}  // namespace
 
 @interface WebmPlaybackEngine () <WebmDemuxPumpDelegate>
 @end
@@ -15,6 +26,7 @@
 @implementation WebmPlaybackEngine {
   WebmDemuxPump* _pump;
   WebmLifecycleObserver* _lifecycle;
+  WebmInterruptionObserver* _interruption;
   AVSampleBufferDisplayLayer* _displayLayer;
   AVSampleBufferAudioRenderer* _audioRenderer;
   AVSampleBufferRenderSynchronizer* _synchronizer;
@@ -62,6 +74,11 @@
   _lifecycle = [[WebmLifecycleObserver alloc]
       initWithOnBackground:^{ [weakSelf suspendForBackground]; }
               onForeground:^{ [weakSelf resumeFromForeground]; }];
+  _interruption = [[WebmInterruptionObserver alloc]
+      initWithOnBegan:^{ [weakSelf interruptionBegan]; }
+              onEnded:^(BOOL shouldResume) {
+                [weakSelf interruptionEnded:shouldResume];
+              }];
   return self;
 }
 
@@ -155,6 +172,10 @@
   _audioDecoder = nil;
   _audioRenderer = nil;
   _synchronizer = nil;
+  // Cleared so isPaused does not report a stale pause on a stopped player;
+  // Android clears both in stop() and the spec getters must agree.
+  _paused = false;
+  _backgrounded = false;
   return YES;
 }
 
@@ -184,18 +205,49 @@
   // running rate would return from a 30s background trip 30s ahead of the audio
   // that actually played.
   if (_synchronizer) [_synchronizer setRate:0];
+  MEDIA_LOG_I("WebmPlaybackEngine: background at clock %.3fs",
+              _synchronizer ? CMTimeGetSeconds(_synchronizer.currentTime) : -1.0);
   [_pump setPaused:YES];
   [_videoDecoder suspend];
 }
 
 - (void)resumeFromForeground {
   if (!_running.load() || !_backgrounded.exchange(false)) return;
+  // Paired with the background line: if the clock moved across the trip, the
+  // suspension did not actually stop the timebase and queued frames are late.
+  MEDIA_LOG_I("WebmPlaybackEngine: foreground at clock %.3fs, layer %d",
+              _synchronizer ? CMTimeGetSeconds(_synchronizer.currentTime) : -1.0,
+              (int)(_displayLayer != nil));
   [_videoDecoder resume];
-  [_pump setPaused:NO];
+  // Gated on the JS pause: unparking unconditionally resurrected the measured
+  // 401-packet silent hole for pause() → background → foreground — the pump
+  // decoded into queues while the renderer stayed stopped.
+  if (!_paused.load()) [_pump setPaused:NO];
   // iOS may have deactivated the session while we were away; reactivating is a
   // no-op if it did not.
   [self setupAudioSession];
   if (_synchronizer && _clockStarted.load() && !_paused.load()) {
+    [_synchronizer setRate:_playbackRate.load()];
+  }
+}
+
+- (void)interruptionBegan {
+  if (!_running.load() || _backgrounded.load()) return;
+  // The system already forced the synchronizer's rate to zero. Park the pump so
+  // the bytes stay in the ring instead of being decoded into queues nobody
+  // drains — the same silent hole the pause() parking exists to prevent.
+  [_pump setPaused:YES];
+}
+
+- (void)interruptionEnded:(BOOL)shouldResume {
+  if (!_running.load() || _backgrounded.load()) return;
+  // The interruption deactivated the session; reactivate before restoring rate.
+  [self setupAudioSession];
+  // Without ShouldResume the system says playback must wait for the user;
+  // a JS resume() unparks the pump in that case.
+  if (!shouldResume || _paused.load()) return;
+  [_pump setPaused:NO];
+  if (_synchronizer && _clockStarted.load()) {
     [_synchronizer setRate:_playbackRate.load()];
   }
 }
@@ -230,12 +282,14 @@
 }
 
 - (BOOL)setGain:(float)gain {
+  gain = std::clamp(gain, kMinGain, kMaxGain);
   _gain = gain;
   if (_audioRenderer) _audioRenderer.volume = gain;
   return YES;
 }
 
 - (BOOL)setPlaybackRate:(float)rate {
+  rate = std::clamp(rate, kMinPlaybackRate, kMaxPlaybackRate);
   _playbackRate = rate;
   if (_synchronizer && _running && !_paused && _clockStarted.load()) {
     [_synchronizer setRate:rate];
@@ -268,7 +322,11 @@
   // Android reports renderedOutputBufferCount, so submitting-but-never-showing
   // would otherwise look identical to playing on one platform and not the other.
   m.videoPacketsDecoded = _videoDecoder ? _videoDecoder.framesPresented : 0;
-  m.audioUnderruns = _audioDecoder ? _audioDecoder.underruns : 0;
+  // Renderer starvation is not observable through AVSampleBufferAudioRenderer,
+  // so iOS reports 0 rather than a different quantity under the same name —
+  // Android reports ExoPlayer's genuine underrun events. The old value here
+  // was the decoder's queue-overflow count, the exact opposite condition.
+  m.audioUnderruns = 0;
   m.videoFramesDropped = _pump.videoFramesDropped;
   m.audioFramesRecovered = _audioDecoder ? _audioDecoder.framesRecovered : 0;
   m.videoWidth = _pump.videoWidth;
@@ -328,9 +386,14 @@
   if (_clockStarted.exchange(true)) return;
   AVSampleBufferRenderSynchronizer* sync = _synchronizer;
   if (!sync) return;
-  float rate = _paused.load() ? 0.0f : _playbackRate.load();
   CMTime start = CMTimeMake(ptsUs, 1000000);
+  __weak WebmPlaybackEngine* weakSelf = self;
   dispatch_async(dispatch_get_main_queue(), ^{
+    WebmPlaybackEngine* self_ = weakSelf;
+    if (!self_) return;
+    // Rate is read here, not captured at the call site: a pause() landing
+    // between the two would otherwise be overwritten by a stale nonzero rate.
+    float rate = self_->_paused.load() ? 0.0f : self_->_playbackRate.load();
     [sync setRate:rate time:start];
   });
 }

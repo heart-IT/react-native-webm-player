@@ -48,7 +48,12 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
     CFRelease(fmt);
     return nullptr;
   }
-  CMBlockBufferReplaceDataBytes(pcm, block, 0, dataSize);
+  if (CMBlockBufferReplaceDataBytes(pcm, block, 0, dataSize) != noErr) {
+    // Building the sample anyway would enqueue uninitialized bytes as audio.
+    CFRelease(block);
+    CFRelease(fmt);
+    return nullptr;
+  }
 
   CMSampleTimingInfo timing;
   timing.duration = CMTimeMake(frameCount, sampleRate);
@@ -84,7 +89,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   int64_t _expectedPtsUs;
 
   std::atomic<uint64_t> _packetsDecoded;
-  std::atomic<uint64_t> _underruns;
+  std::atomic<uint64_t> _queueOverflowDrops;
   std::atomic<uint64_t> _framesRecovered;
   std::atomic<int64_t> _lastPresentedPtsUs;
 }
@@ -96,7 +101,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   _channels = 0;
   _expectedPtsUs = -1;
   _packetsDecoded = 0;
-  _underruns = 0;
+  _queueOverflowDrops = 0;
   _framesRecovered = 0;
   _lastPresentedPtsUs = -1;
   _pcm.resize(static_cast<size_t>(kMaxOpusFrames) * 2);
@@ -214,7 +219,15 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
     // presentation time, and discarding from the front would tear a hole in
     // audio the renderer is about to play.
     if (_pending.size() >= kMaxPendingBuffers) {
-      _underruns.fetch_add(1);
+      // An overflow (renderer not pulling), not an underrun — it was counted
+      // as one for a while, which made the same metrics field mean "too much
+      // data" here and "too little" on Android. Rate-limited: a stalled
+      // renderer hits this fifty times a second.
+      uint64_t drops = _queueOverflowDrops.fetch_add(1) + 1;
+      if ((drops & 511) == 1) {
+        MEDIA_LOG_W("WebmAudioDecoder: pending queue full, %llu packets dropped",
+                    static_cast<unsigned long long>(drops));
+      }
       CFRelease(sb);
       return NO;
     }
@@ -268,10 +281,6 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 
 - (uint64_t)packetsDecoded {
   return _packetsDecoded.load();
-}
-
-- (uint64_t)underruns {
-  return _underruns.load();
 }
 
 - (uint64_t)framesRecovered {

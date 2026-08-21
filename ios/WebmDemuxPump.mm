@@ -22,6 +22,10 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 // the shutdown, since the ring wakes readers on shutdown() anyway.
 constexpr int kRingReadTimeoutMs = 50;
 
+// Consecutive empty reads before the pump reports a stall: 40 × 50 ms = 2 s.
+// A live feed that goes quiet for 2 s is already a visible stall.
+constexpr int kStallReadTimeouts = 40;
+
 }  // namespace
 
 @interface WebmDemuxPump ()
@@ -47,7 +51,6 @@ constexpr int kRingReadTimeoutMs = 50;
   std::atomic<bool> _failed;
 
   std::atomic<uint64_t> _bytesFed;
-  std::atomic<uint64_t> _videoPacketsDecoded;
   std::atomic<uint64_t> _videoFramesDropped;
   std::atomic<int> _videoWidth;
   std::atomic<int> _videoHeight;
@@ -61,7 +64,6 @@ constexpr int kRingReadTimeoutMs = 50;
   _resetRequested = false;
   _failed = false;
   _bytesFed = 0;
-  _videoPacketsDecoded = 0;
   _videoFramesDropped = 0;
   _videoWidth = 0;
   _videoHeight = 0;
@@ -121,14 +123,21 @@ constexpr int kRingReadTimeoutMs = 50;
 }
 
 - (uint64_t)bytesFedTotal { return _bytesFed.load(); }
-- (uint64_t)videoPacketsDecoded { return _videoPacketsDecoded.load(); }
 - (uint64_t)videoFramesDropped { return _videoFramesDropped.load(); }
 - (int)videoWidth { return _videoWidth.load(); }
 - (int)videoHeight { return _videoHeight.load(); }
-- (BOOL)failed { return _failed.load(); }
 
 - (void)reportHealth:(NSString*)status detail:(NSString*)detail {
-  [self.delegate demuxPump:self didReportHealth:status detail:detail];
+  // Async to main, weak-loading the delegate there rather than here: loading a
+  // weak engine reference on the demux thread can take its last strong
+  // reference, and engine dealloc → stop → join would then join the very
+  // thread this runs on.
+  __weak WebmDemuxPump* weakSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    WebmDemuxPump* self_ = weakSelf;
+    if (!self_) return;
+    [self_.delegate demuxPump:self_ didReportHealth:status detail:detail];
+  });
 }
 
 #pragma mark - Demux thread
@@ -144,7 +153,13 @@ constexpr int kRingReadTimeoutMs = 50;
 
   [self reportHealth:@"buffering" detail:@"waiting for stream data"];
 
+  int emptyReads = 0;
+  bool stalled = false;
+
+  // The pool drains every pass: this thread sends Objective-C messages whose
+  // autoreleased returns would otherwise have no pool on a bare std::thread.
   while (!_stop.load()) {
+    @autoreleasepool {
     if (_paused.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(kRingReadTimeoutMs));
       continue;
@@ -168,7 +183,22 @@ constexpr int kRingReadTimeoutMs = 50;
         [self reportHealth:@"ended" detail:@"end of stream"];
         break;
       }
+      // A mid-stream stall was invisible before: the state machine latched
+      // "playing" at the first frame and nothing ever reported the feed going
+      // quiet, so a stalled stream looked identical to a playing one. Android
+      // reports rebuffering; this is the iOS side of that contract.
+      if (++emptyReads >= kStallReadTimeouts && !stalled) {
+        stalled = true;
+        [self reportHealth:@"buffering" detail:@"stream stalled"];
+      }
       continue;
+    }
+    emptyReads = 0;
+    if (stalled) {
+      stalled = false;
+      if (firstAudioSeen || firstVideoSeen) {
+        [self reportHealth:@"playing" detail:@"stream resumed"];
+      }
     }
 
     // Packets point into the demuxer's internal buffer and are invalidated by
@@ -200,6 +230,7 @@ constexpr int kRingReadTimeoutMs = 50;
         [self reportHealth:@"failed" detail:@"demuxer parse failure"];
       }
     }
+    }  // @autoreleasepool
   }
 }
 
@@ -224,7 +255,14 @@ constexpr int kRingReadTimeoutMs = 50;
     }
     if (!*firstAudioSeen) {
       *firstAudioSeen = true;
-      [self.delegate demuxPump:self didDecodeFirstAudioAtPts:pkt.ptsUs];
+      // Same last-strong-reference hazard as reportHealth: weak-load on main.
+      __weak WebmDemuxPump* weakSelf = self;
+      int64_t ptsUs = pkt.ptsUs;
+      dispatch_async(dispatch_get_main_queue(), ^{
+        WebmDemuxPump* self_ = weakSelf;
+        if (!self_) return;
+        [self_.delegate demuxPump:self_ didDecodeFirstAudioAtPts:ptsUs];
+      });
       [self reportHealth:@"playing" detail:@"first audio frame"];
     }
   }
@@ -246,7 +284,6 @@ constexpr int kRingReadTimeoutMs = 50;
                                    ptsUs:pkt.ptsUs
                                    isKey:pkt.isKeyFrame ? YES : NO];
     if (ok) {
-      _videoPacketsDecoded.fetch_add(1);
       if (!*firstVideoSeen) {
         *firstVideoSeen = true;
         [self reportHealth:@"playing" detail:@"first video frame"];
