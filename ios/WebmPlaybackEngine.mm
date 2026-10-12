@@ -357,7 +357,7 @@ void RunOnMain(void (^block)(void)) {
     [_pump setEndOfStream];
     return;
   }
-  // `lag`, `reconfigured`, `error <message>` or unknown: the stream is lost.
+  // `lag`, `stalled`, `reconfigured`, `error <message>` or unknown: the stream is lost.
   [self rejoinWithReason:status];
 }
 

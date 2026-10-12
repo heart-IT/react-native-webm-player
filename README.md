@@ -113,17 +113,18 @@ rejoins, not failures.
 Internal, but fixed, so both platforms de-frame the same bytes. `framed-stream`
 framing (4-byte little-endian length), payload byte 0 is the type:
 
-| type   | payload                                                                                                                                                                                          |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `0x00` | muxed WebM bytes                                                                                                                                                                                 |
-| `0x01` | UTF-8 status: `joining`, `net <summary>` (every 5 s until a peer connects; logged, not a health event), `connected <remote address>`, `lag <detail>`, `reconfigured`, `ended`, `error <message>` |
+| type   | payload                                                                                                                                                                                                              |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0x00` | muxed WebM bytes                                                                                                                                                                                                     |
+| `0x01` | UTF-8 status: `joining`, `net <summary>` (every 5 s until a peer connects; logged, not a health event), `connected <remote address>`, `lag <detail>`, `stalled <detail>`, `reconfigured`, `ended`, `error <message>` |
 
 The muxed stream begins at the first video keyframe after the join, so
 nothing undecodable reaches the player. `lag` means the reader fell more than
 10 s behind the log (usually the player not keeping up) and carries what the
-watchdog measured; `reconfigured` means
-the broadcaster started a new session, whose stream parameters may differ.
-Native rejoins on both. An IPC that ends without `ended` is treated the
+watchdog measured; `stalled` means nothing was muxed for 10 s (a link that
+died without an error: the log is not seen growing, so it is not lag);
+`reconfigured` means the broadcaster started a new session, whose stream
+parameters may differ. Native rejoins on all three. An IPC that ends without `ended` is treated the
 same way, with backoff. `ended` also comes straight after the join when the
 log's last session has already ended, or has not grown for five minutes
 (vcr-core's `info()` liveness), so a finished broadcast stops the player

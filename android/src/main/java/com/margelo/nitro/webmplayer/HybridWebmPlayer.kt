@@ -197,7 +197,8 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
           broadcastEnded = true
           source.endInput()
         }
-        status.startsWith(STATUS_LAG) || status == STATUS_RECONFIGURED || status.startsWith(STATUS_ERROR) ->
+        status.startsWith(STATUS_LAG) || status.startsWith(STATUS_STALLED) ||
+          status == STATUS_RECONFIGURED || status.startsWith(STATUS_ERROR) ->
           rejoin(status)
         else -> Log.w(TAG, "ignoring unknown worklet status: $status")
       }
@@ -316,6 +317,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     private const val STATUS_CONNECTED = "connected"
     private const val STATUS_ENDED = "ended"
     private const val STATUS_LAG = "lag"
+    private const val STATUS_STALLED = "stalled"
     private const val STATUS_RECONFIGURED = "reconfigured"
     private const val STATUS_ERROR = "error"
   }

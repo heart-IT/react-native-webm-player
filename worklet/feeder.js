@@ -2,9 +2,9 @@
 // Worklet entry. Joins the broadcast at Bare.argv[0], remuxes it to WebM and
 // streams it to the host over the worklet IPC as length-prefixed frames
 // (framed-stream, 4-byte little-endian length). Payload byte 0 is the type:
-// 0 = muxed WebM bytes, 1 = a UTF-8 status: `connected`, `lag`,
+// 0 = muxed WebM bytes, 1 = a UTF-8 status: `connected`, `lag`, `stalled`,
 // `reconfigured`, `ended`, `error <message>`. The host rejoins on `lag`,
-// `reconfigured`, `error` and on an IPC that ends without `ended`.
+// `stalled`, `reconfigured`, `error` and on an IPC that ends without `ended`.
 const Corestore = require('corestore')
 const Hyperswarm = require('hyperswarm')
 const VCRCore = require('@holepunchto/vcr-core')
@@ -20,6 +20,12 @@ const kLiveEdge = -1
 // advancing while the broadcaster keeps appending. Playback itself runs
 // kLiveDelaySec plus the decoders' queues behind, so this stays well above.
 const kMaxLagMs = 10000
+// A link that dies quietly leaves the reader waiting for a fragment that never
+// comes: the log is not seen growing, so there is no lag, no error and no end
+// (iPhone 11, 2026-10-12: Wi-Fi off, "stream stalled" and nothing after it).
+// Nothing written for this long is reported as `stalled`; the host rejoins.
+const kMaxSilenceMs = kMaxLagMs
+const kSilenceCheckMs = 1000
 // Lag is measured against the log's own append rate over this window;
 // fragment durations are not usable for it (a video-only fragment has none).
 const kRateWindowMs = 5000
@@ -113,11 +119,25 @@ async function main() {
   } while (fragmentsBehind(input) > kMaxJoinBehindFragments)
   joined = true
 
-  const result = await remuxWebm(
-    input,
-    write,
-    () => reconfigured || lagMs(input) > kMaxLagMs
-  )
+  lastDataAt = Date.now()
+  const silenceWatch = setInterval(() => {
+    const silentMs = Date.now() - lastDataAt
+    if (silentMs < kMaxSilenceMs) return
+    clearInterval(silenceWatch)
+    status(
+      `stalled no data for ${silentMs} ms at ${input.offset} of ${core.length}`
+    )
+  }, kSilenceCheckMs)
+  let result
+  try {
+    result = await remuxWebm(
+      input,
+      write,
+      () => reconfigured || lagMs(input) > kMaxLagMs
+    )
+  } finally {
+    clearInterval(silenceWatch)
+  }
   if (result === 'ended') status('ended')
   else if (reconfigured) status('reconfigured')
   else status(`lag ${lagDetail(input)}`)
@@ -164,7 +184,10 @@ function lagDetail(input) {
   return `${Math.round(lagMs(input))} ms: ${fragmentsBehind(input)} fragments behind at ${input.offset} of ${core.length}`
 }
 
+let lastDataAt = 0
+
 function write(chunk) {
+  lastDataAt = Date.now()
   if (out.write(frame(kFrameData, chunk))) return null
   return new Promise((resolve) => out.once('drain', resolve))
 }

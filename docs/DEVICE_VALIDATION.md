@@ -211,10 +211,11 @@ collect --device-udid` answered "Device not configured". What the code
       evening). A recurrence means the display-layer race was not the cause;
       the next step is then a Debug device build or bisecting the target.
 
-- [ ] Network off for 20 s, then on: a silent input must end in a rejoin.
-      Today neither side watches for one (see the evening section); the Wi-Fi
-      case stayed at "stream stalled". Needs a console that survives the
-      network drop: the phone on a USB cable.
+- [ ] Network off for 20 s, then on: the worklet's silence watch (10 s
+      without a muxed byte reports `stalled`, native rejoins) is in the tree
+      but has not run on the phone. The Wi-Fi case stayed at "stream stalled"
+      before it. Needs a console that survives the network drop: the phone on
+      a USB cable.
 - [ ] Pixels after a background trip, with eyes on the phone: the layer
       recovered through the flush notification mid-session on 2026-10-12
       (status 2 to 0, frames flowing); the picture itself still unconfirmed.
