@@ -31,8 +31,9 @@ export interface WebmPlayerMetrics {
   videoWidth: number
   videoHeight: number
   /**
-   * The joined stream's own timeline, in seconds. It restarts at every join,
-   * rejoins included; the packet counts above keep counting across them.
+   * The broadcast's own timeline in seconds, from the stream's timestamps.
+   * Zero until a join's first sample is presented; the packet counts above
+   * keep counting across rejoins.
    */
   currentTimeSeconds: number
 }

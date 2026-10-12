@@ -233,6 +233,33 @@ once with the phone on the cable, when another app came to the front).
   concern (each `vcr record` is a new swarm identity), but it sets the
   rejoin time a viewer sees.
 
+### Android, OnePlus 8, 2026-10-12 evening
+
+Release APK (JS bundled, debug keystore), the same tree and the same
+broadcast as the iPhone runs, over `adb logcat -s WebmPlayer ReactNativeJS`.
+
+- **Join and playback.** Wi-Fi had been off; with it on, connected to the Mac
+  over the LAN in 2 s and was ready 4 s later, 512x288, 0 dropped. `t=` read
+  156 s at the join, the broadcast's own timeline, so the timeline does not
+  restart at a join on either platform: the zero seen on the iPhone was the
+  value shown while a rejoin was still buffering.
+- **Audio focus lost.** YouTube started over adb: "audio focus lost" at once
+  and the source stopped. YouTube's focus request is permanent, so when it
+  was force-stopped no regain reached ExoPlayer, and the player sat waiting
+  for `play()`, as the iPhone does after an interruption without
+  ShouldResume. The regain-driven rejoin (a transient loss) is still
+  unverified: a Clock timer on this phone ducks instead of taking focus.
+- **While the Clock app was in front** (the timer being set), ExoPlayer
+  reported buffering every two seconds and the worklet's lag reached 13 s,
+  227 fragments, and rejoined; playback was clean before and after. Not
+  chased: Android tuning is outside this round.
+- **`playbackState` reads Playing while nothing plays**, on both platforms:
+  it is "something has rendered this session", so it stays Playing through
+  an interruption, a focus loss and, on iOS, a rejoin (Android's
+  `newSession` clears it there). Health is right in all three cases. A
+  follow-up for the spec: Buffering whenever the source is stopped or a
+  rejoin is pending.
+
 ## Still to run on hardware
 
 - [ ] The 16.6 startup crash: keep counting launches of the 16.6 Release
@@ -248,7 +275,8 @@ once with the phone on the cable, when another app came to the front).
       still unmeasured.
 - [ ] A phone call, as against the timer interruption already verified: the
       phone has no SIM.
-- [ ] Android: audio focus loss and regain.
+- [ ] Android: the regain after a transient focus loss (a notification sound
+      or a call), which should rejoin at once. The permanent loss is verified.
 - [ ] Swarm discovery on the phone: 13 to 56 s to a connection, 84 s once on
       2026-10-12 afternoon. The 4 to 5 s from connection to first frame is in
       line with Android.
