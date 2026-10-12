@@ -30,6 +30,10 @@ export interface WebmPlayerMetrics {
   videoFramesDropped: number
   videoWidth: number
   videoHeight: number
+  /**
+   * The joined stream's own timeline, in seconds. It restarts at every join,
+   * rejoins included; the packet counts above keep counting across them.
+   */
   currentTimeSeconds: number
 }
 

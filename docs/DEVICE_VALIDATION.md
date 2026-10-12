@@ -214,12 +214,11 @@ once with the phone on the cable, when another app came to the front).
   55.5 s when the renderer ran dry; the worklet's silence watch reported
   `stalled no data for 10738 ms at 91334 of 91334` at 60.3 s; rejoin in
   0.5 s, "stream reset", connected at 79.6 s, first frame and "stream
-  resumed" at 83.3 s; 1493 frames after it, 0 dropped. The viewer's
-  impression was that the content restarted from the clip's start rather
-  than the live edge; the broadcast is the 60 s clip looped, each worklet
-  joins with a fresh storage directory and fetches the length from the peer
-  before seeking to the next fragment, and the log carries no offset or PTS
-  that could settle it. Open: log the join offset against the log length.
+  resumed" at 83.3 s; 1493 frames after it, 0 dropped. The viewer's first
+  impression was that the content restarted from the clip's start; what
+  had restarted was the example's `t=` figure, `currentTimeSeconds`, which
+  is the joined stream's own timeline and restarts at every join on both
+  platforms (the spec now says so). The packet counts kept counting.
 - **Audio interruption (a Clock timer; the phone has no SIM).** "audio
   interrupted" at 535.7 s, "interruption ended" and the rejoin at 543.9 s,
   connected 14 s later, playing 4 s after that.
@@ -241,9 +240,6 @@ once with the phone on the cable, when another app came to the front).
       evening). A recurrence means the display-layer race was not the cause;
       the next step is then a Debug device build or bisecting the target.
 
-- [ ] After a rejoin, is the picture at the live edge? Seen once as "started
-      from 0" (2026-10-12, second session); the worklet should report the
-      join offset against the log length so the next run can tell.
 - [ ] Pixels after a background trip, with eyes on the phone: the layer
       recovered through the flush notification mid-session on 2026-10-12
       (status 2 to 0, frames flowing); the picture itself still unconfirmed.
