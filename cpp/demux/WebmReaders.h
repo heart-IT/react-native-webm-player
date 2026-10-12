@@ -20,7 +20,7 @@
 
 namespace media::demux {
 
-// Streaming IMkvReader backed by an append-only vector (sync/fallback mode).
+// Streaming IMkvReader backed by an append-only vector.
 class StreamReader final : public mkvparser::IMkvReader {
 public:
     static constexpr size_t kMaxBufferSize = 2 * 1024 * 1024;

@@ -10,7 +10,6 @@ package com.margelo.nitro.webmplayer
 import androidx.annotation.Keep
 import com.facebook.jni.HybridData
 import com.facebook.proguard.annotations.DoNotStrip
-import dalvik.annotation.optimization.FastNative
 
 
 /**
@@ -59,7 +58,6 @@ class Func_void_WebmHealthEvent_cxx: Func_void_WebmHealthEvent {
   override fun invoke(event: WebmHealthEvent): Unit
     = invoke_cxx(event)
 
-  @FastNative
   private external fun invoke_cxx(event: WebmHealthEvent): Unit
 }
 

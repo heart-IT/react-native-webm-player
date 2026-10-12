@@ -51,9 +51,6 @@ namespace margelo::nitro::webmplayer {
         case WebmPlaybackState::PLAYING:
           static const auto fieldPLAYING = clazz->getStaticField<JWebmPlaybackState>("PLAYING");
           return clazz->getStaticFieldValue(fieldPLAYING);
-        case WebmPlaybackState::PAUSED:
-          static const auto fieldPAUSED = clazz->getStaticField<JWebmPlaybackState>("PAUSED");
-          return clazz->getStaticFieldValue(fieldPAUSED);
         case WebmPlaybackState::FAILED:
           static const auto fieldFAILED = clazz->getStaticField<JWebmPlaybackState>("FAILED");
           return clazz->getStaticFieldValue(fieldFAILED);

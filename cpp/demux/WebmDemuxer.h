@@ -1,18 +1,15 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 #include <cstddef>
-#include <mutex>
 #include <vector>
 #include <string>
 #include <memory>
-#include "common/MediaTime.h"
 
 // Forward declarations for libwebm types
 namespace mkvparser {
 class IMkvReader;
-class EBMLHeader;
+struct EBMLHeader;
 class Segment;
 class Cluster;
 class BlockEntry;
@@ -21,21 +18,20 @@ class BlockEntry;
 
 namespace media::demux {
 
-// Opus audio packet extracted from WebM. Points into demuxer's internal buffer —
+// Opus audio packet extracted from WebM. Points into the demuxer's window:
 // valid only until the next feedData() or reset() call.
 struct AudioPacket {
-    const uint8_t* data;      // Raw Opus packet bytes (into the demuxer's window)
-    size_t size;              // Packet size in bytes (max 1275 per Opus spec)
-    int64_t ptsUs;            // Presentation timestamp in microseconds
-    int64_t durationUs;       // Packet duration in microseconds (typically 20000)
+    const uint8_t* data;
+    size_t size;
+    int64_t ptsUs;
 };
 
 // VP9 video packet extracted from WebM. Same lifetime rules as AudioPacket.
 struct VideoPacket {
-    const uint8_t* data;      // Raw VP9 frame bytes (into the demuxer's window)
-    size_t size;              // Frame size in bytes (up to ~512KB for 4K keyframes)
-    int64_t ptsUs;            // Presentation timestamp in microseconds
-    bool isKeyFrame;          // True for keyframes (decoder can start from here)
+    const uint8_t* data;
+    size_t size;
+    int64_t ptsUs;
+    bool isKeyFrame;
 };
 
 // Packets in DemuxResult point into an internal buffer owned by WebmDemuxer.
@@ -56,10 +52,6 @@ struct TrackInfo {
     // decoder is configured from these rather than a hardcoded constant.
     int audioSampleRate = 0;
     int audioChannels = 0;
-    std::string audioCodecId;
-    std::string videoCodecId;
-    std::vector<uint8_t> audioCodecPrivate;  // OpusHead
-    std::vector<uint8_t> videoCodecPrivate;  // VP9 CodecPrivate
 };
 
 enum class ParseState {
@@ -70,33 +62,11 @@ enum class ParseState {
     Error
 };
 
-struct DemuxerMetrics {
-    uint64_t totalBytesFed = 0;
-    uint64_t feedDataCalls = 0;
-    uint64_t audioPacketsEmitted = 0;
-    uint64_t videoPacketsEmitted = 0;
-    uint64_t overflowCount = 0;
-    // Aggregate drop counter (sum of the three categories below; kept for continuity).
-    uint64_t partialDropCount = 0;
-    // Split drop counters so triage can distinguish the cause.
-    uint64_t oversizedFrameDrops = 0;      // video frame exceeded kMaxVideoFrameSize
-    uint64_t packetCapDrops = 0;           // hit kMaxAudio/VideoPacketsPerFeed ceiling
-    uint64_t appendBackpressureDrops = 0;  // stream-mode append lost trailing bytes
-    uint64_t blockStallCount = 0;   // consecutive block parse failures triggering stall error
-    uint64_t parseErrorCount = 0;   // total transient parse errors (header, segment, tracks, blocks)
-    // Cumulative (monotonic across reset()) counterparts so forensic queries
-    // like "any parse errors at all in this session" survive stream restarts.
-    uint64_t cumulativeParseErrorCount = 0;
-    uint64_t sessionResetCount = 0;
-    int64_t timeInErrorMs = 0;      // milliseconds since entering ParseState::Error (0 if not in Error)
-    size_t bufferBytes = 0;         // current StreamReader buffer size
-    ParseState parseState = ParseState::WaitingForEBML;
-};
-
 // Append-only reader for streaming WebM data into libwebm's mkvparser.
 // Implements mkvparser::IMkvReader for incremental parsing.
 class StreamReader;
 
+// Single-threaded: every member runs on the demux thread that feeds it.
 class WebmDemuxer {
 public:
     WebmDemuxer();
@@ -107,47 +77,18 @@ public:
 
     // Feed raw WebM bytes incrementally. Returns extracted packets (if any).
     // Bytes are copied into the internal StreamReader window, which is trimmed
-    // by deferred compaction on the following call.
+    // by deferred compaction on the following call. In the Error state the
+    // bytes are discarded until reset(); the owner rejoins the stream.
     // Returned reference is valid until the next feedData() or reset() call.
     const DemuxResult& feedData(const uint8_t* data, size_t len);
 
-    // Thread-safe: trackInfo is immutable after tracks are parsed.
-    // Returns a copy for safe cross-thread access.
-    TrackInfo trackInfoSnapshot() const noexcept {
-        std::lock_guard<std::mutex> lk(trackMtx_);
-        return trackInfo_;
-    }
+    const TrackInfo& trackInfo() const noexcept { return trackInfo_; }
 
-    ParseState parseState() const noexcept { return state_.load(std::memory_order_acquire); }
+    ParseState parseState() const noexcept { return state_; }
 
+    // Bytes resident in the parse window. Logged beside the ring occupancy:
+    // a window that only grows is a compaction bug (iPhone 11, 2026-10-12).
     size_t bufferBytes() const noexcept;
-
-
-    // Ingest-thread only, like every counter it reads: production consumes
-    // parseState() and trackInfoSnapshot(); this getter exists for the test
-    // and fuzz suites, which feed and read on one thread.
-    DemuxerMetrics demuxerMetrics() const noexcept {
-        DemuxerMetrics m{};
-        m.totalBytesFed = totalBytesFed_;
-        m.feedDataCalls = feedDataCalls_;
-        m.audioPacketsEmitted = audioPacketsEmitted_;
-        m.videoPacketsEmitted = videoPacketsEmitted_;
-        m.overflowCount = overflowCount_;
-        m.partialDropCount = partialDropCount_;
-        m.oversizedFrameDrops = oversizedFrameDrops_;
-        m.packetCapDrops = packetCapDrops_;
-        m.appendBackpressureDrops = appendBackpressureDrops_;
-        m.blockStallCount = blockStallCount_;
-        m.parseErrorCount = parseErrorCount_;
-        m.cumulativeParseErrorCount = cumulativeParseErrorCount_;
-        m.sessionResetCount = sessionResetCount_;
-        m.bufferBytes = bufferBytes();
-        m.parseState = state_.load(std::memory_order_relaxed);
-        if (m.parseState == ParseState::Error && errorEntryUs_ > 0) {
-            m.timeInErrorMs = (nowUs() - errorEntryUs_) / 1000;
-        }
-        return m;
-    }
 
     void reset();
 
@@ -163,7 +104,7 @@ private:
     const uint8_t* readerDataAt(long long absPos, long long len) const noexcept;
 
     DemuxResult cachedResult_;
-    std::unique_ptr<StreamReader> reader_;         // Stream mode (sync fallback)
+    std::unique_ptr<StreamReader> reader_;
     std::unique_ptr<mkvparser::EBMLHeader> ebmlHeader_;
     std::unique_ptr<mkvparser::Segment> segment_;
     const mkvparser::Cluster* cluster_ = nullptr;
@@ -174,9 +115,8 @@ private:
     // and uses this flag to drive a Load()+GetNext() retry on the next call.
     bool clusterDrained_ = false;
 
-    mutable std::mutex trackMtx_;
     TrackInfo trackInfo_;
-    std::atomic<ParseState> state_{ParseState::WaitingForEBML};
+    ParseState state_ = ParseState::WaitingForEBML;
     std::string parseError_;
     long long ebmlHeaderEndPos_ = 0;
     int parseRetryCount_ = 0;
@@ -184,34 +124,15 @@ private:
     // Track the lowest buffer offset still needed so we can compact
     long long compactOffset_ = 0;
     long long pendingCompactPos_ = 0;  // Deferred compaction target (applied at next feedData)
-    // Metrics counters. Plain integers on purpose: written and read only on
-    // the ingest thread (feedData/demuxerMetrics callers). Only state_ crosses
-    // threads.
-    uint64_t overflowCount_ = 0;
-    uint64_t partialDropCount_ = 0;
-    uint64_t oversizedFrameDrops_ = 0;
-    uint64_t packetCapDrops_ = 0;
-    uint64_t appendBackpressureDrops_ = 0;
-    uint64_t totalBytesFed_ = 0;
-    uint64_t feedDataCalls_ = 0;
-    uint64_t audioPacketsEmitted_ = 0;
-    uint64_t videoPacketsEmitted_ = 0;
-    uint64_t blockStallCount_ = 0;
-    uint64_t parseErrorCount_ = 0;
-    // Cumulative (never zeroed by reset()) — see DemuxerMetrics.
-    uint64_t cumulativeParseErrorCount_ = 0;
-    uint64_t sessionResetCount_ = 0;
-    int64_t errorEntryUs_ = 0;  // nowUs() when state last transitioned to Error
 
-    // PTS dedup: skip duplicate blocks from Hypercore retries
+    // PTS dedup: skip the block parseBlocks() re-visits after a need-more-data
+    // return from Cluster::GetNext().
     int64_t lastEmittedAudioPtsUs_ = -1;
     int64_t lastEmittedVideoPtsUs_ = -1;
 
-    // Per-site log throttles (ingest thread only, so no atomics needed). The
-    // paths they guard fire on every feed while the stream is backpressured
-    // or looping through auto-reset; the drop counters stay exact regardless.
+    // The window-full warning fires on every feed while the stream is
+    // backpressured, so it is throttled.
     int64_t lastWindowFullLogUs_ = 0;
-    int64_t lastAutoResetLogUs_ = 0;
 };
 
 }  // namespace media::demux

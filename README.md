@@ -1,127 +1,155 @@
 # @heartit/webm-player
 
-Native WebM broadcast player for React Native — VP9 video and Opus audio, with
-A/V sync owned by the platform.
+Native live-broadcast player for React Native. Hand it a Hypercore broadcast
+key; native joins the swarm, demuxes VP9 + Opus WebM and plays it, with A/V
+sync owned by the platform.
 
 [![Version](https://img.shields.io/npm/v/@heartit/webm-player.svg)](https://www.npmjs.com/package/@heartit/webm-player)
 [![License](https://img.shields.io/npm/l/@heartit/webm-player.svg)](https://github.com/heart-IT/react-native-webm-player/blob/main/LICENSE)
 
-Receive-only: one audio track, one video track, no capture and no encode. You
-push muxed WebM bytes in; native demuxes, decodes and presents them.
+Receive-only: one audio track, one video track, no capture and no encode.
 
 ## How it works
 
-JavaScript forwards bytes and does nothing else — no buffering, no timing, no
-demuxing. Everything below `feedData` is native, and A/V sync belongs to the
-platform rather than to this library.
+JavaScript passes a key and nothing else. The library starts a Bare worklet
+(bare-kit, in-process) that opens the broadcast's [vcr-core](https://github.com/holepunchto/vcr-core)
+log through Hyperswarm, remuxes it to WebM with bare-ffmpeg, and streams the
+bytes to native over the worklet's IPC. Native decodes and presents.
 
 ```
-your transport (e.g. Hypercore) ──▶ JS ──feedData(ArrayBuffer)──▶ native
-                                                                    │
-                              ┌─────────────────────────────────────┴──────┐
-                        iOS                                          Android
-              libwebm + libopus + VideoToolbox                      ExoPlayer
-                            │                                            │
-              AVSampleBufferRenderSynchronizer                       MediaCodec
+JS  ──play(key)──▶  native
+                      │ starts worklet/feeder.js (Bare) for the key
+                      ▼
+      Corestore + VCRCore + Hyperswarm ──remux (bare-ffmpeg)──▶ WebM bytes
+                      │ framed over the worklet IPC
+                      ▼
+   iOS: libwebm → libopus / VideoToolbox → AVSampleBufferRenderSynchronizer
+   Android: ExoPlayer (MatroskaExtractor + MediaCodec + AudioTrack)
 ```
 
-The two platforms share a lock-free byte ring and the public API. iOS demuxes
-with libwebm because `AVSampleBufferAudioRenderer` needs decoded packets;
-Android hands the same muxed bytes to ExoPlayer, which demuxes internally. That
-asymmetry is deliberate — leaning on each platform is the design.
+A live stream is never resumed from a buffer. Whenever the stream is lost — the
+worklet falls behind the live edge, the network drops, an audio interruption
+ends — native rejoins at the live edge with a fresh worklet. Playback keeps
+running when the app is backgrounded, and on iOS runs `kLiveDelaySec` (4 s)
+behind the live edge: the demux thread paces on the decoders' queues, so that
+margin accumulates in the ring as compressed bytes and absorbs network jitter
+without buffering decoded frames.
 
 ## Requirements
 
 - React Native 0.78+ (New Architecture)
-- Node 18+
 - `react-native-nitro-modules`
+- `react-native-bare-kit` 0.16+ as a **direct** dependency of the app: its pod
+  and gradle module embed the worklet's native addons, and only a direct
+  dependency autolinks.
+- iOS 16.6+. VP9 decodes in hardware on A13 and later.
+- Android 10+ (API 29): the floor `react-native-bare-kit` declares.
+- iOS apps declare `NSLocalNetworkUsageDescription`: Hyperswarm reaches a
+  broadcaster on the same network directly, and iOS withholds local-network
+  access from apps without it.
+- To keep playing in the background: iOS apps declare `UIBackgroundModes:
+audio`; Android apps keep the process alive themselves (foreground service or
+  picture-in-picture) once it would otherwise be cached.
 
 ## Installation
 
 ```bash
-npm install @heartit/webm-player react-native-nitro-modules
+npm install @heartit/webm-player react-native-nitro-modules react-native-bare-kit
 cd ios && pod install
 ```
 
-The iOS pod builds an Opus XCFramework from source on first `pod install`.
+This package's `postinstall` links the worklet's native addons into
+`react-native-bare-kit`, whose pod and gradle module embed them, and the gradle
+module links again before every Android build. No app-side `bare-link` step is
+needed. If npm scripts are disabled, run `node scripts/link-bare-addons.js ios`
+and `... android` from the package after installing. The pod builds an Opus
+XCFramework from source on first install.
 
 ## Usage
 
-```ts
-import { createWebmPlayer, WebmPlaybackState } from '@heartit/webm-player'
+```tsx
+import {
+  createWebmPlayer,
+  WebmPlayerView,
+  WebmHealthStatus,
+} from '@heartit/webm-player'
 
 const player = createWebmPlayer()
-player.start()
-
-// Each chunk is muxed WebM. Writes are all-or-nothing: false means the chunk
-// was dropped whole and MUST be re-sent before any newer data — the bytes feed
-// a container parser, so skipping a chunk corrupts the stream from then on.
-let backlog: Uint8Array | null = null
-socket.on('data', (chunk: Uint8Array) => {
-  backlog = backlog ? concat(backlog, chunk) : chunk
-  if (player.feedData(backlog.buffer)) backlog = null
-  // else: ring full (back off, retry on the next tick) or player stopped.
+player.setHealthCallback(({ status, detail }) => {
+  if (status === WebmHealthStatus.Ended) showEnded()
 })
 
-player.gain = 1.0
-player.muted = false
+player.play(broadcastKey) // z32 or hex, as the broadcaster printed it
+player.muted = true
 
-if (player.playbackState === WebmPlaybackState.Playing) {
-  const { videoWidth, videoHeight, audioUnderruns } = player.getMetrics()
-}
+const { videoWidth, videoHeight, currentTimeSeconds } = player.getMetrics()
 
-player.setEndOfStream()
 player.stop()
 ```
 
-`createWebmPlayer()` returns an independent instance with its own stream buffer;
-call it once per stream.
+```tsx
+<WebmPlayerView player={player} scaleMode="contain" style={{ flex: 1 }} />
+```
 
-### Feeder contract
-
-- **Header first.** A stream must begin with its complete WebM header (EBML +
-  Segment + Tracks). Joining a broadcast mid-stream, prepend the stream's
-  header before the first cluster you forward — a cluster with no header fails
-  permanently on both platforms.
-- **Retry rejected chunks.** `feedData` returning `false` means the chunk was
-  dropped whole (never split). Re-send the same bytes before anything newer.
-- **Reconnect via `resetStream()`.** It discards buffered bytes and rebuilds
-  the parser; the next `feedData` must begin a new stream, header included.
-  This is also the recovery path after `setEndOfStream()`.
-- **A stalled feed is visible.** Health reports `Buffering` (detail "stream
-  stalled") when bytes stop arriving mid-broadcast, and `Playing` again on
-  recovery.
-- **Backpressure before the wall.** `getMetrics().ringFillRatio` (0.0–1.0) is
-  the early signal: back off as it climbs instead of waiting for `feedData` to
-  reject. `bytesDropped` counts what rejection has already cost.
+`createWebmPlayer()` returns an independent instance; `play()` on a playing
+instance stops it first.
 
 ## API
 
-| Member                                          | Notes                                                                                                           |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `start()` / `stop()` / `pause()` / `resume()`   | Returns `boolean`                                                                                               |
-| `feedData(data: ArrayBuffer)`                   | Muxed WebM. `false` = dropped whole; re-send (see contract)                                                     |
-| `setEndOfStream()` / `resetStream()`            | Drain and end / abandon stream, expect a fresh header                                                           |
-| `isRunning` / `isPaused` / `playbackState`      | Read-only. `Paused` with `isPaused === false` means the platform halted playback (background, call, focus loss) |
-| `muted` / `gain` (0–1) / `playbackRate` (0.5–2) | Read-write                                                                                                      |
-| `getMetrics()`                                  | Bytes fed, packets decoded, underruns, frame size, position                                                     |
+| Member                  | Notes                                                                                     |
+| ----------------------- | ----------------------------------------------------------------------------------------- |
+| `play(key)` / `stop()`  | Join at the live edge / tear down. A finished broadcast leaves the player stopped         |
+| `playbackState`         | `Idle`, `Buffering`, `Playing`, `Failed`. `Failed` survives `stop()`; `play()` clears it  |
+| `muted`                 | Read-write                                                                                |
+| `getMetrics()`          | Bytes received from the worklet, packets decoded, frames dropped, frame size, position    |
+| `setHealthCallback(cb)` | `Buffering`, `Playing`, `Ended`, `Failed` with a human-readable `detail`; fires on change |
+
+`Failed` means five consecutive rejoins produced no data, or the worklet
+bundle is missing from the app. Parser and player errors mid-stream are
+rejoins, not failures.
+
+## What the worklet sends
+
+Internal, but fixed, so both platforms de-frame the same bytes. `framed-stream`
+framing (4-byte little-endian length), payload byte 0 is the type:
+
+| type   | payload                                                                                                                                                                                          |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0x00` | muxed WebM bytes                                                                                                                                                                                 |
+| `0x01` | UTF-8 status: `joining`, `net <summary>` (every 5 s until a peer connects; logged, not a health event), `connected <remote address>`, `lag <detail>`, `reconfigured`, `ended`, `error <message>` |
+
+The muxed stream begins at the first video keyframe after the join, so
+nothing undecodable reaches the player. `lag` means the reader fell more than
+10 s behind the log (usually the player not keeping up) and carries what the
+watchdog measured; `reconfigured` means
+the broadcaster started a new session, whose stream parameters may differ.
+Native rejoins on both. An IPC that ends without `ended` is treated the
+same way, with backoff. `ended` also comes straight after the join when the
+log's last session has already ended, or has not grown for five minutes
+(vcr-core's `info()` liveness), so a finished broadcast stops the player
+instead of waiting at an edge nothing reaches.
 
 ## Development
 
 ```bash
 npm install
 npm run codegen        # nitrogen: TypeScript spec -> native interfaces
+npm run bundle:worklet # bare-pack worklet/feeder.js -> worklet/dist/feeder.bundle
+npm run test:worklet   # remux a recorded core under Bare and check the output
 npm run test:native    # sanitizer suites (address / thread / undefined)
 npm run test:fuzz      # demuxer fuzzing
 npm run lint:size      # file size budgets
 npm run lint:pack      # published tarball must be self-contained
+sh scripts/dev-broadcast.sh   # broadcast the 60 s fixture; prints a key for the example
 ```
 
 The TypeScript spec in `src/specs/` is the parity contract: nitrogen fails the
-build if either platform drops a member.
+build if either platform drops a member. `worklet/dist/` is generated and
+git-ignored; `npm pack` rebuilds it.
 
-See [`docs/AUDIT.md`](docs/AUDIT.md) for the production-readiness audit,
-including what is verified and what still needs device validation.
+See [`example/README.md`](example/README.md) for the device loop and
+[`docs/DEVICE_VALIDATION.md`](docs/DEVICE_VALIDATION.md) for what has been
+verified on hardware.
 
 ## License
 

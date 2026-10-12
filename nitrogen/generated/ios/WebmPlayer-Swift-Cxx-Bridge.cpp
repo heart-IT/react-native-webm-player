@@ -54,13 +54,5 @@ namespace margelo::nitro::webmplayer::bridge::swift {
       swiftClosure.call(event);
     };
   }
-  
-  // pragma MARK: std::function<void(WebmAudioRoute /* route */)>
-  Func_void_WebmAudioRoute create_Func_void_WebmAudioRoute(void* NON_NULL swiftClosureWrapper) noexcept {
-    auto swiftClosure = WebmPlayer::Func_void_WebmAudioRoute::fromUnsafe(swiftClosureWrapper);
-    return [swiftClosure = std::move(swiftClosure)](WebmAudioRoute route) mutable -> void {
-      swiftClosure.call(static_cast<int>(route));
-    };
-  }
 
 } // namespace margelo::nitro::webmplayer::bridge::swift

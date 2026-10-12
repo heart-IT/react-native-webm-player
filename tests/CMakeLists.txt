@@ -58,27 +58,12 @@ target_link_libraries(test_stream_buffer PRIVATE Threads::Threads)
 
 # ---- Audit proof tests ----
 # These assert the behaviour the system is supposed to have, so they fail
-# against unfixed code. Verdicts recorded in docs/AUDIT.md.
+# against unfixed code.
 add_executable(test_audit_proof
     test_audit_proof.cpp
     ${CPP_ROOT}/common/WebMStreamBuffer.cpp
 )
 target_link_libraries(test_audit_proof PRIVATE Threads::Threads)
-
-# Separate binary: ASan aborts on first error, which would mask later tests.
-add_executable(test_ring_lifetime
-    test_ring_lifetime.cpp
-    ${CPP_ROOT}/common/WebMStreamBuffer.cpp
-)
-target_link_libraries(test_ring_lifetime PRIVATE Threads::Threads)
-
-# Handle-lifetime registry backing the JNI boundary (finding P0-3).
-add_executable(test_ring_registry
-    test_ring_registry.cpp
-    ${CPP_ROOT}/common/RingRegistry.cpp
-    ${CPP_ROOT}/common/WebMStreamBuffer.cpp
-)
-target_link_libraries(test_ring_registry PRIVATE Threads::Threads)
 
 # ---- Demuxer fuzzing (the untrusted-input boundary) ----
 # WebM bytes arrive from remote peers, so cpp/demux/ is the primary attack
@@ -99,7 +84,7 @@ if(FUZZ)
     target_compile_definitions(fuzz_demuxer PRIVATE FUZZING_BUILD_MODE_INSTRUMENTATION)
 endif()
 
-# ---- Hostile-input demux tests (R3-20 UB clamp, R3-5 oversized cluster) ----
+# ---- Hostile-input demux tests (hostile metadata, oversized cluster, truncation) ----
 add_executable(test_demux_hostile
     test_demux_hostile.cpp
     ${CPP_ROOT}/demux/WebmDemuxer.cpp

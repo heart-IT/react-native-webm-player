@@ -1,13 +1,11 @@
 // parseBlocks() — iterates clusters/blocks from the current position, emits
-// AudioPacket + VideoPacket entries into the result, dedupes duplicate blocks
-// against the last-emitted PTS, and schedules window compaction.
+// AudioPacket + VideoPacket entries into the result, skips a block already
+// emitted before a need-more-data retry, and schedules window compaction.
 //
 // Member of WebmDemuxer; class definition lives in WebmDemuxer.h.
 #include "WebmDemuxer.h"
 #include "DemuxLimits.h"
 #include "WebmReaders.h"
-
-#include "common/MediaTime.h"
 
 #include "mkvparser/mkvparser.h"
 
@@ -69,16 +67,18 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
     // error, not a droppable block. Found by fuzzing a mutated laced stream.
     if (cluster_ && !cluster_->EOS() && !segment_->GetInfo()) {
         parseError_ = "stream has clusters but no SegmentInfo";
-        ++parseErrorCount_;
-        ++cumulativeParseErrorCount_;
-        state_.store(ParseState::Error, std::memory_order_release);
-        errorEntryUs_ = nowUs();
+        state_ = ParseState::Error;
         result.error = "permanent parse failure: " + parseError_;
         return;
     }
 
     long long latestConsumedPos = compactOffset_;
-    int consecutiveBlockErrors = 0;
+    // A feed that ends mid-cluster (every feed of a live stream) leaves
+    // through one of the two "need more data" exits below. They must still
+    // reach the compaction schedule at the end: returning from them left the
+    // window untrimmed, so it filled at kMaxBufferSize after ~80 s of
+    // broadcast and every later feed was dropped (iPhone 11, 2026-10-12).
+    bool needMoreData = false;
 
     while (cluster_ && !cluster_->EOS()) {
         // Permanent-wedge guard: compaction never trims past the current
@@ -95,10 +95,7 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 parseError_ = "cluster exceeds parse window (" +
                               std::to_string(declaredSize) + " > " +
                               std::to_string(StreamReader::kMaxBufferSize) + " bytes)";
-                ++parseErrorCount_;
-                ++cumulativeParseErrorCount_;
-                state_.store(ParseState::Error, std::memory_order_release);
-                errorEntryUs_ = nowUs();
+                state_ = ParseState::Error;
                 result.error = "permanent parse failure: " + parseError_;
                 return;
             }
@@ -115,7 +112,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
         while (blockEntry_ && !blockEntry_->EOS()) {
             const mkvparser::Block* block = blockEntry_->GetBlock();
             if (!block) {
-                ++consecutiveBlockErrors;
                 // Advance to next block entry
                 long status = cluster_->GetNext(blockEntry_, blockEntry_);
                 if (status < 0) {
@@ -123,7 +119,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 }
                 continue;
             }
-            consecutiveBlockErrors = 0;
 
             long long trackNum = block->GetTrackNumber();
             int frameCount = block->GetFrameCount();
@@ -142,25 +137,14 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                     break;
                 }
             }
-            if (payloadPending) return;  // retry this block on the next feed
+            if (payloadPending) {  // retry this block on the next feed
+                needMoreData = true;
+                break;
+            }
 
             // Timestamp: cluster time + block time offset, in nanoseconds
             long long timeNs = block->GetTime(cluster_);
             int64_t ptsUs = timeNs / 1000;
-
-            // Detect large backward PTS jump (broadcaster restart within same segment).
-            // Reset dedup state so early frames after restart are not silently dropped.
-            if (trackNum == trackInfo_.audioTrackNum &&
-                lastEmittedAudioPtsUs_ >= 0 && ptsUs >= 0 &&
-                lastEmittedAudioPtsUs_ - ptsUs > kMaxBackwardJumpUs) {
-                lastEmittedAudioPtsUs_ = -1;
-                lastEmittedVideoPtsUs_ = -1;
-            } else if (trackNum == trackInfo_.videoTrackNum &&
-                       lastEmittedVideoPtsUs_ >= 0 && ptsUs >= 0 &&
-                       lastEmittedVideoPtsUs_ - ptsUs > kMaxBackwardJumpUs) {
-                lastEmittedAudioPtsUs_ = -1;
-                lastEmittedVideoPtsUs_ = -1;
-            }
 
             for (int f = 0; f < frameCount; ++f) {
                 const mkvparser::Block::Frame& frame = block->GetFrame(f);
@@ -168,58 +152,32 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
                 // Zero-copy: a direct pointer into the linear window. There is
                 // no fallback read path — StreamReader::Read applies the same
                 // bounds as dataAt, so a range dataAt rejects cannot be read at
-                // all. Count the loss and skip: drop-and-continue policy.
+                // all. Skip: drop-and-continue policy.
                 const uint8_t* frameData = readerDataAt(frame.pos, frame.len);
-                if (!frameData) {
-                    ++parseErrorCount_;
-                    ++cumulativeParseErrorCount_;
-                    ++consecutiveBlockErrors;
-                    break;
-                }
+                if (!frameData) break;
 
                 if (trackNum == trackInfo_.audioTrackNum) {
-                    // Dedup is per block (Hypercore delivery retries), decided at
-                    // the first frame only: in a laced block every frame carries
-                    // the block's one PTS, so a per-frame comparison against the
-                    // just-updated last-emitted PTS silently dropped frames 2..n.
+                    // When GetNext() below needs more bytes, the next call
+                    // re-visits the block just emitted. Dedup is per block,
+                    // decided at the first frame only: in a laced block every
+                    // frame carries the block's one PTS, so a per-frame
+                    // comparison silently dropped frames 2..n.
                     if (f == 0 && ptsUs == lastEmittedAudioPtsUs_) break;
-                    if (result.audioPackets.size() >= kMaxAudioPacketsPerFeed) {
-                        // Cap reached: the remaining blocks in this feed are
-                        // silently lost (we cannot hold them and the iterator
-                        // advances). Make the drop observable via metrics.
-                        ++partialDropCount_;
-                        ++packetCapDrops_;
-                        continue;
-                    }
                     AudioPacket pkt;
                     pkt.data = frameData;
                     pkt.size = static_cast<size_t>(frame.len);
                     pkt.ptsUs = ptsUs;
-                    pkt.durationUs = kDefaultAudioDurationUs;
                     result.audioPackets.push_back(pkt);
-                    ++audioPacketsEmitted_;
                     lastEmittedAudioPtsUs_ = ptsUs;
                 } else if (trackNum == trackInfo_.videoTrackNum) {
-                    auto frameSize = static_cast<size_t>(frame.len);
-                    if (frameSize > kMaxVideoFrameSize) {
-                        ++partialDropCount_;
-                        ++oversizedFrameDrops_;
-                        continue;  // Reject oversized frames
-                    }
                     // Same block-level dedup contract as the audio path above.
                     if (f == 0 && ptsUs == lastEmittedVideoPtsUs_) break;
-                    if (result.videoPackets.size() >= kMaxVideoPacketsPerFeed) {
-                        ++partialDropCount_;
-                        ++packetCapDrops_;
-                        continue;
-                    }
                     VideoPacket pkt;
                     pkt.data = frameData;
-                    pkt.size = frameSize;
+                    pkt.size = static_cast<size_t>(frame.len);
                     pkt.ptsUs = ptsUs;
                     pkt.isKeyFrame = block->IsKey();
                     result.videoPackets.push_back(pkt);
-                    ++videoPacketsEmitted_;
                     lastEmittedVideoPtsUs_ = ptsUs;
                 }
 
@@ -233,12 +191,13 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
             // Advance to next block entry
             const mkvparser::BlockEntry* nextEntry = nullptr;
             long status = cluster_->GetNext(blockEntry_, nextEntry);
-            if (status < 0) {
-                // Need more data for next block
-                return;
+            if (status < 0) {  // the next block header is still in flight
+                needMoreData = true;
+                break;
             }
             blockEntry_ = nextEntry;
         }
+        if (needMoreData) break;
 
         // Move to the next cluster. parseTracks() was the only place that
         // initially ran Segment::LoadCluster(), so in Streaming state
@@ -275,12 +234,6 @@ void WebmDemuxer::parseBlocks(DemuxResult& result) {
 
         cluster_ = nextCluster;
         blockEntry_ = nullptr;
-    }
-
-    // Report if blocks are consistently unparseable despite data being available
-    if (consecutiveBlockErrors >= kMaxConsecutiveBlockErrors && result.audioPackets.empty() && result.videoPackets.empty()) {
-        result.error = "block parse stall: consecutive unparseable blocks";
-        ++blockStallCount_;
     }
 
     // Schedule compaction for the start of the next feedData() call.

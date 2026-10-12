@@ -23,8 +23,6 @@ public extension WebmPlaybackState {
         self = .buffering
       case "Playing":
         self = .playing
-      case "Paused":
-        self = .paused
       case "Failed":
         self = .failed
       default:
@@ -43,8 +41,6 @@ public extension WebmPlaybackState {
         return "Buffering"
       case .playing:
         return "Playing"
-      case .paused:
-        return "Paused"
       case .failed:
         return "Failed"
     }

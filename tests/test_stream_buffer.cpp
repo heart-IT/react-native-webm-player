@@ -1,13 +1,9 @@
 // WebMStreamBuffer test suite.
 //
-// This is the one component both platforms sit on: the iOS demuxer and the
-// Android ExoPlayer DataSource both read the bytes JS wrote through it. It
-// shipped in the predecessor with zero test coverage, so every behaviour
-// asserted here was read off the implementation rather than assumed.
-//
-// Run under each sanitizer:
-//   cmake -B build-asan -S tests -DSANITIZER=address && cmake --build build-asan
-//   ./build-asan/test_stream_buffer
+// The iOS demux thread reads the bytes the worklet source's reader thread
+// wrote through it. It shipped in the predecessor with zero test coverage, so
+// every behaviour asserted here was read off the implementation rather than
+// assumed. package.json test:native runs it under each sanitizer.
 
 #include "WebMStreamBuffer.h"
 
@@ -32,17 +28,9 @@ struct SilenceLogs {
 };
 SilenceLogs g_silence_logs;
 
-// MIN_CAPACITY inside the buffer is 8 MiB and the constructor rounds up to a
-// power of two, so this is the smallest instance that can actually exist.
 constexpr size_t kCapacity = 8u << 20;
 
-WebMStreamBuffer::Config testConfig() {
-  WebMStreamBuffer::Config cfg;
-  return cfg;
-}
-
-// Ask for 1 KiB and get the floor.
-WebMStreamBuffer makeBuffer() { return WebMStreamBuffer(1024, testConfig()); }
+WebMStreamBuffer makeBuffer() { return WebMStreamBuffer(kCapacity); }
 
 std::vector<uint8_t> pattern(size_t n, size_t startIndex = 0) {
   std::vector<uint8_t> v(n);
@@ -73,18 +61,14 @@ size_t fill(WebMStreamBuffer& buf, size_t bytes) {
 
 // ---------------------------------------------------------------- construction
 
-TEST(capacity_is_floored_to_min_and_rounded_to_power_of_two) {
-  auto buf = makeBuffer();
-  ASSERT_EQ(buf.capacity(), kCapacity);
-  ASSERT_EQ(buf.capacity() & (buf.capacity() - 1), size_t(0));
+TEST(capacity_is_rounded_up_to_a_power_of_two) {
+  WebMStreamBuffer buf(1000);
+  ASSERT_EQ(buf.capacity(), size_t(1024));
 }
 
-TEST(fresh_buffer_is_empty_and_not_terminal) {
+TEST(fresh_buffer_is_empty) {
   auto buf = makeBuffer();
   ASSERT_EQ(buf.sizeBytes(), uint64_t(0));
-  ASSERT_FALSE(buf.isEndOfStream());
-  ASSERT_FALSE(buf.isShutdown());
-  ASSERT_FALSE(buf.isDestroyed());
 }
 
 // ----------------------------------------------------------------- write/read
@@ -181,18 +165,14 @@ TEST(ring_wraps_past_capacity_preserving_the_byte_stream) {
 
 // -------------------------------------------------------------------- overflow
 
-TEST(write_at_capacity_drops_the_whole_chunk_and_counts_it) {
+TEST(write_at_capacity_drops_the_whole_chunk) {
   auto buf = makeBuffer();
   ASSERT_EQ(fill(buf, kCapacity), kCapacity);
   ASSERT_EQ(buf.sizeBytes(), uint64_t(kCapacity));
 
   auto extra = pattern(1024);
   ASSERT_EQ(put(buf, extra), size_t(0));  // full chunk refused
-
-  auto stats = buf.getStats();
-  ASSERT_GT(stats.bufferOverflows, uint64_t(0));
-  ASSERT_GE(stats.droppedBytes, uint64_t(1024));
-  ASSERT_GT(stats.consumerLagEvents, uint64_t(0));
+  ASSERT_EQ(buf.sizeBytes(), uint64_t(kCapacity));
 }
 
 // Writes are all-or-nothing. An earlier version of this test asserted the
@@ -206,10 +186,6 @@ TEST(write_with_partial_space_rejects_the_chunk_whole) {
   auto src = pattern(100);
   ASSERT_EQ(put(buf, src), size_t(0));  // 10 bytes free, 100 requested
   ASSERT_EQ(buf.sizeBytes(), uint64_t(kCapacity - 10));  // nothing accepted
-
-  auto stats = buf.getStats();
-  ASSERT_GE(stats.droppedBytes, uint64_t(100));  // the whole chunk is counted
-  ASSERT_GT(stats.bufferOverflows, uint64_t(0));
 }
 
 // --------------------------------------------------------- end of stream / shutdown
@@ -217,7 +193,6 @@ TEST(write_with_partial_space_rejects_the_chunk_whole) {
 TEST(end_of_stream_makes_an_empty_read_return_minus_one) {
   auto buf = makeBuffer();
   buf.setEndOfStream(true);
-  ASSERT_TRUE(buf.isEndOfStream());
 
   uint8_t dst[16] = {};
   ASSERT_EQ(buf.read(dst, sizeof(dst), 1000), -1);
@@ -236,8 +211,6 @@ TEST(end_of_stream_still_drains_buffered_bytes_first) {
 TEST(shutdown_makes_read_return_minus_one) {
   auto buf = makeBuffer();
   buf.shutdown();
-  ASSERT_TRUE(buf.isShutdown());
-  ASSERT_TRUE(buf.isEndOfStream());
 
   uint8_t dst[16] = {};
   ASSERT_EQ(buf.read(dst, sizeof(dst), 50), -1);
@@ -263,8 +236,8 @@ TEST(shutdown_is_idempotent) {
   auto buf = makeBuffer();
   buf.shutdown();
   buf.shutdown();
-  ASSERT_TRUE(buf.isShutdown());
-  ASSERT_TRUE(buf.getStats().shutdown);
+  uint8_t dst[16] = {};
+  ASSERT_EQ(buf.read(dst, sizeof(dst), 50), -1);
 }
 
 TEST(shutdown_promptly_unblocks_a_blocked_reader) {
@@ -295,7 +268,7 @@ TEST(shutdown_promptly_unblocks_a_blocked_reader) {
 
 // ----------------------------------------------------------------------- clear
 
-TEST(clear_drops_contents_and_resets_stats) {
+TEST(clear_drops_contents_and_end_of_stream) {
   auto buf = makeBuffer();
   fill(buf, 256 * 1024);
   buf.setEndOfStream(true);
@@ -303,12 +276,8 @@ TEST(clear_drops_contents_and_resets_stats) {
   buf.clear();
 
   ASSERT_EQ(buf.sizeBytes(), uint64_t(0));
-  ASSERT_FALSE(buf.isEndOfStream());
-  auto stats = buf.getStats();
-  ASSERT_EQ(stats.totalBytesWritten, uint64_t(0));
-  ASSERT_EQ(stats.totalBytesRead, uint64_t(0));
-  ASSERT_EQ(stats.droppedBytes, uint64_t(0));
-  ASSERT_EQ(stats.bufferOverflows, uint64_t(0));
+  uint8_t dst[16] = {};
+  ASSERT_EQ(buf.read(dst, sizeof(dst), 1), 0);  // empty, not ended
 }
 
 TEST(clear_is_ignored_once_shutdown) {
@@ -319,7 +288,6 @@ TEST(clear_is_ignored_once_shutdown) {
   buf.clear();
 
   ASSERT_EQ(buf.sizeBytes(), uint64_t(128));
-  ASSERT_TRUE(buf.isShutdown());
 }
 
 TEST(clear_racing_an_in_flight_read_never_wedges_the_ring) {
@@ -369,38 +337,6 @@ TEST(clear_racing_an_in_flight_read_never_wedges_the_ring) {
     }
     ASSERT_EQ(drained, size_t(1000));
   }
-}
-
-// ----------------------------------------------------------------------- stats
-
-TEST(stats_report_capacity_and_terminal_flags) {
-  auto buf = makeBuffer();
-  auto stats = buf.getStats();
-  ASSERT_EQ(stats.capacityBytes, kCapacity);
-  ASSERT_FALSE(stats.endOfStream);
-  ASSERT_FALSE(stats.shutdown);
-}
-
-TEST(stats_account_for_every_byte_written_and_read) {
-  auto buf = makeBuffer();
-  const size_t kTotal = 512 * 1024;
-  ASSERT_EQ(fill(buf, kTotal), kTotal);
-
-  std::vector<uint8_t> dst(64 * 1024);
-  size_t drained = 0;
-  while (drained < kTotal) {
-    int n = buf.read(dst.data(), dst.size(), 50);
-    ASSERT_GT(n, 0);
-    drained += static_cast<size_t>(n);
-  }
-
-  // Producer/consumer tallies are flushed to the shared counters at most every
-  // 50ms, so a getStats() immediately after the last read can still be behind.
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
-  auto stats = buf.getStats();
-  ASSERT_EQ(stats.totalBytesWritten, uint64_t(kTotal));
-  ASSERT_EQ(stats.totalBytesRead, uint64_t(kTotal));
-  ASSERT_EQ(stats.droppedBytes, uint64_t(0));
 }
 
 // ------------------------------------------------------------------------ SPSC

@@ -42,6 +42,14 @@ jobs:
       - name: File size discipline
         run: npm run lint:size
 
+      # The worklet is what joins the broadcast; it must pack for every mobile
+      # target and remux a recorded core to WebM under Bare.
+      - name: Worklet bundle
+        run: npm run bundle:worklet
+
+      - name: Worklet remux test (Bare)
+        run: npm run test:worklet
+
       # Regenerating must be a no-op. Catches a spec edited without re-running
       # nitrogen, which would otherwise fail natively on a contributor's machine.
       - name: Codegen is committed and current

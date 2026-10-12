@@ -1,7 +1,5 @@
 #import "WebmAudioDecoder.h"
 
-#import <AudioToolbox/AudioToolbox.h>
-
 #include <atomic>
 #include <deque>
 #include <mutex>
@@ -19,18 +17,12 @@ constexpr int kMaxOpusFrames = 5760;
 // shallow enough that a stalled renderer does not accumulate unbounded latency.
 constexpr size_t kMaxPendingBuffers = 100;
 
-// OpusHead permits up to 255 channels, and pending-buffer size scales with the
-// count — a hostile 255-channel header could pin ~590 MB in the pending queue
-// (100 × 120 ms × 255 ch × 4 B). 8 covers 7.1, the widest real layout.
-constexpr int kMaxChannels = 8;
-
 // Per-packet logs sample every 512th occurrence — these paths run at packet
 // rate (~50/s) when stuck.
 constexpr uint64_t kDropLogMask = 511;
 
-CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
-                                        int sampleRate, int channels,
-                                        int64_t ptsUs) {
+// One per configuration, not per packet: the track fixes the format.
+CMAudioFormatDescriptionRef CreateLPCMFormat(int sampleRate, int channels) {
   AudioStreamBasicDescription asbd = {0};
   asbd.mSampleRate = sampleRate;
   asbd.mFormatID = kAudioFormatLinearPCM;
@@ -46,7 +38,13 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
                                      nullptr, nullptr, &fmt) != noErr) {
     return nullptr;
   }
+  return fmt;
+}
 
+CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
+                                        CMAudioFormatDescriptionRef fmt,
+                                        int sampleRate, int channels,
+                                        int64_t ptsUs) {
   size_t dataSize = sizeof(float) * static_cast<size_t>(frameCount) *
                     static_cast<size_t>(channels);
   CMBlockBufferRef block = nullptr;
@@ -54,13 +52,11 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
                                          kCFAllocatorDefault, nullptr, 0, dataSize,
                                          kCMBlockBufferAssureMemoryNowFlag,
                                          &block) != noErr) {
-    CFRelease(fmt);
     return nullptr;
   }
   if (CMBlockBufferReplaceDataBytes(pcm, block, 0, dataSize) != noErr) {
     // Building the sample anyway would enqueue uninitialized bytes as audio.
     CFRelease(block);
-    CFRelease(fmt);
     return nullptr;
   }
 
@@ -77,7 +73,6 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
                                     nullptr, fmt, frameCount, 1, &timing, 0,
                                     nullptr, &sb);
   CFRelease(block);
-  CFRelease(fmt);
   return s == noErr ? sb : nullptr;
 }
 
@@ -93,18 +88,15 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   // _feedQueue, so it needs no lock.
   BOOL _requesting;
   media::OpusDecoderAdapter _opus;
+  CMAudioFormatDescriptionRef _format;
   int _sampleRate;
   int _channels;
   std::vector<float> _pcm;
-
-  // Presentation time the next packet is expected at, used to spot a hole.
-  int64_t _expectedPtsUs;
 
   // Atomics only where a counter crosses threads (written on _feedQueue or the
   // demux thread, read by the JS-thread metrics getters). The log-sampling
   // counters below them live and die on the demux thread.
   std::atomic<uint64_t> _packetsDecoded;
-  std::atomic<uint64_t> _framesRecovered;
   std::atomic<int64_t> _lastPresentedPtsUs;
   uint64_t _queueOverflowDrops;
   uint64_t _decodeErrors;
@@ -114,14 +106,13 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 - (instancetype)init {
   self = [super init];
   if (!self) return nil;
+  _format = nullptr;
   _sampleRate = 0;
   _channels = 0;
-  _expectedPtsUs = -1;
   _packetsDecoded = 0;
   _queueOverflowDrops = 0;
   _decodeErrors = 0;
   _configFailures = 0;
-  _framesRecovered = 0;
   _lastPresentedPtsUs = -1;
   _pcm.resize(static_cast<size_t>(kMaxOpusFrames) * 2);
   _feedQueue = dispatch_queue_create("webmplayer.audio.feed", DISPATCH_QUEUE_SERIAL);
@@ -131,6 +122,7 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
 - (void)dealloc {
   if (_requesting) [_renderer stopRequestingMediaData];
   [self drainPending];
+  if (_format) CFRelease(_format);
 }
 
 - (void)setRenderer:(AVSampleBufferAudioRenderer*)renderer {
@@ -196,15 +188,11 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   _pending.clear();
 }
 
-- (BOOL)configureWithSampleRate:(int)sampleRate
-                       channels:(int)channels
-                       opusHead:(const uint8_t*)opusHead
-                   opusHeadSize:(size_t)opusHeadSize {
-  if (sampleRate <= 0 || channels <= 0 || channels > kMaxChannels) return NO;
+- (BOOL)configureWithSampleRate:(int)sampleRate channels:(int)channels {
   if (_opus.isValid() && sampleRate == _sampleRate && channels == _channels) {
     return YES;
   }
-  if (!_opus.initialize(sampleRate, channels, opusHead, opusHeadSize)) {
+  if (!_opus.initialize(sampleRate, channels)) {
     // Retried every packet batch while the failure persists; sample the log.
     uint64_t fails = ++_configFailures;
     if ((fails & kDropLogMask) == 1) {
@@ -213,10 +201,13 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
     }
     return NO;
   }
+  CMAudioFormatDescriptionRef format = CreateLPCMFormat(sampleRate, channels);
+  if (!format) return NO;
+  if (_format) CFRelease(_format);
+  _format = format;
   _sampleRate = sampleRate;
   _channels = channels;
   _pcm.resize(static_cast<size_t>(kMaxOpusFrames) * static_cast<size_t>(channels));
-  _expectedPtsUs = -1;
   return YES;
 }
 
@@ -225,15 +216,18 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   // OPUS_RESET_STATE, plus force a reconfigure so the next stream gets a decoder
   // built for its own track parameters rather than the previous stream's.
   _opus.reset();
+  if (_format) {
+    CFRelease(_format);
+    _format = nullptr;
+  }
   _sampleRate = 0;
   _channels = 0;
-  _expectedPtsUs = -1;
 }
 
 - (BOOL)enqueue:(int)frames atPts:(int64_t)ptsUs {
-  if (frames <= 0) return NO;
-  CMSampleBufferRef sb =
-      BuildLPCMSampleBuffer(_pcm.data(), frames, _sampleRate, _channels, ptsUs);
+  if (frames <= 0 || !_format) return NO;
+  CMSampleBufferRef sb = BuildLPCMSampleBuffer(_pcm.data(), frames, _format,
+                                               _sampleRate, _channels, ptsUs);
   if (!sb) return NO;
 
   {
@@ -266,29 +260,8 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
   return YES;
 }
 
-- (BOOL)submitPacket:(const uint8_t*)data
-              length:(size_t)length
-               ptsUs:(int64_t)ptsUs
-          durationUs:(int64_t)durationUs {
+- (BOOL)submitPacket:(const uint8_t*)data length:(size_t)length ptsUs:(int64_t)ptsUs {
   if (!data || length == 0 || !_opus.isValid()) return NO;
-
-  // Exactly one frame missing ahead of this packet: Opus embedded a redundant
-  // copy of it in this packet, so recover it before decoding the packet itself.
-  // Larger holes are discontinuities (seek, long stall), not loss — concealing
-  // those would invent audio rather than restore it.
-  if (_expectedPtsUs >= 0 && durationUs > 0) {
-    int64_t gap = ptsUs - _expectedPtsUs;
-    if (gap >= durationUs && gap < durationUs * 2) {
-      int recovered = _opus.decodeFEC(data, length, _pcm.data(), kMaxOpusFrames);
-      if (recovered <= 0) {
-        recovered = _opus.decodePLC(_pcm.data(), kMaxOpusFrames);
-      }
-      if (recovered > 0) {
-        [self enqueue:recovered atPts:_expectedPtsUs];
-        _framesRecovered.fetch_add(1);
-      }
-    }
-  }
 
   int frames = _opus.decode(data, length, _pcm.data(), kMaxOpusFrames);
   if (frames <= 0) {
@@ -301,21 +274,16 @@ CMSampleBufferRef BuildLPCMSampleBuffer(const float* pcm, int frameCount,
     return NO;
   }
 
-  BOOL accepted = [self enqueue:frames atPts:ptsUs];
+  return [self enqueue:frames atPts:ptsUs];
+}
 
-  _expectedPtsUs =
-      ptsUs + (durationUs > 0
-                   ? durationUs
-                   : static_cast<int64_t>(frames) * 1000000 / _sampleRate);
-  return accepted;
+- (size_t)pendingBuffers {
+  std::lock_guard<std::mutex> lock(_pendingMutex);
+  return _pending.size();
 }
 
 - (uint64_t)packetsDecoded {
   return _packetsDecoded.load();
-}
-
-- (uint64_t)framesRecovered {
-  return _framesRecovered.load();
 }
 
 - (int64_t)lastPresentedPtsUs {

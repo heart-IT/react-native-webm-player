@@ -1,263 +1,181 @@
-# Device validation (P6)
+# Device validation
 
-The example app (`example/App.tsx`) auto-plays the bundled 60-second 512x288
-VP9 + stereo Opus clip on launch and shows live metrics, so a run needs no
-interaction. Buttons are there for manual checks — including "1s 5.1", the only
-path that exercises multistream Opus decode; tap it on every device run.
+The example app joins a broadcast by key. Broadcast the 60 s VP9 + stereo Opus
+fixture from the Mac with `sh scripts/dev-broadcast.sh`, paste the printed key
+into the app, tap Play. For unattended runs put the key in
+`example/src/devKey.ts` and the app plays it on launch. See `example/README.md`.
 
-```bash
-npm install
-cd example && npm run ios      # or: npm run android
-```
+## Reading logs
 
-## Physical device: validated
+- **iPhone, no root needed.** Launch from the Mac with the stderr mirror on:
 
-**iPhone 11 (A13), iOS 26.5.2, Release build.** After the fixes below, video
-renders, audio is audible, and the packet counts and media position all read
-correctly — matching Android on the same fixture.
+  ```bash
+  xcrun devicectl device process launch --console \
+    --environment-variables '{"WEBM_LOG_STDERR":"1"}' --device <udid> com.webmplayerexample
+  ```
 
-Two assumptions from the simulator round turned out to be **wrong**, and only the
-device disproved them:
+  Every `MEDIA_LOG` line reaches that console with a millisecond timestamp:
+  one line per health transition, the VP9 session, the first presented frame
+  and every 300th after it, and the display layer's own failure reason.
 
-- _"The A13 has no VP9 hardware decoder."_ It does. VideoToolbox decoded all 24
-  frames. The black screen was ours: decoded frames were being discarded after
-  decode, at the display layer.
-- _"Audio is barely decoding."_ Audio was playing correctly the whole time; the
-  on-screen count was a stale mirror that stopped updating once feeding ended.
+- **Simulator.** `/usr/bin/log stream --style compact --predicate 'process == "WebmPlayerExample"'`
+  on the Mac. The worklet's console (vcr-core's "seeking to N") appears under
+  the `(BareKit)` prefix. `log` is aliased to `git log` in this shell.
+- **Android.** `adb logcat -s WebmPlayer ReactNativeJS`.
 
-## Sustained playback (60s)
+## Verified 2026-10-09, key-in flow, React Native 0.87.1 / Nitro 0.37.1
 
-A second fixture — 60s, 512x288 VP9 + stereo Opus, with a burnt-in timecode and
-a beep on every second boundary — covers sustained arrival rather than a
-one-shot decode. Confirmed on the iPhone 11: video plays, beeps are audible.
+**iPhone 11 (A13), iOS 26.6.1, Release, broadcast from the Mac over
+Hyperswarm, run unattended from the Mac.** Timeline from the console, in
+seconds after the first log line:
 
-**Result: sync holds for the full 60s of content.** Drift stays near zero for the
-whole clip on the device.
+| t    | event                                                                                                                         |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 0.4  | worklet started, `joining`                                                                                                    |
+| 13.7 | swarm connection                                                                                                              |
+| 21.7 | first audio frame, VP9 session 512x288, first video frame presented, within 20 ms of each other                               |
+| 25.1 | 82 frames presented, 0 dropped                                                                                                |
+| ~24  | Settings brought to the front: app in background                                                                              |
+| 26.4 | VT session invalidated by iOS; rebuilt at the next keyframe at 28.2 (48 frames dropped in between, the only drops of the run) |
+| 35.1 | display layer failed in the background; `requiresFlushToResumeDecoding` fired, layer flushed                                  |
+| ~45  | app back in the foreground                                                                                                    |
+| 50.2 | 600 frames presented                                                                                                          |
+| 55.3 | 714 presented, 48 dropped, 1,725 audio packets                                                                                |
+| 57.6 | broadcast ended, player stopped                                                                                               |
 
-Getting a trustworthy number out of this took two harness fixes, and neither bug
-was in the player. Both are worth knowing about, because both produce a large
-negative drift that looks exactly like a failing player:
+This is the scenario of the old frozen-picture bug, observed with logs: the
+layer fails while the app is in the background, the documented notification
+arrives, and after the flush frames keep reaching the layer through the
+return. Not verified: pixels on the glass after the return, which needs eyes
+on the phone. An earlier run of the same session, before the worklet started
+the mux at a keyframe, showed 38 frames dropped at the join: those were the
+P-frames between the join and the first keyframe, which no decoder can use.
+Drops reported by `videoFramesDropped` on iOS are frames submitted without a
+usable decode session, so after iOS revokes the session in the background
+they count up until the next keyframe.
 
-1. **Starved input.** The feeder computed a byte budget per timer tick, but
-   `setInterval` fires late under JS load and a per-tick budget never makes that
-   up. It delivered ~74% of real-time rate, so the player ran out of data and
-   drift grew to -8.4s over a minute. The feeder now derives its target from
-   elapsed time and self-corrects, which tracks 99.9% of real-time rate.
-2. **Measuring past the end of the clip.** Media time stops when the clip ends;
-   wall time does not. On a 60s clip left running to wall=100s, the reported
-   drift was -40s — which is not drift at all, just the 40s that elapsed after
-   playback finished. The measurement now clamps its reference to the clip
-   duration and marks the run `ended`.
+**Android, OnePlus 8 (API 33, arm64), debug.** Joined in 4 s, data 1 s later,
+played the full clip at 512x288 with audio and video counters climbing
+together and 0 frames dropped, then `ended` took the player to Idle. Run six
+times across the session; the two failures seen along the way were real
+defects, both fixed: a join that seeked to the start of the log when the
+length was not yet known, and an ExoPlayer container error latching `Failed`
+on a session that then played.
 
-The lesson for reading this metric: `drift` is only meaningful while content is
-still arriving _and_ still playing. Outside that window it measures the harness.
-Check `fed` against elapsed time, and check whether the clip has ended, before
-concluding anything about playback.
+**iOS simulator, iPhone 17 (iOS 26).** Same flow; audio plays, video is
+dropped for lack of a VP9 decoder, `ended` stops the engine. The simulator
+settled the bare-kit assumptions: sync `read` returns nil when nothing is
+ready and empty at end of stream, `readable` keeps firing after a nil read,
+and our own reader thread may call `read`.
 
-## What has been executed, and where
+### What the runs taught about joining
 
-Runs were done on the **iOS Simulator (iPhone 17, iOS 26.4)** and the
-**Android emulator (API 36)**. Neither substitutes for a physical device, but
-both executed real code — before this, nothing in the project had ever run.
+- Swarm discovery through the DHT took 4 to 12 s on fresh keys and up to 45 s
+  on a key whose topic carried stale announcements from killed broadcasters.
+  A restarted broadcaster is found on the DHT's schedule, not ours.
+- vcr-core's `seek(-1)` lands on the length known at that instant. The worklet
+  now waits for a connection and its length proof, then re-seeks until it is
+  within 50 fragments of the tail, before muxing a byte.
+- Lag is measured against the log's append rate over 5 s, not fragment
+  durations: a video-only fragment has none.
 
-### Android — fully working
+### What the iPhone run of 2026-10-09 said about the margin
 
-```
-fed 45863B · audio 51 (recovered 0, underruns 0) · video 24 (dropped 0)
-854x480 · t=1.01s
-health: 0 buffering → 1 ready → 2 end of stream
-```
+The foreground run before pacing (2 s margin, queues unpaced) connected
+through the router's public address and presented 300 video frames in the
+first 30 s of a 24 fps clip, with 513 frames and 513 audio packets dropped at
+the decoders' pending caps and two "stream stalled" reports, while bytes
+arrived at the clip's bitrate over the whole window. That is a bursty path:
+the data comes in bursts, each one overflows the decoded queues, and the gap
+after it drains them. The margin has to sit in the ring, where nothing is
+dropped, and has to be longer than the gaps. Pacing (`paceOn:` in
+WebmDemuxPump.mm) does the first; the live delay in WebmPlaybackPolicy.h is the
+second. The simulator reproduces the pattern with the recorder frozen for 3 s
+in every 8 (`kill -STOP`): at 1.5 s the pump counted 4 underruns and the
+engine 4 stalls in 50 s; at 4 s, none, with the extra 2.5 s visible as ring
+occupancy. 4 s is the working value; two Release builds (1.5 s and 4 s) are
+queued for the next unlock of the phone to confirm it on the real path. The
+worklet's lag threshold (10 s) stays above either.
 
-Every audio packet and every video frame decoded, nothing dropped, correct frame
-size, correct media position, and a decoded frame visibly on screen. The ring,
-demuxer, JNI bridge, ExoPlayer DataSource, view and health path are all confirmed
-end to end.
+### What the iPhone run of 2026-10-12 said about the hangs
 
-### iOS — simulator run (superseded by the device run above)
+With the 4 s margin the phone played the full 24 fps with no underrun and no
+drop before the display layer, and the picture still hung for about half a
+second every few seconds. The layer's own counters (`AVVideoPerformanceMetrics`
+through `sampleBufferRenderer`, logged beside the pump summary) showed 302 of
+3865 frames dropped as late, and the lead times added to the decoder showed
+frames leaving VideoToolbox 0.5 s behind the clock while the pull path added
+nothing. The cause was the pump: it submitted every audio packet of a 64 KB
+chunk (about 2.5 s of media, paced on the renderer) before any video frame of
+that chunk, so each chunk's first frames reached the decoder after their time.
+Submission is now one pass in presentation order across both tracks. Same
+path, same clip, 2 minutes: 2331 frames displayed, 0 dropped, 0 late, decode
+lead steady at 1.0 s.
 
-```
-fed 45863B · audio 1 (recovered 0, underruns 0) · video 0 (dropped 24)
-854x480 · t=10.14s
-health: 0 buffering → 1 first audio frame → 2 end of stream
-```
+A finished broadcast joined after the fact used to leave the player buffering
+for good (simulator, 2026-10-10: connected, 0 bytes, no `ended`). The worklet
+now checks vcr-core's session liveness once the length is known and reports
+`ended` straight away.
 
-Confirmed working: HybridObject + view registration, `createWebmPlayer`,
-`feedData` (all 45863 bytes accepted), the ring, the demuxer (854x480 is read
-from the container), track parsing, health transitions, `setEndOfStream`, route
-reporting, and multichannel Opus decode.
+### What the iPhone run of 2026-10-12 said about the parse window
 
-Three things looked unresolved here; the device settled all three, and each
-turned out to be a real defect rather than a simulator artifact:
+The final-tree run of the same day stopped at 100 s: the pump kept reading
+bytes, the demuxer dropped every feed as "demuxer buffer overflow", the audio
+and video counts froze, and nothing rejoined. The demuxer's 2 MiB parse window
+had filled. The block parser's two "need more data" exits returned before the
+compaction schedule at the end of `parseBlocks`, and on a live feed every chunk
+ends mid-cluster, so the window was never trimmed and filled after about 2.1 MB
+of stream, 80 s at this bitrate. Reproduced offline by feeding the worklet's
+own remux of the 5-minute fixture in 64 KB chunks: overflow at feed 32 with
+2.16 MB in. With both exits routed through the compaction schedule the full
+7.9 MB demuxes with the window peaking at 94 KB. The regression test is
+`mid_cluster_feeds_keep_the_window_trimmed` in `tests/test_demux_hostile.cpp`.
+Two things the run also showed stay open: the overflow error is not terminal
+for the pump (no health change, no rejoin), and compaction trims to libwebm's
+Segment-relative cluster position, the EBML and Segment headers short of the
+cluster. The fixed tree ran on the phone the same afternoon: the swarm join
+took 84 s this time, so the 3-minute window held 89 s of playback, 2.30 MB in,
+past the point where the previous run filled the window, with 2042 frames
+displayed, 0 dropped, 0 late, 0 underruns and no window-full line.
 
-1. **Audio reaches the renderer but only one buffer is pulled.** Underruns are 0
-   and the queue never saturates, so buffers are being produced and queued; the
-   renderer simply stops asking after the first. This may be the simulator not
-   running a real audio device, or a genuine bug in the pull loop. Android
-   decodes all 51 packets from the same fixture, so the fixture and demuxer are
-   not the cause.
-2. **All 24 video frames dropped.** Expected on the simulator, which has no VP9
-   hardware decoder — `VTIsHardwareDecodeSupported('vp09')` should be false, so
-   no decode session is created and `submitFrame` returns NO. Unverified until a
-   device runs it.
-3. **`currentTimeSeconds` reports wall-clock, not media position** (10.14s for a
-   1-second fixture). Android reports 1.01s correctly, so this is iOS-specific:
-   `AVSampleBufferRenderSynchronizer.currentTime` advances from zero at the set
-   rate regardless of what has been enqueued. Needs a device to confirm the fix
-   shape before changing it.
+### A startup crash at the 16.6 deployment target (2026-10-12)
 
-## Background and foreground
+With the podspec and example at iOS 16.6, the Release build crashed at
+`play()` on the iPhone 11 in 2 of 6 launches: SIGTRAP, and both crash reports
+show the engine's `play` returning 0x18 bytes past its true return address
+into the Swift witness, so its saved return address had been corrupted. The
+same tree at 15.1 never crashed, the 16.6 build under Address and Undefined
+Behavior Sanitizers played cleanly, 13 Release launches on the simulator were
+clean, and three debugger-attached launches with a hardware watchpoint on the
+slot saw no stray write and no crash (the debugger changes the timing). The
+only compile difference is the target triple. What the crash window did hold
+was a race: the view's `setDisplayLayer` runs on main and writes
+`_displayLayer`, `_synchronizer` and `_videoDecoder` while `play()` creates
+and adds the same objects on the JS thread under `_control`, which
+`setDisplayLayer` did not take. It now does. After that fix 6 of 6 launches at
+16.6 started cleanly. That is consistent with the race being the cause but not
+proof of it: a 1-in-3 crash clears six launches about 9 % of the time, so the
+item stays on the hardware list until more launches accumulate.
 
-Policy: **playback pauses on background and resumes on return.** No configuration
-is required from a consuming app — no `UIBackgroundModes`, no Android foreground
-service. The library observes the transition itself (`UIApplication` notifications
-on iOS, React Native's host lifecycle on Android).
+## Still to run on hardware
 
-What the transition has to survive, and why each piece is there:
+- [ ] The 16.6 startup crash: keep counting launches of the 16.6 Release
+      build. A recurrence means the display-layer race was not the cause; the
+      next step is then a Debug device build or bisecting the target.
 
-- **iOS revokes video decoder resources when the app leaves the foreground**, and
-  the `VTDecompressionSession` stays invalid afterwards. Nothing reported this, so
-  a session that outlived a background trip was reused forever and never decoded
-  another frame. The session is now released on suspend and rebuilt at the first
-  keyframe after resume, and `kVTInvalidSessionErr` is treated the same way if it
-  turns up by another route.
-- **The synchronizer's timebase is host-clock-based** and keeps advancing while
-  the process is suspended. Left running, a 30s background trip would return 30s
-  ahead of the audio that actually played, so the rate goes to 0 on suspend.
-- **Stopping the renderer is not enough.** The demux thread would keep draining
-  the ring and decoding into a queue nobody consumes, and the audio decoder drops
-  what does not fit. Measured on the simulator: a 12s background trip discarded
-  **401 audio packets** — a silent hole on resume. The demux thread is now parked,
-  so the bytes stay in the ring. The same fix applies to an explicit `pause()`,
-  which had the same hole.
-- **A `resume()` from JS while backgrounded does not start playback** on either
-  platform. The decoder has no session and the audio session may be inactive.
-
-Verified on the iOS simulator across a 12s background trip: audio packets
-discarded went from 401 to **0**, drift +0.07s, playback continued normally.
-
-The simulator does not suspend the process, so it cannot settle whether the media
-clock survives a real suspension — that needs the device, and is listed below.
-
-### OPEN: video does not return after a background trip (iOS device)
-
-**Status: unresolved.** Confirmed twice on the iPhone 11: after backgrounding for
-~30s, audio resumes but the picture stays frozen. Everything below is what has
-been ruled in or out, so the next session does not repeat it.
-
-Ruled **out**:
-
-- _Not a keyframe famine._ The 60s fixture has **30 keyframes, one every 2s**
-  (`ffprobe` over the decoded fixture, counted via named JSON fields — a CSV
-  query gave a wrong answer first because ffprobe emits fields in its own order,
-  not the requested one). The decoder had a recovery point every 2 seconds.
-- _Not the `ensureSession` early-return._ `shutdownSession` zeroes
-  `_width/_height/_profile`, so the guard cannot return a stale session.
-
-Ruled **in** (partially): the display layer is left in
-`AVQueuedSampleBufferRenderingStatusFailed` after the app loses the foreground,
-and it only leaves that state on `-flush`. The flush inside `feedLayer` cannot
-do it, because a failed layer never becomes ready for more media data and so the
-`requestMediaDataWhenReadyOnQueue:` block it runs from is never invoked again.
-
-An explicit flush + re-arm on resume was written (uncommitted, in
-`WebmVideoDecoder.resume`) and **did not fix it**, so at least one more cause is
-in play. Candidates not yet tested:
-
-1. The `AVSampleBufferRenderSynchronizer` may need the layer re-added as a
-   renderer after the failure, not just flushed. (The SDK documents flush alone
-   as sufficient — if re-add turns out to be needed, it is undocumented
-   behaviour.)
-2. `_pending` frames enqueued before the trip carry timestamps behind the
-   resumed timebase and may all be discarded as late, with newly decoded frames
-   never arriving because the VP9 session did not actually rebuild.
-3. The VP9 session rebuild itself is unverified — no evidence either way yet.
-4. Recovery is one-shot and fires at `willEnterForeground`, before the app is
-   active. If the layer fails again after that single flush, nothing can ever
-   notice: the detection lives inside the pull block a failed layer never
-   invokes, there is no KVO on `status`, and the SDK's failure notifications
-   (`RequiresFlushToResumeDecodingDidChange`, `FailedToDecode`) have no
-   observers. Fits every observation, including "flush+re-arm did not fix it".
-
-The code now logs, at levels that persist into a collected archive: layer
-status before→after the resume flush, the pending-queue PTS range, the
-synchronizer clock at background and foreground, VP9 session creation, decode
-errors, and pending-queue-full drops. One instrumented device run discriminates
-all four candidates.
-
-Blocking the diagnosis: **no working device log capture.** `MEDIA_LOG` goes to
-`os_log` (subsystem `com.heartit.webmplayer`), and neither route worked:
-`idevicesyslog` reads the legacy syslog and captured 339 lines with none of ours;
-`log stream --device-name` does not exist on this macOS; `devicectl device
-console` is not a subcommand, and `process launch --console` forwards stdio,
-which `os_log` does not use. Next attempt: Console.app with the device selected,
-or `sudo log collect --device-udid <udid>` and query the archive. Getting logs
-working is the first step — the fix attempts so far have been blind.
-
-Note for whoever picks this up: `log` is aliased to `git log` in this shell, so
-scripted captures must use `/usr/bin/log`.
-
-### Known limitation: what `currentTimeSeconds` measures
-
-It is the presentation timestamp of the last buffer _handed to the renderer_
-(`WebmAudioDecoder.mm`, stored at `enqueueSampleBuffer:`), not what has been
-heard. It therefore runs ahead of real playback by the renderer's buffer depth,
-and after a pause it catches up to wall time as the backlog is enqueued, faster
-than the audio can actually play. Good enough to spot a stall; not a playback
-position.
-
-## Checklist for a physical device
-
-Run the example and work through these. Anything that fails is a real defect —
-the simulator caveats above do not apply.
-
-**iOS**
-
-- [x] Video renders (this settles finding 2 above)
-- [x] Audio is audible, and `audio N` climbs past 1 (settles finding 1)
-- [x] `t=` tracks media position, not wall-clock (settles finding 3)
-- [x] A/V stay in sync across a 60s continuous feed
-- [ ] Backgrounding pauses, foregrounding resumes without artefacts
-      (simulator-verified; the device must confirm the media clock does not
-      jump across a real process suspension)
-- [ ] Route change (speaker ↔ wired ↔ Bluetooth) keeps playback going and fires
-      `setRouteChangeCallback`
-- [ ] `stop()` then `start()` cycles cleanly, with no leak across cycles
-- [ ] `resetStream()` mid-feed recovers rather than wedging the demuxer
-
-**Android**
-
-- [ ] Same list. The emulator already passes the first three.
-- [ ] Audio focus: a phone call or another media app pauses/ducks correctly
-
-**Both**
-
-- [ ] Sustained feed from real Hypercore data, not the fixture
-- [ ] Memory flat over several minutes (no growth per stream cycle)
-- [ ] `audioFramesRecovered` climbs on a lossy link — exercises the FEC/PLC path,
-      which no test covers today
-
-**Added by the 2026-08-21 audit** (round-3 findings whose fixes, once made,
-need device confirmation — IDs refer to docs/AUDIT.md):
-
-- [ ] iOS: `pause()` → `stop()` → `start()` plays (R3-3 — today it parks forever)
-- [ ] iOS: `resetStream()` mid-stream presents the new stream, not late-frame
-      silence against the old timeline (R3-4)
-- [ ] iOS: `setEndOfStream()` → `resetStream()` → feed recovers (R3-8 — today inert)
-- [ ] iOS: `setPlaybackRate(1.0)` from JS while backgrounded does not run the
-      clock ahead (R3-17 — measure drift after a 30 s trip)
-- [ ] iOS: after `stop()`, other apps' audio resumes (R3-19)
-- [ ] Both: memory stays bounded through a replication-style burst feed
-      (R3-14 — watch the audio pending queue)
-- [ ] Both: a stream muxed with >2 MiB clusters plays on iOS (R3-5)
-- [ ] Both: during a phone call, `playbackState`/health reflect the
-      interruption (R3-9 — today they read PLAYING)
-- [ ] Android: `gain` above 1.0 — decide clamp-and-report or document
-      iOS-only amplification (R3-10)
-- [ ] iOS: a video-only stream presents (E-11 — today the clock never starts)
-- [ ] Tap "1s 5.1" during every device run: the 60 s auto-play clip no longer
-      exercises the multistream Opus path (D-8)
-
-## Known limitation
-
-`audioFramesRecovered` is always 0 on Android: ExoPlayer conceals internally and
-does not report recovered frames. The counter is meaningful on iOS only.
+- [ ] Pixels after a background trip, with eyes on the phone.
+- [ ] The 2 MiB ring (round 5, row 4) and the "window N KB" figure in the
+      pump's 5 s summary (row 5): ring occupancy stays well under 100% and the
+      window stays flat across a 3-minute run.
+- [ ] `stop()` then `play()` again; memory flat across three cycles.
+- [ ] Phone call during playback: Buffering "audio interrupted", then rejoin.
+- [ ] Player stalled for 10 s (debugger pause): worklet reports `lag ...`,
+      native rejoins at the live edge.
+- [ ] Broadcaster restarts into the same key: worklet reports `reconfigured`,
+      native rejoins (the 60 s fixture is too short for the unattended script
+      to reach this step).
+- [ ] Network off for 20 s: "stream stalled", playback resumes on reconnect.
+- [ ] Android: audio focus loss and regain.
+- [ ] The 7 s between the swarm connection and the first audio frame on the
+      iPhone, against 1 s on the simulator and 3 s on Android: measure where it
+      goes.

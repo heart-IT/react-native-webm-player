@@ -15,20 +15,16 @@
 
 // Forward declaration of `WebmPlaybackState` to properly resolve imports.
 namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
-// Forward declaration of `WebmAudioRoute` to properly resolve imports.
-namespace margelo::nitro::webmplayer { enum class WebmAudioRoute; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 // Forward declaration of `WebmHealthEvent` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmHealthEvent; }
 
 #include "WebmPlaybackState.hpp"
-#include "WebmAudioRoute.hpp"
-#include <NitroModules/ArrayBuffer.hpp>
+#include <string>
 #include "WebmPlayerMetrics.hpp"
 #include "WebmHealthEvent.hpp"
 #include <functional>
-#include <vector>
 
 namespace margelo::nitro::webmplayer {
 
@@ -57,30 +53,16 @@ namespace margelo::nitro::webmplayer {
 
     public:
       // Properties
-      virtual bool getIsRunning() = 0;
-      virtual bool getIsPaused() = 0;
       virtual WebmPlaybackState getPlaybackState() = 0;
       virtual bool getMuted() = 0;
       virtual void setMuted(bool muted) = 0;
-      virtual double getGain() = 0;
-      virtual void setGain(double gain) = 0;
-      virtual double getPlaybackRate() = 0;
-      virtual void setPlaybackRate(double playbackRate) = 0;
-      virtual WebmAudioRoute getCurrentAudioRoute() = 0;
 
     public:
       // Methods
-      virtual bool start() = 0;
-      virtual bool stop() = 0;
-      virtual bool pause() = 0;
-      virtual bool resume() = 0;
-      virtual bool feedData(const std::shared_ptr<ArrayBuffer>& data) = 0;
-      virtual void setEndOfStream() = 0;
-      virtual void resetStream() = 0;
+      virtual void play(const std::string& key) = 0;
+      virtual void stop() = 0;
       virtual WebmPlayerMetrics getMetrics() = 0;
       virtual void setHealthCallback(const std::function<void(const WebmHealthEvent& /* event */)>& callback) = 0;
-      virtual std::vector<WebmAudioRoute> getAvailableAudioRoutes() = 0;
-      virtual void setRouteChangeCallback(const std::function<void(WebmAudioRoute /* route */)>& callback) = 0;
 
     protected:
       // Hybrid Setup

@@ -1,6 +1,7 @@
 #import "WebmDemuxPump.h"
 
 #import "WebmAudioDecoder.h"
+#import "WebmPlaybackPolicy.h"
 #import "WebmVideoDecoder.h"
 
 #include <atomic>
@@ -30,16 +31,32 @@ constexpr int kStallReadTimeouts = 40;
 // error on every demux pass, ~10+/s at stream bitrate.
 constexpr uint64_t kErrorLogMask = 511;
 
+// A device log has no metrics view: one summary line this often is how a
+// run's counters are read back.
+constexpr int64_t kSummaryIntervalMs = 5000;
+
+// Video drops are logged at these milestones with the decoder's state, which
+// says whether they were frames before a keyframe or something worse.
+constexpr uint64_t kDropLogEvery = 100;
+
+// The demux thread waits while a decoder holds this much decoded media, so
+// the playout margin accumulates in the ring as compressed bytes rather than
+// overflowing the decoders' queues. Below each decoder's cap, leaving room
+// for frames VideoToolbox still has in flight.
+constexpr size_t kVideoPacingFrames = 20;
+constexpr size_t kAudioPacingBuffers = 60;
+constexpr int kPacingSleepMs = 5;
+
 }  // namespace
 
 @interface WebmDemuxPump ()
 - (void)run;
-- (void)consumeAudio:(const std::vector<media::demux::AudioPacket>&)packets
-             demuxer:(const media::demux::WebmDemuxer&)demuxer
-      firstAudioSeen:(bool*)firstAudioSeen;
-- (void)consumeVideo:(const std::vector<media::demux::VideoPacket>&)packets
-             demuxer:(const media::demux::WebmDemuxer&)demuxer
-      firstVideoSeen:(bool*)firstVideoSeen;
+- (BOOL)prepareAudio:(const media::demux::WebmDemuxer&)demuxer;
+- (void)submitAudio:(const media::demux::AudioPacket&)pkt firstSeen:(bool*)firstSeen;
+- (void)prepareVideo:(const media::demux::WebmDemuxer&)demuxer;
+- (void)submitVideo:(const media::demux::VideoPacket&)pkt
+            demuxer:(const media::demux::WebmDemuxer&)demuxer
+          firstSeen:(bool*)firstSeen;
 @end
 
 @implementation WebmDemuxPump {
@@ -48,16 +65,14 @@ constexpr uint64_t kErrorLogMask = 511;
   WebmVideoDecoder* _videoDecoder;
 
   std::thread _thread;
-  // True while run() is executing. The thread exits on end-of-stream, so a
-  // later requestReset must know whether anyone is left to consume the flag.
-  std::atomic<bool> _threadLive;
   std::atomic<bool> _stop;
-  std::atomic<bool> _paused;
-  // Set by requestReset() on the JS thread, consumed by the demux thread.
+  // Set by requestReset() on the engine's control thread, consumed by the
+  // demux thread.
   std::atomic<bool> _resetRequested;
   std::atomic<bool> _failed;
 
   std::atomic<uint64_t> _bytesFed;
+  std::atomic<int64_t> _lastAudioPtsUs;  // newest audio packet decoded
   std::atomic<uint64_t> _videoFramesDropped;
   std::atomic<int> _videoWidth;
   std::atomic<int> _videoHeight;
@@ -66,12 +81,11 @@ constexpr uint64_t kErrorLogMask = 511;
 - (instancetype)init {
   self = [super init];
   if (!self) return nil;
-  _threadLive = false;
   _stop = false;
-  _paused = false;
   _resetRequested = false;
   _failed = false;
   _bytesFed = 0;
+  _lastAudioPtsUs = -1;
   _videoFramesDropped = 0;
   _videoWidth = 0;
   _videoHeight = 0;
@@ -87,15 +101,11 @@ constexpr uint64_t kErrorLogMask = 511;
   if (_thread.joinable()) return;
   _audioDecoder = audioDecoder;
   _videoDecoder = videoDecoder;
-  _ring = std::make_unique<media::WebMStreamBuffer>(
-      media::WebMStreamBuffer::broadcastCapacityBytes(),
-      media::WebMStreamBuffer::broadcastConfig());
+  _ring = std::make_unique<media::WebMStreamBuffer>(kRingCapacityBytes);
   _stop = false;
   _failed = false;
-  // The pump object is reused across start/stop cycles: a pause or pending
-  // reset from the previous session must not leak into this one, or the new
-  // thread parks forever on a flag nothing will clear.
-  _paused = false;
+  // The pump object is reused across start/stop cycles: a pending reset from
+  // the previous session must not leak into this one.
   _resetRequested = false;
   _thread = std::thread([self] { [self run]; });
 }
@@ -112,15 +122,9 @@ constexpr uint64_t kErrorLogMask = 511;
 
 - (size_t)feedData:(const uint8_t*)bytes length:(size_t)length {
   if (!_ring) return 0;
-  if (_resetRequested.load(std::memory_order_relaxed)) [self restartIfExited];
-  // Synthetic chunk boundaries, not cluster-aligned — skip the debug validator.
   size_t wrote = _ring->write(bytes, length);
   _bytesFed.fetch_add(wrote);
   return wrote;
-}
-
-- (void)setPaused:(BOOL)paused {
-  _paused.store(paused);
 }
 
 - (void)setEndOfStream {
@@ -134,31 +138,9 @@ constexpr uint64_t kErrorLogMask = 511;
   // appended to a demuxer still mid-cluster and every subsequent parse fails.
   if (_ring) _ring->clear();
   _resetRequested.store(true, std::memory_order_release);
-  [self restartIfExited];
 }
 
-// The demux thread exits at end-of-stream, so a post-EOS reset (broadcast
-// reconnect) has nobody left to consume the flag — restart the thread. Runs on
-// the JS thread only, the same thread as start/stop/requestReset/feedData, so
-// there is no lifecycle race with those. A thread observed live here can still
-// be mid-exit; the same check in feedData retries on the next chunk.
-- (void)restartIfExited {
-  if (!_ring || _stop.load() || _threadLive.load()) return;
-  if (_thread.joinable()) _thread.join();
-  _thread = std::thread([self] { [self run]; });
-}
-
-- (uint64_t)bytesFedTotal { return _bytesFed.load(); }
-
-- (uint64_t)bytesDropped {
-  return _ring ? _ring->getStats().droppedBytes : 0;
-}
-
-- (double)ringFillRatio {
-  if (!_ring) return 0.0;
-  auto s = _ring->getStats();
-  return s.capacityBytes ? static_cast<double>(s.currentSizeBytes) / s.capacityBytes : 0.0;
-}
+- (uint64_t)bytesReceived { return _bytesFed.load(); }
 
 - (uint64_t)videoFramesDropped { return _videoFramesDropped.load(); }
 - (int)videoWidth { return _videoWidth.load(); }
@@ -193,7 +175,6 @@ constexpr uint64_t kErrorLogMask = 511;
 - (void)run {
   pthread_setname_np("webmplayer.demux");
   if (!_ring) return;
-  _threadLive.store(true);
 
   media::demux::WebmDemuxer demuxer;
   std::vector<uint8_t> chunk(kPumpChunkBytes);
@@ -204,17 +185,48 @@ constexpr uint64_t kErrorLogMask = 511;
 
   int emptyReads = 0;
   bool stalled = false;
+  // Quiet before the first byte is the swarm connecting, not a stall.
+  bool receivedData = false;
   uint64_t demuxErrorLogs = 0;
+  int64_t lastSummaryMs = media::log::detail::millisSinceStart();
+  // Checked every pass, not every summary: the loop idles in 50 ms reads, so a
+  // renderer running dry is seen within that. One underrun per dry spell.
+  bool dry = false;
+  uint64_t underruns = 0;
 
   // The pool drains every pass: this thread sends Objective-C messages whose
   // autoreleased returns would otherwise have no pool on a bare std::thread.
   while (!_stop.load()) {
     @autoreleasepool {
-    if (_paused.load()) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(kRingReadTimeoutMs));
-      continue;
+    int64_t nowMs = media::log::detail::millisSinceStart();
+    // How far the newest decoded audio runs ahead of the clock; the rest of
+    // the live delay waits in the ring as bytes. At or below zero the renderer
+    // has run dry.
+    double clock = _clock ? _clock() : -1.0;
+    int64_t lastPts = _lastAudioPtsUs.load();
+    bool clocked = clock >= 0 && lastPts >= 0;
+    double ahead = clocked ? lastPts / 1000000.0 - clock : 0.0;
+    if (clocked && ahead <= 0.0 && !dry) {
+      MEDIA_LOG_W("WebmDemuxPump: renderer ran dry, underrun %llu",
+                  static_cast<unsigned long long>(++underruns));
     }
-
+    dry = clocked && ahead <= 0.0;
+    if (nowMs - lastSummaryMs >= kSummaryIntervalMs) {
+      lastSummaryMs = nowMs;
+      MEDIA_LOG_I("WebmDemuxPump: %llu B in, audio %llu decoded, video %llu presented %llu dropped, "
+                  "ring %.1f%%, window %zu KB, pending a%zu v%zu, ahead %.2fs, underruns %llu, %s",
+                  static_cast<unsigned long long>(_bytesFed.load()),
+                  static_cast<unsigned long long>(_audioDecoder.packetsDecoded),
+                  static_cast<unsigned long long>(_videoDecoder.framesPresented),
+                  static_cast<unsigned long long>(_videoFramesDropped.load()),
+                  100.0 * _ring->sizeBytes() / _ring->capacity(),
+                  demuxer.bufferBytes() / 1024,
+                  _audioDecoder.pendingBuffers, _videoDecoder.pendingFrames, ahead,
+                  static_cast<unsigned long long>(underruns),
+                  [_videoDecoder leadReport].UTF8String);
+      WebmVideoDecoder* video = _videoDecoder;
+      dispatch_async(dispatch_get_main_queue(), ^{ [video logLayerPerformance]; });
+    }
     // Observed before reading, so every byte taken afterwards belongs to the new
     // stream. requestReset() clears the ring before raising this.
     if (_resetRequested.exchange(false, std::memory_order_acquire)) {
@@ -241,22 +253,17 @@ constexpr uint64_t kErrorLogMask = 511;
         // A shutdown-woken read exits silently: that "end" belongs to stop(),
         // not the broadcast, and Android's stop() emits nothing either.
         if (_stop.load()) break;
-        // A reset that raced the EOS drain re-arms the ring; consume it at the
-        // loop top instead of exiting with the flag stranded.
-        if (_resetRequested.load(std::memory_order_acquire)) continue;
         [self reportHealth:@"ended" detail:@"end of stream"];
         break;
       }
-      // A mid-stream stall was invisible before: the state machine latched
-      // "playing" at the first frame and nothing ever reported the feed going
-      // quiet, so a stalled stream looked identical to a playing one. Android
-      // reports rebuffering; this is the iOS side of that contract.
-      if (++emptyReads >= kStallReadTimeouts && !stalled) {
+      // Android reports rebuffering; this is the iOS side of that contract.
+      if (receivedData && ++emptyReads >= kStallReadTimeouts && !stalled) {
         stalled = true;
         [self reportHealth:@"buffering" detail:@"stream stalled"];
       }
       continue;
     }
+    receivedData = true;
     emptyReads = 0;
     if (stalled) {
       stalled = false;
@@ -266,19 +273,24 @@ constexpr uint64_t kErrorLogMask = 511;
     }
 
     // Packets point into the demuxer's internal buffer and are invalidated by
-    // the next feedData(), so everything is consumed before looping.
+    // the next demuxer feed, so everything is consumed before looping.
     const auto& result =
         demuxer.feedData(chunk.data(), static_cast<size_t>(got));
 
-    if (!result.audioPackets.empty()) {
-      [self consumeAudio:result.audioPackets
-                 demuxer:demuxer
-           firstAudioSeen:&firstAudioSeen];
-    }
-    if (!result.videoPackets.empty()) {
-      [self consumeVideo:result.videoPackets
-                 demuxer:demuxer
-          firstVideoSeen:&firstVideoSeen];
+    const auto& audio = result.audioPackets;
+    const auto& video = result.videoPackets;
+    // Submitted in presentation order across both tracks: a chunk holds
+    // seconds of each, and feeding all its audio first, paced on the renderer,
+    // handed the decoder that chunk's first video frames after their time.
+    size_t ai = (!audio.empty() && ![self prepareAudio:demuxer]) ? audio.size() : 0;
+    if (!video.empty()) [self prepareVideo:demuxer];
+    size_t vi = 0;
+    while (ai < audio.size() || vi < video.size()) {
+      if (vi == video.size() || (ai < audio.size() && audio[ai].ptsUs <= video[vi].ptsUs)) {
+        [self submitAudio:audio[ai++] firstSeen:&firstAudioSeen];
+      } else {
+        [self submitVideo:video[vi++] demuxer:demuxer firstSeen:&firstVideoSeen];
+      }
     }
 
     if (!result.error.empty()) {
@@ -301,75 +313,77 @@ constexpr uint64_t kErrorLogMask = 511;
     }
     }  // @autoreleasepool
   }
-  _threadLive.store(false);
 }
 
-- (void)consumeAudio:(const std::vector<media::demux::AudioPacket>&)packets
-             demuxer:(const media::demux::WebmDemuxer&)demuxer
-      firstAudioSeen:(bool*)firstAudioSeen {
-  auto info = demuxer.trackInfoSnapshot();
-  if (![_audioDecoder configureWithSampleRate:info.audioSampleRate
-                                     channels:info.audioChannels
-                                     opusHead:info.audioCodecPrivate.empty()
-                                                  ? nullptr
-                                                  : info.audioCodecPrivate.data()
-                                 opusHeadSize:info.audioCodecPrivate.size()]) {
-    // The track parameters come from the stream and will not change until a
-    // reset, so this failure is permanent: without surfacing it the clock
-    // never starts, queued video never presents, and health sits at
-    // "buffering" forever over a silently dead pipeline.
-    if (!_failed.exchange(true)) {
-      MEDIA_LOG_E("WebmDemuxPump: audio decoder configuration failed permanently");
-      [self reportHealth:@"failed" detail:@"audio decoder configuration failed"];
+// Holds the demux thread while a decoder's queue is at its pacing limit. A
+// stop or reset ends the wait; the packet is then submitted or discarded by
+// the caller's normal path.
+- (void)paceOn:(size_t (^)(void))pending limit:(size_t)limit {
+  while (pending() >= limit && !_stop.load() &&
+         !_resetRequested.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(kPacingSleepMs));
+  }
+}
+
+- (BOOL)prepareAudio:(const media::demux::WebmDemuxer&)demuxer {
+  const auto& info = demuxer.trackInfo();
+  if ([_audioDecoder configureWithSampleRate:info.audioSampleRate
+                                    channels:info.audioChannels]) {
+    return YES;
+  }
+  // The track parameters will not change until a reset, so this is permanent;
+  // unreported, the clock never starts and health sits at "buffering" forever.
+  if (!_failed.exchange(true)) {
+    MEDIA_LOG_E("WebmDemuxPump: audio decoder configuration failed permanently");
+    [self reportHealth:@"failed" detail:@"audio decoder configuration failed"];
+  }
+  return NO;
+}
+
+- (void)submitAudio:(const media::demux::AudioPacket&)pkt firstSeen:(bool*)firstSeen {
+  [self paceOn:^size_t { return self->_audioDecoder.pendingBuffers; } limit:kAudioPacingBuffers];
+  if (![_audioDecoder submitPacket:pkt.data length:pkt.size ptsUs:pkt.ptsUs]) return;
+  _lastAudioPtsUs.store(pkt.ptsUs);
+  if (!*firstSeen) {
+    *firstSeen = true;
+    [self notifyFirstSampleAtPts:pkt.ptsUs];
+    [self reportHealth:@"playing" detail:@"first audio frame"];
+  }
+}
+
+- (void)prepareVideo:(const media::demux::WebmDemuxer&)demuxer {
+  const auto& info = demuxer.trackInfo();
+  _videoWidth.store(info.videoWidth);
+  _videoHeight.store(info.videoHeight);
+}
+
+- (void)submitVideo:(const media::demux::VideoPacket&)pkt
+            demuxer:(const media::demux::WebmDemuxer&)demuxer
+          firstSeen:(bool*)firstSeen {
+  [self paceOn:^size_t { return self->_videoDecoder.pendingFrames; } limit:kVideoPacingFrames];
+  BOOL ok = [_videoDecoder submitFrame:pkt.data
+                                length:pkt.size
+                                 ptsUs:pkt.ptsUs
+                                 isKey:pkt.isKeyFrame ? YES : NO];
+  if (ok) {
+    if (!*firstSeen) {
+      *firstSeen = true;
+      // A video-only stream has no first audio packet to anchor the clock;
+      // without this the synchronizer stays at rate 0 and nothing presents.
+      if (demuxer.trackInfo().audioTrackNum < 0) [self notifyFirstSampleAtPts:pkt.ptsUs];
+      [self reportHealth:@"playing" detail:@"first video frame"];
     }
     return;
   }
-  for (const auto& pkt : packets) {
-    if (![_audioDecoder submitPacket:pkt.data
-                              length:pkt.size
-                               ptsUs:pkt.ptsUs
-                          durationUs:pkt.durationUs]) {
-      continue;
-    }
-    if (!*firstAudioSeen) {
-      *firstAudioSeen = true;
-      [self notifyFirstSampleAtPts:pkt.ptsUs];
-      [self reportHealth:@"playing" detail:@"first audio frame"];
-    }
+  uint64_t dropped = _videoFramesDropped.fetch_add(1) + 1;
+  if (dropped % kDropLogEvery == 0) {
+    MEDIA_LOG_W("WebmDemuxPump: %llu video frames dropped at submit, session %s",
+                static_cast<unsigned long long>(dropped),
+                _videoDecoder.hasSession ? "live" : "none");
   }
-}
-
-- (void)consumeVideo:(const std::vector<media::demux::VideoPacket>&)packets
-             demuxer:(const media::demux::WebmDemuxer&)demuxer
-      firstVideoSeen:(bool*)firstVideoSeen {
-  auto info = demuxer.trackInfoSnapshot();
-  _videoWidth.store(info.videoWidth);
-  _videoHeight.store(info.videoHeight);
-  // The container knows the frame size, so a VP9 header the parser cannot read
-  // no longer means no video at all.
-  [_videoDecoder setContainerWidth:info.videoWidth height:info.videoHeight];
-
-  for (const auto& pkt : packets) {
-    BOOL ok = [_videoDecoder submitFrame:pkt.data
-                                  length:pkt.size
-                                   ptsUs:pkt.ptsUs
-                                   isKey:pkt.isKeyFrame ? YES : NO];
-    if (ok) {
-      if (!*firstVideoSeen) {
-        *firstVideoSeen = true;
-        // A video-only stream has no first audio packet to anchor the clock;
-        // without this the synchronizer stays at rate 0 and nothing presents.
-        if (info.audioTrackNum < 0) [self notifyFirstSampleAtPts:pkt.ptsUs];
-        [self reportHealth:@"playing" detail:@"first video frame"];
-      }
-    } else {
-      _videoFramesDropped.fetch_add(1);
-      if (!*firstVideoSeen && !_videoDecoder.hardwareDecodeSupported) {
-        *firstVideoSeen = true;  // report once, not per frame
-        [self reportHealth:@"playing"
-                    detail:@"audio only — no VP9 decoder on this device"];
-      }
-    }
+  if (!*firstSeen && !_videoDecoder.hardwareDecodeSupported) {
+    *firstSeen = true;  // report once, not per frame
+    [self reportHealth:@"playing" detail:@"audio only — no VP9 decoder on this device"];
   }
 }
 

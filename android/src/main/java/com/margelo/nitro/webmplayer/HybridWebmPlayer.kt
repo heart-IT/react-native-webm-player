@@ -1,272 +1,251 @@
 package com.margelo.nitro.webmplayer
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.ui.PlayerView
 import com.margelo.nitro.NitroModules
-import com.margelo.nitro.core.ArrayBuffer
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Android playback: ExoPlayer reading from a WebMStreamBuffer-backed DataSource.
+ * Android playback: a feeder worklet per broadcast key, piped into ExoPlayer.
  *
  * ExoPlayer is confined to the main thread. Nitro calls arrive on the JS thread,
- * so mutations are posted to main and every value the spec can read is mirrored
- * into an atomic by main-thread listeners. Nothing here touches the player from
- * another thread.
+ * so they flip atomics and post the work to main, and every value the spec can
+ * read synchronously is mirrored into an atomic.
  *
- * `feedData` is the exception and deliberately so: it goes straight to the ring
- * over JNI without a main-thread hop, because it runs at stream bitrate.
+ * A lost stream is never resumed: the session is rejoined with a fresh worklet
+ * and a fresh media source on the same player.
  */
 @UnstableApi
 class HybridWebmPlayer : HybridWebmPlayerSpec() {
 
   private val mainHandler = Handler(Looper.getMainLooper())
-
-  private val ringHandle = AtomicLong(0L)
-  @Volatile private var player: ExoPlayer? = null
-  // Main-thread only, like everything else that touches ExoPlayer.
-  private var surface: PlayerView? = null
-  private var routes: AudioRouteMonitor? = null
-  @Volatile private var healthCallback: ((WebmHealthEvent) -> Unit)? = null
-  @Volatile private var lastHealth: WebmHealthStatus? = null
-
-  private val running = AtomicBoolean(false)
-  private val paused = AtomicBoolean(false)
-  // True from resetStream() until its main-thread teardown finishes; feedData
-  // rejects while set so no bytes reach the doomed extractor or the pre-clear
-  // ring.
-  private val resetPending = AtomicBoolean(false)
-  // Kept apart from `paused`: returning to the foreground must not start playing
-  // a stream JS had explicitly paused before the app went away.
-  private val backgrounded = AtomicBoolean(false)
-
   private val stats = PlaybackStats(mainHandler)
-  private var lifecycle: HostLifecycleObserver? = null
 
-  @Volatile private var currentGain: Double = 1.0
-  @Volatile private var currentMuted: Boolean = false
-  @Volatile private var currentRate: Double = 1.0
+  // False once stop() is called, before its main-thread teardown runs, so
+  // events still queued for the old session are ignored.
+  private val active = AtomicBoolean(false)
+  @Volatile private var currentMuted = false
+  @Volatile private var metricsSource: WorkletSource? = null
+  @Volatile private var healthCallback: ((WebmHealthEvent) -> Unit)? = null
+  @Volatile private var lastHealth: WebmHealthEvent? = null
 
-  // MARK: - Lifecycle
+  // Main-thread only, like everything else that touches ExoPlayer.
+  private var player: ExoPlayer? = null
+  private var surface: PlayerView? = null
+  private var context: Context? = null
+  private var key: String? = null
+  private var source: WorkletSource? = null
+  private var broadcastEnded = false
+  private var focusLost = false
+  private var rejoinAttempts = 0
+  private var pendingRejoin: Runnable? = null
 
-  override fun start(): Boolean {
-    if (running.get()) return true
-    lastHealth = null
-    // Created synchronously so feedData() can buffer while ExoPlayer spins up.
-    val handle = RingBridge.create()
-    if (handle == 0L) return false
-    ringHandle.set(handle)
-    running.set(true)
-    paused.set(false)
-    // A reset whose teardown never ran (player already released) must not gate
-    // this fresh session's feed.
-    resetPending.set(false)
+  // MARK: - Session
+
+  override fun play(key: String) {
+    if (active.get()) stop()
     stats.failed.set(false)
-    mainHandler.post { startOnMain() }
-    return true
+    lastHealth = null
+    active.set(true)
+    mainHandler.post { startOnMain(key) }
   }
 
-  private fun startOnMain() {
-    val handle = ringHandle.get()
-    val context = NitroModules.applicationContext ?: run {
-      Log.e(TAG, "no application context; cannot create ExoPlayer")
-      failOnMain(handle, "no application context")
-      return
+  override fun stop() {
+    active.set(false)
+    mainHandler.post { teardownOnMain() }
+  }
+
+  override fun dispose() {
+    stop()
+    super.dispose()
+  }
+
+  override val playbackState: WebmPlaybackState
+    get() = when {
+      stats.failed.get() -> WebmPlaybackState.FAILED
+      !active.get() -> WebmPlaybackState.IDLE
+      stats.rendered.get() -> WebmPlaybackState.PLAYING
+      else -> WebmPlaybackState.BUFFERING
     }
-    // The lifecycle observer only reports transitions, so a start() issued
-    // while already backgrounded must derive the current state itself or the
-    // pause-on-background policy is skipped for this session.
-    if (context.lifecycleState != com.facebook.react.common.LifecycleState.RESUMED) {
-      backgrounded.set(true)
+
+  private fun startOnMain(key: String) {
+    // A stop() issued before this post ran has already cancelled the session.
+    if (!active.get()) return
+    val ctx = NitroModules.applicationContext ?: run {
+      fail("no application context")
+      return
     }
     var exo: ExoPlayer? = null
     try {
-      exo = ExoPlayer.Builder(context)
+      exo = ExoPlayer.Builder(ctx)
         .setLoadControl(WebmMediaPipeline.loadControl())
         .build()
         .apply {
-          // handleAudioFocus = true: ExoPlayer owns focus, so losses, ducks and
-          // regains flow through playWhenReady/volume and the mirrored state
-          // stays truthful.
+          // handleAudioFocus = true: ExoPlayer owns focus, and its losses and
+          // regains reach onAudioFocus through playWhenReady.
           setAudioAttributes(
-            androidx.media3.common.AudioAttributes.Builder()
+            AudioAttributes.Builder()
               .setUsage(C.USAGE_MEDIA)
               .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
               .build(),
             true,
           )
-          volume = if (currentMuted) 0f else currentGain.toFloat()
-          setPlaybackSpeed(currentRate.toFloat())
+          volume = if (currentMuted) MUTED_VOLUME else FULL_VOLUME
         }
-
-      stats.attach(exo) { status, detail -> fireHealth(status, detail) }
-      lifecycle = HostLifecycleObserver(
-        context,
-        onBackground = { suspendForBackground() },
-        onForeground = { resumeFromForeground() },
-      )
-
-      exo.setMediaSource(buildMediaSource(handle))
-      exo.prepare()
-      exo.playWhenReady = !paused.get() && !backgrounded.get()
+      stats.attach(exo, playerEvents)
       player = exo
       surface?.player = exo
+      context = ctx
+      this.key = key
+      rejoinAttempts = 0
+      focusLost = false
+      fireHealth(WebmHealthStatus.BUFFERING, "connecting")
+      connect(exo)
+      exo.playWhenReady = true
     } catch (e: Exception) {
-      Log.e(TAG, "start failed", e)
-      // Not yet assigned to `player`, so releaseOnMain cannot reach it — a
-      // built instance carries a live playback thread until released.
-      exo?.release()
-      failOnMain(handle, e.message ?: e.javaClass.simpleName)
+      Log.e(TAG, "play failed", e)
+      // Not yet assigned to `player` if build or attach threw, so teardown
+      // cannot reach it, and a built instance carries a live playback thread.
+      if (player !== exo) exo?.release()
+      fail(e.message ?: e.javaClass.simpleName)
     }
   }
 
-  /**
-   * A player that failed to come up must not report running, and nothing will
-   * ever read this cycle's ring, so it is freed here — stop() early-returns
-   * once running is false. The CAS leaves a ring a newer start() created alone.
-   */
-  private fun failOnMain(handle: Long, detail: String) {
-    stats.failed.set(true)
-    running.set(false)
+  /** Starts a worklet for the current key and prepares the player on it. */
+  private fun connect(exo: ExoPlayer) {
+    val src = WorkletSource.start(requireNotNull(context), requireNotNull(key), sourceEvents)
+    source = src
+    metricsSource = src
+    broadcastEnded = false
+    stats.newSession()
+    exo.setMediaSource(WebmMediaPipeline.mediaSource { StreamDataSource(src.inputStream) })
+    exo.prepare()
+  }
+
+  private fun rejoin(reason: String, immediate: Boolean = false) {
+    if (!active.get() || pendingRejoin != null) return
+    stopSource()
+    if (!immediate && rejoinAttempts >= REJOIN_BACKOFF_MS.size) {
+      fail("rejoin failed: $reason")
+      return
+    }
+    val delayMs = if (immediate) 0L else REJOIN_BACKOFF_MS[rejoinAttempts++]
+    fireHealth(WebmHealthStatus.BUFFERING, "rejoining: $reason")
+    val task = Runnable {
+      pendingRejoin = null
+      // stop() may land between the schedule and its teardown.
+      if (!active.get()) return@Runnable
+      val exo = player ?: return@Runnable
+      try {
+        connect(exo)
+      } catch (e: Exception) {
+        Log.e(TAG, "rejoin failed", e)
+        fail(e.message ?: e.javaClass.simpleName)
+      }
+    }
+    pendingRejoin = task
+    mainHandler.postDelayed(task, delayMs)
+  }
+
+  private fun stopSource() {
+    source?.stop()
+    source = null
+  }
+
+  private fun fail(detail: String) {
     fireHealth(WebmHealthStatus.FAILED, detail)
-    releaseOnMain()
-    if (handle != 0L && ringHandle.compareAndSet(handle, 0L)) {
-      RingBridge.shutdown(handle)
-      RingBridge.destroy(handle)
+    stats.failed.set(true)
+    active.set(false)
+    teardownOnMain()
+  }
+
+  private fun teardownOnMain() {
+    pendingRejoin?.let { mainHandler.removeCallbacks(it) }
+    pendingRejoin = null
+    stats.detach()
+    surface?.player = null
+    // Released before the source stops, so the player never sees the pipe end.
+    player?.release()
+    player = null
+    stopSource()
+  }
+
+  // MARK: - Session events (main thread)
+
+  private val sourceEvents = object : WorkletSource.Listener {
+    override fun onFirstData(source: WorkletSource) {
+      if (source === this@HybridWebmPlayer.source) rejoinAttempts = 0
+    }
+
+    override fun onStatus(source: WorkletSource, status: String) {
+      if (source !== this@HybridWebmPlayer.source) return
+      when {
+        // The worklet's view of the swarm while it waits for a peer: a log line,
+        // not a health event.
+        status.startsWith(STATUS_NET) -> Log.i(TAG, "worklet $status")
+        status == STATUS_JOINING || status.startsWith(STATUS_CONNECTED) ->
+          if (!stats.rendered.get()) fireHealth(WebmHealthStatus.BUFFERING, "$status, waiting for data")
+        status == STATUS_ENDED -> {
+          // ExoPlayer drains what is buffered, then reaches STATE_ENDED.
+          broadcastEnded = true
+          source.endInput()
+        }
+        status.startsWith(STATUS_LAG) || status == STATUS_RECONFIGURED || status.startsWith(STATUS_ERROR) ->
+          rejoin(status)
+        else -> Log.w(TAG, "ignoring unknown worklet status: $status")
+      }
+    }
+
+    override fun onEndOfStream(source: WorkletSource) {
+      if (source === this@HybridWebmPlayer.source && !broadcastEnded) rejoin("worklet exited")
     }
   }
 
-  private fun buildMediaSource(handle: Long): MediaSource =
-    WebmMediaPipeline.mediaSource {
-      RingDataSource { buf, off, len -> RingBridge.read(handle, buf, off, len, READ_TIMEOUT_MS) }
+  private val playerEvents = object : PlaybackStats.Events {
+    override fun onHealth(status: WebmHealthStatus, detail: String) = fireHealth(status, detail)
+
+    override fun onFirstFrame() {
+      rejoinAttempts = 0
     }
 
-  override fun stop(): Boolean {
-    if (!running.get()) return true
-    running.set(false)
-    paused.set(false)
-    backgrounded.set(false)
-    val handle = ringHandle.get()
-    if (handle != 0L) RingBridge.shutdown(handle)  // unblocks a reader inside DataSource.read
-    mainHandler.post {
-      releaseOnMain()
-      // Freed only after the player (and its loader thread) is gone. The CAS
-      // leaves a ring a newer start() created alone.
-      if (handle != 0L) RingBridge.destroy(handle)
-      ringHandle.compareAndSet(handle, 0L)
-    }
-    return true
-  }
-
-  override fun dispose() {
-    stop()
-    routes?.release()
-    routes = null
-    super.dispose()
-  }
-
-  override fun pause(): Boolean {
-    paused.set(true)
-    mainHandler.post { player?.pause() }
-    return true
-  }
-
-  override fun resume(): Boolean {
-    paused.set(false)
-    // Backgrounded playback stays stopped until the app returns, matching iOS.
-    if (backgrounded.get()) return true
-    mainHandler.post { player?.play() }
-    return true
-  }
-
-  /**
-   * Driven by the host activity, not by JS. ExoPlayer keeps its decoders and
-   * buffered data across this, so returning resumes where playback stopped;
-   * only the surface it renders into goes away and comes back.
-   */
-  private fun suspendForBackground() {
-    if (!running.get() || backgrounded.getAndSet(true)) return
-    mainHandler.post { player?.pause() }
-  }
-
-  private fun resumeFromForeground() {
-    if (!running.get() || !backgrounded.getAndSet(false)) return
-    if (paused.get()) return
-    mainHandler.post { player?.play() }
-  }
-
-  override val isRunning: Boolean
-    get() = running.get()
-
-  override val isPaused: Boolean
-    get() = paused.get()
-
-  override val playbackState: WebmPlaybackState
-    get() = when {
-      stats.failed.get() -> WebmPlaybackState.FAILED
-      !running.get() -> WebmPlaybackState.IDLE
-      paused.get() -> WebmPlaybackState.PAUSED
-      // Halted by the platform (audio-focus loss, background) rather than by
-      // JS — still PAUSED, distinguishable via isPaused staying false.
-      stats.isHalted -> WebmPlaybackState.PAUSED
-      stats.isReady -> WebmPlaybackState.PLAYING
-      else -> WebmPlaybackState.BUFFERING
+    override fun onEnded() {
+      when {
+        // A finished broadcast leaves the player stopped; play() starts another.
+        broadcastEnded -> {
+          fireHealth(WebmHealthStatus.ENDED, "broadcast ended")
+          active.set(false)
+          teardownOnMain()
+        }
+        // No source: a rejoin is pending or focus is lost, and this is the old
+        // pipe draining.
+        source != null -> rejoin("worklet exited")
+      }
     }
 
-  // MARK: - Stream data
+    // A live source that ExoPlayer rejects (a pipe that ended before its header,
+    // a decoder failure) is a lost stream, not a dead player: re-preparing on a
+    // fresh worklet recovers it, and the dataless-session limit bounds retries.
+    override fun onPlayerError(detail: String) = rejoin("player error: $detail")
 
-  override fun feedData(data: ArrayBuffer): Boolean {
-    val handle = ringHandle.get()
-    if (handle == 0L || resetPending.get()) return false
-    val size = data.size
-    if (size == 0) return false
-    // A JS ArrayBuffer is non-owning: getBuffer(false) wraps its memory in a
-    // direct ByteBuffer valid only for this call. The ring copies before we
-    // return, so nothing outlives it.
-    val buffer = data.getBuffer(false)
-    if (!buffer.isDirect) return false
-    val wrote = RingBridge.write(handle, buffer, size)
-    stats.bytesFed.addAndGet(wrote.toLong())
-    return wrote == size
-  }
-
-  override fun setEndOfStream() {
-    val handle = ringHandle.get()
-    if (handle != 0L) RingBridge.setEndOfStream(handle)
-  }
-
-  override fun resetStream() {
-    val handle = ringHandle.get()
-    if (handle == 0L) return
-    // Gate feeding until the teardown below has run: bytes accepted before the
-    // old extractor stops are destructively consumed by it (most damagingly the
-    // new stream's EBML header), and bytes accepted before the clear are wiped.
-    // The feeder sees false and re-sends, per the feedData contract.
-    resetPending.set(true)
-    mainHandler.post {
-      val exo = player ?: run { resetPending.set(false); return@post }
-      // A new stream begins with its own EBML header, and the running
-      // MatroskaExtractor is mid-cluster — rebuild the pipeline rather than
-      // feed a header into it. Mirrors the iOS pump's demuxer.reset().
-      // Cleared only after stop(): a clear before it feeds the doomed loader.
-      exo.stop()
-      RingBridge.clear(handle)
-      exo.setMediaSource(buildMediaSource(handle))
-      exo.prepare()
-      stats.rebase()
-      // A failure belonging to the torn-down stream must not outlive the reset,
-      // or playbackState stays FAILED while the new stream plays.
-      stats.failed.set(false)
-      exo.playWhenReady = !paused.get() && !backgrounded.get()
-      resetPending.set(false)
-      fireHealth(WebmHealthStatus.BUFFERING, "stream reset")
+    override fun onAudioFocus(held: Boolean) {
+      if (!active.get() || broadcastEnded) return
+      if (!held) {
+        pendingRejoin?.let { mainHandler.removeCallbacks(it) }
+        pendingRejoin = null
+        stopSource()
+        focusLost = true
+        fireHealth(WebmHealthStatus.BUFFERING, "audio focus lost")
+      } else if (focusLost) {
+        focusLost = false
+        rejoin("audio focus regained", immediate = true)
+      }
     }
   }
 
@@ -276,25 +255,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     get() = currentMuted
     set(value) {
       currentMuted = value
-      mainHandler.post { player?.volume = if (value) 0f else currentGain.toFloat() }
-    }
-
-  override var gain: Double
-    get() = currentGain
-    set(value) {
-      // media3 clamps volume to [0,1]; mirroring a larger value would report a
-      // gain the platform is not applying.
-      val clamped = value.coerceIn(0.0, 1.0)
-      currentGain = clamped
-      mainHandler.post { if (!currentMuted) player?.volume = clamped.toFloat() }
-    }
-
-  override var playbackRate: Double
-    get() = currentRate
-    set(value) {
-      val clamped = value.coerceIn(0.5, 2.0)
-      currentRate = clamped
-      mainHandler.post { player?.setPlaybackSpeed(clamped.toFloat()) }
+      mainHandler.post { player?.volume = if (value) MUTED_VOLUME else FULL_VOLUME }
     }
 
   // MARK: - Video surface
@@ -304,7 +265,7 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
    * contract with iOS, and a PlayerView has no meaning there.
    *
    * ExoPlayer is main-thread confined, and the surface may be attached before
-   * start() has finished creating the player, so binding is posted and also
+   * play() has finished creating the player, so binding is posted and also
    * re-applied when the player appears.
    */
   fun attachSurface(target: PlayerView) {
@@ -326,64 +287,36 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     }
   }
 
-  // MARK: - Health and routing
+  // MARK: - Health and metrics
 
   override fun setHealthCallback(callback: (event: WebmHealthEvent) -> Unit) {
     healthCallback = callback
   }
 
-  /** Fires only on transition, so a stalled stream does not spam the callback. */
+  /** Fires only on change, so a stalled stream does not spam the callback. */
   private fun fireHealth(status: WebmHealthStatus, detail: String) {
-    // stop() drains the extractor to end-of-input before the posted release
-    // runs; that ENDED belongs to the teardown, not to the broadcast.
-    if (status == WebmHealthStatus.ENDED && !running.get()) return
-    if (lastHealth == status) return
-    lastHealth = status
-    healthCallback?.invoke(WebmHealthEvent(status, detail))
+    // A user stop emits nothing, including events queued before its teardown.
+    if (!active.get()) return
+    val event = WebmHealthEvent(status, detail)
+    if (lastHealth == event) return
+    lastHealth = event
+    healthCallback?.invoke(event)
   }
 
-  override val currentAudioRoute: WebmAudioRoute
-    get() = routeMonitor().currentRoute()
-
-  override fun getAvailableAudioRoutes(): Array<WebmAudioRoute> =
-    routeMonitor().availableRoutes().toTypedArray()
-
-  override fun setRouteChangeCallback(callback: (route: WebmAudioRoute) -> Unit) {
-    routeMonitor().setCallback(callback)
-  }
-
-  /** Created lazily: routing is queryable before start() and after stop(). */
-  private fun routeMonitor(): AudioRouteMonitor {
-    routes?.let { return it }
-    val context = requireNotNull(NitroModules.applicationContext) {
-      "no application context; cannot query audio routes"
-    }
-    return AudioRouteMonitor(context, mainHandler).also { routes = it }
-  }
-
-  // MARK: - Metrics
-
-  override fun getMetrics(): WebmPlayerMetrics {
-    val handle = ringHandle.get()
-    return stats.snapshot(
-      bytesDropped = if (handle != 0L) RingBridge.droppedBytes(handle) else 0L,
-      ringFillRatio = if (handle != 0L) RingBridge.fillRatio(handle) else 0.0,
-    )
-  }
-
-  // MARK: - Main-thread wiring
-
-  private fun releaseOnMain() {
-    lifecycle?.invalidate()
-    lifecycle = null
-    stats.detach()
-    surface?.player = null
-    player?.release()
-    player = null
-  }
+  override fun getMetrics(): WebmPlayerMetrics =
+    stats.snapshot(bytesReceived = metricsSource?.bytesReceived?.get() ?: 0L)
 
   companion object {
     private const val TAG = "WebmPlayer"
-    private const val READ_TIMEOUT_MS = 50
+    private const val MUTED_VOLUME = 0f
+    private const val FULL_VOLUME = 1f
+    private val REJOIN_BACKOFF_MS = longArrayOf(500, 1_000, 2_000, 4_000, 4_000)
+    private const val STATUS_NET = "net "
+    private const val STATUS_JOINING = "joining"
+    private const val STATUS_CONNECTED = "connected"
+    private const val STATUS_ENDED = "ended"
+    private const val STATUS_LAG = "lag"
+    private const val STATUS_RECONFIGURED = "reconfigured"
+    private const val STATUS_ERROR = "error"
   }
 }

@@ -50,30 +50,16 @@ namespace margelo::nitro::webmplayer {
 
   public:
     // Properties
-    bool getIsRunning() override;
-    bool getIsPaused() override;
     WebmPlaybackState getPlaybackState() override;
     bool getMuted() override;
     void setMuted(bool muted) override;
-    double getGain() override;
-    void setGain(double gain) override;
-    double getPlaybackRate() override;
-    void setPlaybackRate(double playbackRate) override;
-    WebmAudioRoute getCurrentAudioRoute() override;
 
   public:
     // Methods
-    bool start() override;
-    bool stop() override;
-    bool pause() override;
-    bool resume() override;
-    bool feedData(const std::shared_ptr<ArrayBuffer>& data) override;
-    void setEndOfStream() override;
-    void resetStream() override;
+    void play(const std::string& key) override;
+    void stop() override;
     WebmPlayerMetrics getMetrics() override;
     void setHealthCallback(const std::function<void(const WebmHealthEvent& /* event */)>& callback) override;
-    std::vector<WebmAudioRoute> getAvailableAudioRoutes() override;
-    void setRouteChangeCallback(const std::function<void(WebmAudioRoute /* route */)>& callback) override;
 
   private:
     jni::global_ref<JHybridWebmPlayerSpec::JavaPart> _javaPart;

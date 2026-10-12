@@ -13,7 +13,7 @@ import androidx.media3.extractor.mkv.MatroskaExtractor
 
 /**
  * Assembles the ExoPlayer ingestion pieces: the live-tuned LoadControl and a
- * ProgressiveMediaSource reading muxed WebM from ring-backed DataSources.
+ * ProgressiveMediaSource reading muxed WebM from stream-backed DataSources.
  */
 @UnstableApi
 internal object WebmMediaPipeline {
@@ -27,24 +27,20 @@ internal object WebmMediaPipeline {
       .setPrioritizeTimeOverSizeThresholds(true)
       .build()
 
-  /**
-   * Fresh DataSource per load: the loader closes its source when a load ends,
-   * and a shared instance, once closed, would answer the next load with
-   * end-of-input.
-   */
   fun mediaSource(newDataSource: () -> DataSource): MediaSource {
     val extractors = DefaultExtractorsFactory()
       .setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
     val mediaItem = MediaItem.Builder()
-      .setUri(RingDataSource.STREAM_URI)
+      .setUri(StreamDataSource.STREAM_URI)
       .setMimeType(MimeTypes.VIDEO_WEBM)
       .build()
     return ProgressiveMediaSource.Factory(DataSource.Factory { newDataSource() }, extractors)
       .createMediaSource(mediaItem)
   }
 
-  // Live-broadcast latency posture: keep only ~a tenth of a second buffered;
-  // the 120 ms ceiling also bounds how far a backgrounded player can drain.
+  // Live-broadcast latency posture: keep only ~a tenth of a second buffered.
+  // Raising it to iOS's 4 s margin is the next experiment (docs/AUDIT.md,
+  // "playout margin").
   private const val MIN_BUFFER_MS = 50
   private const val MAX_BUFFER_MS = 120
   private const val BUFFER_FOR_PLAYBACK_MS = 30

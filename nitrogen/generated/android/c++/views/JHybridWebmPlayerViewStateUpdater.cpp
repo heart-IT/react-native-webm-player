@@ -15,45 +15,64 @@ namespace margelo::nitro::webmplayer::views {
 using namespace facebook;
 using ConcreteStateData = react::ConcreteState<HybridWebmPlayerViewState>;
 
-void JHybridWebmPlayerViewStateUpdater::updateViewProps(jni::alias_ref<jni::JClass> /* class */,
-                                           jni::alias_ref<JHybridWebmPlayerViewSpec::JavaPart> javaView,
-                                           jni::alias_ref<JStateWrapper::javaobject> stateWrapperInterface) {
-  std::shared_ptr<JHybridWebmPlayerViewSpec> hybridView = javaView->getJHybridWebmPlayerViewSpec();
-
-  // Get concrete StateWrapperImpl from passed StateWrapper interface object
-  jobject rawStateWrapper = stateWrapperInterface.get();
-  if (!stateWrapperInterface->isInstanceOf(react::StateWrapperImpl::javaClassStatic())) [[unlikely]] {
-      throw std::runtime_error("StateWrapper is not a StateWrapperImpl");
+std::shared_ptr<const HybridWebmPlayerViewProps> JHybridWebmPlayerViewStateUpdater::getPropsFromStateWrapper(
+    jni::alias_ref<JStateWrapper::javaobject> stateWrapper) {
+  if (stateWrapper.get() == nullptr) {
+    return nullptr;
   }
-  auto stateWrapper = jni::alias_ref<react::StateWrapperImpl::javaobject>{
-            static_cast<react::StateWrapperImpl::javaobject>(rawStateWrapper)};
-  std::shared_ptr<const react::State> state = stateWrapper->cthis()->getState();
+  // Get concrete StateWrapperImpl from passed StateWrapper interface object
+  jobject rawStateWrapper = stateWrapper.get();
+  if (!stateWrapper->isInstanceOf(react::StateWrapperImpl::javaClassStatic())) [[unlikely]] {
+    throw std::runtime_error("StateWrapper is not a StateWrapperImpl");
+  }
+  auto stateWrapperImpl = jni::alias_ref<react::StateWrapperImpl::javaobject>{
+    static_cast<react::StateWrapperImpl::javaobject>(rawStateWrapper)
+  };
+  std::shared_ptr<const react::State> state = stateWrapperImpl->cthis()->getState();
+  if (state == nullptr) {
+    return nullptr;
+  }
   auto concreteState = std::static_pointer_cast<const ConcreteStateData>(state);
   const HybridWebmPlayerViewState& data = concreteState->getData();
-  const std::shared_ptr<HybridWebmPlayerViewProps>& props = data.getProps();
+  const std::shared_ptr<const HybridWebmPlayerViewProps>& props = data.getProps();
   if (props == nullptr) [[unlikely]] {
-    // Props aren't set yet!
     throw std::runtime_error("HybridWebmPlayerViewState's data doesn't contain any props!");
   }
+  return props;
+}
 
-  // Update all props if they are dirty
-  if (props->player.isDirty) {
-    hybridView->setPlayer(props->player.value);
-    props->player.isDirty = false;
+void JHybridWebmPlayerViewStateUpdater::updateViewProps(jni::alias_ref<jni::JClass> /* class */,
+                                           jni::alias_ref<JHybridWebmPlayerViewSpec::JavaPart> javaView,
+                                           jni::alias_ref<JStateWrapper::javaobject> newState,
+                                           jni::alias_ref<JStateWrapper::javaobject> oldState) {
+  std::shared_ptr<JHybridWebmPlayerViewSpec> hybridView = javaView->getJHybridWebmPlayerViewSpec();
+  std::shared_ptr<const HybridWebmPlayerViewProps> newProps = getPropsFromStateWrapper(newState);
+  std::shared_ptr<const HybridWebmPlayerViewProps> oldProps = getPropsFromStateWrapper(oldState);
+  if (newProps == nullptr) [[unlikely]] {
+    throw std::runtime_error("Current StateWrapper doesn't contain any props!");
   }
-  if (props->scaleMode.isDirty) {
-    hybridView->setScaleMode(props->scaleMode.value);
-    props->scaleMode.isDirty = false;
+
+  // Update only props that differ from the previous State snapshot.
+  if (oldProps == nullptr
+        ? newProps->player.isProvided()
+        : !newProps->player.hasSameValue(oldProps->player)) {
+    hybridView->setPlayer(newProps->player.get());
+  }
+  if (oldProps == nullptr
+        ? newProps->scaleMode.isProvided()
+        : !newProps->scaleMode.hasSameValue(oldProps->scaleMode)) {
+    hybridView->setScaleMode(newProps->scaleMode.get());
   }
 
   // Update hybridRef if it changed
-  if (props->hybridRef.isDirty) {
+  if (oldProps == nullptr
+        ? newProps->hybridRef.isProvided()
+        : !newProps->hybridRef.hasSameValue(oldProps->hybridRef)) {
     // hybridRef changed - call it with new this
-    const auto& maybeFunc = props->hybridRef.value;
+    const auto& maybeFunc = newProps->hybridRef.get();
     if (maybeFunc.has_value()) {
       maybeFunc.value()(hybridView);
     }
-    props->hybridRef.isDirty = false;
   }
 }
 

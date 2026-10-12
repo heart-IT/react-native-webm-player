@@ -8,11 +8,7 @@ export type {
   WebmPlayerMetrics,
   WebmHealthEvent,
 } from './specs/webm-player.nitro'
-export {
-  WebmPlaybackState,
-  WebmHealthStatus,
-  WebmAudioRoute,
-} from './specs/webm-player.nitro'
+export { WebmPlaybackState, WebmHealthStatus } from './specs/webm-player.nitro'
 export type {
   WebmPlayerViewProps,
   WebmScaleMode,

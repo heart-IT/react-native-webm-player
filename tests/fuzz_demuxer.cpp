@@ -69,11 +69,8 @@ static void fuzzOnce(const uint8_t* data, size_t size) {
         }
     }
 
-    // Access metrics (exercises all getter paths)
-    auto metrics = demuxer.demuxerMetrics();
-    (void)metrics.totalBytesFed;
-    (void)metrics.bufferBytes;
-    (void)demuxer.trackInfoSnapshot();
+    (void)demuxer.bufferBytes();
+    (void)demuxer.trackInfo();
     (void)demuxer.parseState();
 }
 

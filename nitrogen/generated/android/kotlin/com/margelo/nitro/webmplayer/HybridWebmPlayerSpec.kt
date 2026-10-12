@@ -10,7 +10,7 @@ package com.margelo.nitro.webmplayer
 import androidx.annotation.Keep
 import com.facebook.jni.HybridData
 import com.facebook.proguard.annotations.DoNotStrip
-import com.margelo.nitro.core.ArrayBuffer
+import dalvik.annotation.optimization.FastNative
 import com.margelo.nitro.core.HybridObject
 
 /**
@@ -28,14 +28,6 @@ abstract class HybridWebmPlayerSpec: HybridObject() {
   // Properties
   @get:DoNotStrip
   @get:Keep
-  abstract val isRunning: Boolean
-  
-  @get:DoNotStrip
-  @get:Keep
-  abstract val isPaused: Boolean
-  
-  @get:DoNotStrip
-  @get:Keep
   abstract val playbackState: WebmPlaybackState
   
   @get:DoNotStrip
@@ -43,51 +35,15 @@ abstract class HybridWebmPlayerSpec: HybridObject() {
   @set:DoNotStrip
   @set:Keep
   abstract var muted: Boolean
-  
-  @get:DoNotStrip
-  @get:Keep
-  @set:DoNotStrip
-  @set:Keep
-  abstract var gain: Double
-  
-  @get:DoNotStrip
-  @get:Keep
-  @set:DoNotStrip
-  @set:Keep
-  abstract var playbackRate: Double
-  
-  @get:DoNotStrip
-  @get:Keep
-  abstract val currentAudioRoute: WebmAudioRoute
 
   // Methods
   @DoNotStrip
   @Keep
-  abstract fun start(): Boolean
+  abstract fun play(key: String): Unit
   
   @DoNotStrip
   @Keep
-  abstract fun stop(): Boolean
-  
-  @DoNotStrip
-  @Keep
-  abstract fun pause(): Boolean
-  
-  @DoNotStrip
-  @Keep
-  abstract fun resume(): Boolean
-  
-  @DoNotStrip
-  @Keep
-  abstract fun feedData(data: ArrayBuffer): Boolean
-  
-  @DoNotStrip
-  @Keep
-  abstract fun setEndOfStream(): Unit
-  
-  @DoNotStrip
-  @Keep
-  abstract fun resetStream(): Unit
+  abstract fun stop(): Unit
   
   @DoNotStrip
   @Keep
@@ -101,19 +57,6 @@ abstract class HybridWebmPlayerSpec: HybridObject() {
     val __result = setHealthCallback(callback)
     return __result
   }
-  
-  @DoNotStrip
-  @Keep
-  abstract fun getAvailableAudioRoutes(): Array<WebmAudioRoute>
-  
-  abstract fun setRouteChangeCallback(callback: (route: WebmAudioRoute) -> Unit): Unit
-  
-  @DoNotStrip
-  @Keep
-  private fun setRouteChangeCallback_cxx(callback: Func_void_WebmAudioRoute): Unit {
-    val __result = setRouteChangeCallback(callback)
-    return __result
-  }
 
   // Default implementation of `HybridObject.toString()`
   override fun toString(): String {
@@ -125,6 +68,7 @@ abstract class HybridWebmPlayerSpec: HybridObject() {
   @Keep
   protected open class CxxPart(javaPart: HybridWebmPlayerSpec): HybridObject.CxxPart(javaPart) {
     // C++ JHybridWebmPlayerSpec::CxxPart::initHybrid(...)
+    @FastNative
     external override fun initHybrid(): HybridData
   }
   override fun createCxxPart(): CxxPart {

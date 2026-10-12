@@ -20,78 +20,63 @@ import java.util.concurrent.atomic.AtomicLong
  * violation, so state is pushed here instead: listeners for events, a polled
  * tick for the counters, which have no callback.
  *
- * Counters are cumulative across start/stop cycles, matching iOS.
+ * Counters are cumulative across sessions, matching iOS.
  */
 @UnstableApi
 class PlaybackStats(private val mainHandler: Handler) {
 
-  val bytesFed = AtomicLong(0)
-  val failed = AtomicBoolean(false)
+  /** Player events that drive session policy. Delivered on the main thread. */
+  interface Events {
+    fun onHealth(status: WebmHealthStatus, detail: String)
+    fun onFirstFrame()
+    fun onEnded()
+    fun onAudioFocus(held: Boolean)
+    /** ExoPlayer gave up on the current source; the player decides whether to rejoin. */
+    fun onPlayerError(detail: String)
+  }
 
-  // ExoPlayer halts playback itself on audio-focus loss (and we pause it on
-  // background) by dropping playWhenReady; without this mirror those pauses
-  // are invisible to the synchronous getters and playbackState lies PLAYING.
-  private val playWhenReady = AtomicBoolean(true)
+  val failed = AtomicBoolean(false)
+  // Per session: the first audio or video frame actually presented, which is
+  // what separates BUFFERING from PLAYING for a live stream.
+  val rendered = AtomicBoolean(false)
 
   private val audioPackets = AtomicLong(0)
   private val videoPackets = AtomicLong(0)
-  private val audioUnderruns = AtomicLong(0)
   private val videoDropped = AtomicLong(0)
   private val videoW = AtomicInteger(0)
   private val videoH = AtomicInteger(0)
   private val positionMs = AtomicLong(0)
-  private val exoState = AtomicInteger(Player.STATE_IDLE)
 
   private var tick: Runnable? = null
 
   // Decoder counters restart at zero with every ExoPlayer instance (and every
-  // re-prepare after a stream reset); these bases carry the totals accumulated
+  // re-prepare after a rejoin); these bases carry the totals accumulated
   // so far, so the atomics stay cumulative. Main thread only, like the poll.
   private var audioPacketsBase = 0L
   private var videoPacketsBase = 0L
   private var videoDroppedBase = 0L
 
-  val isReady: Boolean
-    get() = exoState.get() == Player.STATE_READY
-
-  val isHalted: Boolean
-    get() = !playWhenReady.get()
-
   /** Wires listeners and starts the counter poll. Main thread only. */
-  fun attach(exo: ExoPlayer, onHealth: (WebmHealthStatus, String) -> Unit) {
-    rebase()
-    // A stale READY from the previous cycle would read as PLAYING before this
-    // player's first onPlaybackStateChanged.
-    exoState.set(Player.STATE_IDLE)
-    playWhenReady.set(exo.playWhenReady)
+  fun attach(exo: ExoPlayer, events: Events) {
     exo.addListener(object : Player.Listener {
       override fun onPlayWhenReadyChanged(value: Boolean, reason: Int) {
-        playWhenReady.set(value)
         // ExoPlayer reports both the loss-driven pause and the regain-driven
         // resume under this one reason.
         if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS) {
-          if (value) {
-            onHealth(WebmHealthStatus.PLAYING, "audio focus regained")
-          } else {
-            onHealth(WebmHealthStatus.INTERRUPTED, "audio focus loss")
-          }
+          events.onAudioFocus(value)
         }
       }
 
       override fun onPlaybackStateChanged(state: Int) {
-        exoState.set(state)
         when (state) {
-          Player.STATE_READY -> onHealth(WebmHealthStatus.PLAYING, "ready")
-          Player.STATE_BUFFERING -> onHealth(WebmHealthStatus.BUFFERING, "buffering")
-          Player.STATE_ENDED -> onHealth(WebmHealthStatus.ENDED, "end of stream")
+          Player.STATE_READY -> events.onHealth(WebmHealthStatus.PLAYING, "ready")
+          Player.STATE_BUFFERING -> events.onHealth(WebmHealthStatus.BUFFERING, "buffering")
+          Player.STATE_ENDED -> events.onEnded()
           else -> Unit
         }
       }
 
-      override fun onPlayerError(error: PlaybackException) {
-        failed.set(true)
-        onHealth(WebmHealthStatus.FAILED, error.errorCodeName)
-      }
+      override fun onPlayerError(error: PlaybackException) = events.onPlayerError(error.errorCodeName)
 
       override fun onVideoSizeChanged(videoSize: VideoSize) {
         videoW.set(videoSize.width)
@@ -100,14 +85,16 @@ class PlaybackStats(private val mainHandler: Handler) {
     })
 
     exo.addAnalyticsListener(object : AnalyticsListener {
-      override fun onAudioUnderrun(
+      override fun onRenderedFirstFrame(
         eventTime: AnalyticsListener.EventTime,
-        bufferSize: Int,
-        bufferSizeMs: Long,
-        elapsedSinceLastFeedMs: Long,
-      ) {
-        audioUnderruns.incrementAndGet()
-      }
+        output: Any,
+        renderTimeMs: Long,
+      ) = firstFrame(events)
+
+      override fun onAudioPositionAdvancing(
+        eventTime: AnalyticsListener.EventTime,
+        playoutStartSystemTimeMs: Long,
+      ) = firstFrame(events)
     })
 
     startPolling(exo)
@@ -119,27 +106,23 @@ class PlaybackStats(private val mainHandler: Handler) {
     tick = null
   }
 
-  /** Re-captures the cumulative bases. Call whenever decoders restart. */
-  fun rebase() {
+  /** Call whenever a new session is prepared: decoders restart, nothing is rendered yet. */
+  fun newSession() {
     audioPacketsBase = audioPackets.get()
     videoPacketsBase = videoPackets.get()
     videoDroppedBase = videoDropped.get()
+    rendered.set(false)
   }
 
-  fun snapshot(
-    bytesDropped: Long,
-    ringFillRatio: Double,
-  ) = WebmPlayerMetrics(
-    bytesFedTotal = bytesFed.get().toDouble(),
-    bytesDropped = bytesDropped.toDouble(),
-    ringFillRatio = ringFillRatio,
+  private fun firstFrame(events: Events) {
+    if (rendered.compareAndSet(false, true)) events.onFirstFrame()
+  }
+
+  fun snapshot(bytesReceived: Long) = WebmPlayerMetrics(
+    bytesReceived = bytesReceived.toDouble(),
     audioPacketsDecoded = audioPackets.get().toDouble(),
     videoPacketsDecoded = videoPackets.get().toDouble(),
-    audioUnderruns = audioUnderruns.get().toDouble(),
     videoFramesDropped = videoDropped.get().toDouble(),
-    // ExoPlayer conceals internally and does not report recovered frames, so
-    // this stays 0 on Android rather than inventing a number.
-    audioFramesRecovered = 0.0,
     videoWidth = videoW.get().toDouble(),
     videoHeight = videoH.get().toDouble(),
     currentTimeSeconds = positionMs.get() / 1000.0,

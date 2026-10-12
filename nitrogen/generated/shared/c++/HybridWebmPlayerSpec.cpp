@@ -14,27 +14,13 @@ namespace margelo::nitro::webmplayer {
     HybridObject::loadHybridMethods();
     // load custom methods/properties
     registerHybrids(this, [](Prototype& prototype) {
-      prototype.registerHybridGetter("isRunning", &HybridWebmPlayerSpec::getIsRunning);
-      prototype.registerHybridGetter("isPaused", &HybridWebmPlayerSpec::getIsPaused);
       prototype.registerHybridGetter("playbackState", &HybridWebmPlayerSpec::getPlaybackState);
       prototype.registerHybridGetter("muted", &HybridWebmPlayerSpec::getMuted);
       prototype.registerHybridSetter("muted", &HybridWebmPlayerSpec::setMuted);
-      prototype.registerHybridGetter("gain", &HybridWebmPlayerSpec::getGain);
-      prototype.registerHybridSetter("gain", &HybridWebmPlayerSpec::setGain);
-      prototype.registerHybridGetter("playbackRate", &HybridWebmPlayerSpec::getPlaybackRate);
-      prototype.registerHybridSetter("playbackRate", &HybridWebmPlayerSpec::setPlaybackRate);
-      prototype.registerHybridGetter("currentAudioRoute", &HybridWebmPlayerSpec::getCurrentAudioRoute);
-      prototype.registerHybridMethod("start", &HybridWebmPlayerSpec::start);
+      prototype.registerHybridMethod("play", &HybridWebmPlayerSpec::play);
       prototype.registerHybridMethod("stop", &HybridWebmPlayerSpec::stop);
-      prototype.registerHybridMethod("pause", &HybridWebmPlayerSpec::pause);
-      prototype.registerHybridMethod("resume", &HybridWebmPlayerSpec::resume);
-      prototype.registerHybridMethod("feedData", &HybridWebmPlayerSpec::feedData);
-      prototype.registerHybridMethod("setEndOfStream", &HybridWebmPlayerSpec::setEndOfStream);
-      prototype.registerHybridMethod("resetStream", &HybridWebmPlayerSpec::resetStream);
       prototype.registerHybridMethod("getMetrics", &HybridWebmPlayerSpec::getMetrics);
       prototype.registerHybridMethod("setHealthCallback", &HybridWebmPlayerSpec::setHealthCallback);
-      prototype.registerHybridMethod("getAvailableAudioRoutes", &HybridWebmPlayerSpec::getAvailableAudioRoutes);
-      prototype.registerHybridMethod("setRouteChangeCallback", &HybridWebmPlayerSpec::setRouteChangeCallback);
     });
   }
 

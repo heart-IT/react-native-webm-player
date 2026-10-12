@@ -20,13 +20,7 @@ import java.util.Objects
 data class WebmPlayerMetrics(
   @DoNotStrip
   @Keep
-  val bytesFedTotal: Double,
-  @DoNotStrip
-  @Keep
-  val bytesDropped: Double,
-  @DoNotStrip
-  @Keep
-  val ringFillRatio: Double,
+  val bytesReceived: Double,
   @DoNotStrip
   @Keep
   val audioPacketsDecoded: Double,
@@ -35,13 +29,7 @@ data class WebmPlayerMetrics(
   val videoPacketsDecoded: Double,
   @DoNotStrip
   @Keep
-  val audioUnderruns: Double,
-  @DoNotStrip
-  @Keep
   val videoFramesDropped: Double,
-  @DoNotStrip
-  @Keep
-  val audioFramesRecovered: Double,
   @DoNotStrip
   @Keep
   val videoWidth: Double,
@@ -57,14 +45,10 @@ data class WebmPlayerMetrics(
   override fun equals(other: Any?): Boolean {
     if (this === other) return true
     if (other !is WebmPlayerMetrics) return false
-    return Objects.deepEquals(this.bytesFedTotal, other.bytesFedTotal)
-      && Objects.deepEquals(this.bytesDropped, other.bytesDropped)
-      && Objects.deepEquals(this.ringFillRatio, other.ringFillRatio)
+    return Objects.deepEquals(this.bytesReceived, other.bytesReceived)
       && Objects.deepEquals(this.audioPacketsDecoded, other.audioPacketsDecoded)
       && Objects.deepEquals(this.videoPacketsDecoded, other.videoPacketsDecoded)
-      && Objects.deepEquals(this.audioUnderruns, other.audioUnderruns)
       && Objects.deepEquals(this.videoFramesDropped, other.videoFramesDropped)
-      && Objects.deepEquals(this.audioFramesRecovered, other.audioFramesRecovered)
       && Objects.deepEquals(this.videoWidth, other.videoWidth)
       && Objects.deepEquals(this.videoHeight, other.videoHeight)
       && Objects.deepEquals(this.currentTimeSeconds, other.currentTimeSeconds)
@@ -72,14 +56,10 @@ data class WebmPlayerMetrics(
 
   override fun hashCode(): Int {
     return arrayOf<Any?>(
-      bytesFedTotal,
-      bytesDropped,
-      ringFillRatio,
+      bytesReceived,
       audioPacketsDecoded,
       videoPacketsDecoded,
-      audioUnderruns,
       videoFramesDropped,
-      audioFramesRecovered,
       videoWidth,
       videoHeight,
       currentTimeSeconds
@@ -94,8 +74,8 @@ data class WebmPlayerMetrics(
     @Keep
     @Suppress("unused")
     @JvmStatic
-    private fun fromCpp(bytesFedTotal: Double, bytesDropped: Double, ringFillRatio: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double): WebmPlayerMetrics {
-      return WebmPlayerMetrics(bytesFedTotal, bytesDropped, ringFillRatio, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds)
+    private fun fromCpp(bytesReceived: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, videoFramesDropped: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double): WebmPlayerMetrics {
+      return WebmPlayerMetrics(bytesReceived, audioPacketsDecoded, videoPacketsDecoded, videoFramesDropped, videoWidth, videoHeight, currentTimeSeconds)
     }
   }
 }

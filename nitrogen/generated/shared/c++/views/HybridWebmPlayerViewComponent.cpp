@@ -7,18 +7,12 @@
 
 #include "HybridWebmPlayerViewComponent.hpp"
 
-#include <string>
-#include <exception>
-#include <utility>
-#include <NitroModules/NitroDefines.hpp>
-#include <NitroModules/JSIConverter.hpp>
-#include <NitroModules/PropNameIDCache.hpp>
-#include <react/renderer/core/RawValue.h>
-#include <react/renderer/core/ShadowNode.h>
-#include <react/renderer/core/ComponentDescriptor.h>
-#include <react/renderer/components/view/ViewProps.h>
+#include <NitroModules/NitroHash.hpp>
+#include <NitroModules/ReactProp.hpp>
 
 namespace margelo::nitro::webmplayer::views {
+
+  using namespace facebook;
 
   extern const char HybridWebmPlayerViewComponentName[] = "WebmPlayerView";
 
@@ -26,36 +20,9 @@ namespace margelo::nitro::webmplayer::views {
                                                        const HybridWebmPlayerViewProps& sourceProps,
                                                        const react::RawProps& rawProps):
     react::ViewProps(context, sourceProps, rawProps, filterObjectKeys),
-    player([&]() -> CachedProp<std::optional<std::shared_ptr<HybridWebmPlayerSpec>>> {
-      try {
-        const react::RawValue* rawValue = rawProps.at("player", nullptr, nullptr);
-        if (rawValue == nullptr) return sourceProps.player;
-        const auto& [runtime, value] = (std::pair<jsi::Runtime*, jsi::Value>)*rawValue;
-        return CachedProp<std::optional<std::shared_ptr<HybridWebmPlayerSpec>>>::fromRawValue(*runtime, value, sourceProps.player);
-      } catch (const std::exception& exc) {
-        throw std::runtime_error(std::string("WebmPlayerView.player: ") + exc.what());
-      }
-    }()),
-    scaleMode([&]() -> CachedProp<WebmScaleMode> {
-      try {
-        const react::RawValue* rawValue = rawProps.at("scaleMode", nullptr, nullptr);
-        if (rawValue == nullptr) return sourceProps.scaleMode;
-        const auto& [runtime, value] = (std::pair<jsi::Runtime*, jsi::Value>)*rawValue;
-        return CachedProp<WebmScaleMode>::fromRawValue(*runtime, value, sourceProps.scaleMode);
-      } catch (const std::exception& exc) {
-        throw std::runtime_error(std::string("WebmPlayerView.scaleMode: ") + exc.what());
-      }
-    }()),
-    hybridRef([&]() -> CachedProp<std::optional<std::function<void(const std::shared_ptr<HybridWebmPlayerViewSpec>& /* ref */)>>> {
-      try {
-        const react::RawValue* rawValue = rawProps.at("hybridRef", nullptr, nullptr);
-        if (rawValue == nullptr) return sourceProps.hybridRef;
-        const auto& [runtime, value] = (std::pair<jsi::Runtime*, jsi::Value>)*rawValue;
-        return CachedProp<std::optional<std::function<void(const std::shared_ptr<HybridWebmPlayerViewSpec>& /* ref */)>>>::fromRawValue(*runtime, value.asObject(*runtime).getProperty(*runtime, PropNameIDCache::get(*runtime, "f")), sourceProps.hybridRef);
-      } catch (const std::exception& exc) {
-        throw std::runtime_error(std::string("WebmPlayerView.hybridRef: ") + exc.what());
-      }
-    }()) { }
+    player(nitro::ReactProp<std::optional<std::shared_ptr<HybridWebmPlayerSpec>>>::fromRawValue("WebmPlayerView", "player", rawProps, sourceProps.player)),
+    scaleMode(nitro::ReactProp<WebmScaleMode>::fromRawValue("WebmPlayerView", "scaleMode", rawProps, sourceProps.scaleMode)),
+    hybridRef(nitro::ReactProp<std::optional<std::function<void(const std::shared_ptr<HybridWebmPlayerViewSpec>& /* ref */)>>>::fromRawValue("WebmPlayerView", "hybridRef", rawProps, sourceProps.hybridRef)) { }
 
   bool HybridWebmPlayerViewProps::filterObjectKeys(const std::string& propName) {
     switch (hashString(propName)) {
@@ -65,30 +32,5 @@ namespace margelo::nitro::webmplayer::views {
       default: return false;
     }
   }
-
-  HybridWebmPlayerViewComponentDescriptor::HybridWebmPlayerViewComponentDescriptor(const react::ComponentDescriptorParameters& parameters)
-    : ConcreteComponentDescriptor(parameters,
-                                  react::RawPropsParser()) {}
-
-  std::shared_ptr<const react::Props> HybridWebmPlayerViewComponentDescriptor::cloneProps(const react::PropsParserContext& context,
-                                                                                          const std::shared_ptr<const react::Props>& props,
-                                                                                          react::RawProps rawProps) const {
-    // 1. Prepare raw props parser
-    rawProps.parse(rawPropsParser_);
-    // 2. Copy props with Nitro's cached copy constructor
-    return HybridWebmPlayerViewShadowNode::Props(context, /* & */ rawProps, props);
-  }
-
-#ifdef ANDROID
-  void HybridWebmPlayerViewComponentDescriptor::adopt(react::ShadowNode& shadowNode) const {
-    // This is called immediately after `ShadowNode` is created, cloned or in progress.
-    // On Android, we need to wrap props in our state, which gets routed through Java and later unwrapped in JNI/C++.
-    auto& concreteShadowNode = static_cast<HybridWebmPlayerViewShadowNode&>(shadowNode);
-    const std::shared_ptr<const HybridWebmPlayerViewProps>& constProps = concreteShadowNode.getConcreteSharedProps();
-    const std::shared_ptr<HybridWebmPlayerViewProps>& props = std::const_pointer_cast<HybridWebmPlayerViewProps>(constProps);
-    HybridWebmPlayerViewState state{props};
-    concreteShadowNode.setStateData(std::move(state));
-  }
-#endif
 
 } // namespace margelo::nitro::webmplayer::views

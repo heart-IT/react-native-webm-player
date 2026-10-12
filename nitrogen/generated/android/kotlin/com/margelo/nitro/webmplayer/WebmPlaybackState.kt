@@ -19,8 +19,7 @@ enum class WebmPlaybackState(@DoNotStrip @Keep val value: Int) {
   IDLE(0),
   BUFFERING(1),
   PLAYING(2),
-  PAUSED(3),
-  FAILED(4);
+  FAILED(3);
 
   companion object
 }

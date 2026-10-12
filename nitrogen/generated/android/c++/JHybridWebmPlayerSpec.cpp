@@ -9,8 +9,6 @@
 
 // Forward declaration of `WebmPlaybackState` to properly resolve imports.
 namespace margelo::nitro::webmplayer { enum class WebmPlaybackState; }
-// Forward declaration of `WebmAudioRoute` to properly resolve imports.
-namespace margelo::nitro::webmplayer { enum class WebmAudioRoute; }
 // Forward declaration of `WebmPlayerMetrics` to properly resolve imports.
 namespace margelo::nitro::webmplayer { struct WebmPlayerMetrics; }
 // Forward declaration of `WebmHealthEvent` to properly resolve imports.
@@ -20,13 +18,9 @@ namespace margelo::nitro::webmplayer { enum class WebmHealthStatus; }
 
 #include "WebmPlaybackState.hpp"
 #include "JWebmPlaybackState.hpp"
-#include "WebmAudioRoute.hpp"
-#include "JWebmAudioRoute.hpp"
 #include "WebmPlayerMetrics.hpp"
 #include "JWebmPlayerMetrics.hpp"
-#include <vector>
-#include <NitroModules/ArrayBuffer.hpp>
-#include <NitroModules/JArrayBuffer.hpp>
+#include <string>
 #include "WebmHealthEvent.hpp"
 #include <functional>
 #include "JFunc_void_WebmHealthEvent.hpp"
@@ -34,8 +28,6 @@ namespace margelo::nitro::webmplayer { enum class WebmHealthStatus; }
 #include "JWebmHealthEvent.hpp"
 #include "WebmHealthStatus.hpp"
 #include "JWebmHealthStatus.hpp"
-#include <string>
-#include "JFunc_void_WebmAudioRoute.hpp"
 
 namespace margelo::nitro::webmplayer {
 
@@ -67,16 +59,6 @@ namespace margelo::nitro::webmplayer {
   }
 
   // Properties
-  bool JHybridWebmPlayerSpec::getIsRunning() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jboolean()>("isRunning");
-    auto __result = method(_javaPart);
-    return static_cast<bool>(__result);
-  }
-  bool JHybridWebmPlayerSpec::getIsPaused() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jboolean()>("isPaused");
-    auto __result = method(_javaPart);
-    return static_cast<bool>(__result);
-  }
   WebmPlaybackState JHybridWebmPlayerSpec::getPlaybackState() {
     static const auto method = _javaPart->javaClassStatic()->getMethod<jni::local_ref<JWebmPlaybackState>()>("getPlaybackState");
     auto __result = method(_javaPart);
@@ -91,62 +73,14 @@ namespace margelo::nitro::webmplayer {
     static const auto method = _javaPart->javaClassStatic()->getMethod<void(jboolean /* muted */)>("setMuted");
     method(_javaPart, muted);
   }
-  double JHybridWebmPlayerSpec::getGain() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<double()>("getGain");
-    auto __result = method(_javaPart);
-    return __result;
-  }
-  void JHybridWebmPlayerSpec::setGain(double gain) {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<void(double /* gain */)>("setGain");
-    method(_javaPart, gain);
-  }
-  double JHybridWebmPlayerSpec::getPlaybackRate() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<double()>("getPlaybackRate");
-    auto __result = method(_javaPart);
-    return __result;
-  }
-  void JHybridWebmPlayerSpec::setPlaybackRate(double playbackRate) {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<void(double /* playbackRate */)>("setPlaybackRate");
-    method(_javaPart, playbackRate);
-  }
-  WebmAudioRoute JHybridWebmPlayerSpec::getCurrentAudioRoute() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jni::local_ref<JWebmAudioRoute>()>("getCurrentAudioRoute");
-    auto __result = method(_javaPart);
-    return __result->toCpp();
-  }
 
   // Methods
-  bool JHybridWebmPlayerSpec::start() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jboolean()>("start");
-    auto __result = method(_javaPart);
-    return static_cast<bool>(__result);
+  void JHybridWebmPlayerSpec::play(const std::string& key) {
+    static const auto method = _javaPart->javaClassStatic()->getMethod<void(jni::alias_ref<jni::JString> /* key */)>("play");
+    method(_javaPart, jni::make_jstring(key));
   }
-  bool JHybridWebmPlayerSpec::stop() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jboolean()>("stop");
-    auto __result = method(_javaPart);
-    return static_cast<bool>(__result);
-  }
-  bool JHybridWebmPlayerSpec::pause() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jboolean()>("pause");
-    auto __result = method(_javaPart);
-    return static_cast<bool>(__result);
-  }
-  bool JHybridWebmPlayerSpec::resume() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jboolean()>("resume");
-    auto __result = method(_javaPart);
-    return static_cast<bool>(__result);
-  }
-  bool JHybridWebmPlayerSpec::feedData(const std::shared_ptr<ArrayBuffer>& data) {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jboolean(jni::alias_ref<JArrayBuffer::javaobject> /* data */)>("feedData");
-    auto __result = method(_javaPart, JArrayBuffer::wrap(data));
-    return static_cast<bool>(__result);
-  }
-  void JHybridWebmPlayerSpec::setEndOfStream() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<void()>("setEndOfStream");
-    method(_javaPart);
-  }
-  void JHybridWebmPlayerSpec::resetStream() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<void()>("resetStream");
+  void JHybridWebmPlayerSpec::stop() {
+    static const auto method = _javaPart->javaClassStatic()->getMethod<void()>("stop");
     method(_javaPart);
   }
   WebmPlayerMetrics JHybridWebmPlayerSpec::getMetrics() {
@@ -157,24 +91,6 @@ namespace margelo::nitro::webmplayer {
   void JHybridWebmPlayerSpec::setHealthCallback(const std::function<void(const WebmHealthEvent& /* event */)>& callback) {
     static const auto method = _javaPart->javaClassStatic()->getMethod<void(jni::alias_ref<JFunc_void_WebmHealthEvent::javaobject> /* callback */)>("setHealthCallback_cxx");
     method(_javaPart, JFunc_void_WebmHealthEvent_cxx::fromCpp(callback));
-  }
-  std::vector<WebmAudioRoute> JHybridWebmPlayerSpec::getAvailableAudioRoutes() {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<jni::local_ref<jni::JArrayClass<JWebmAudioRoute>>()>("getAvailableAudioRoutes");
-    auto __result = method(_javaPart);
-    return [&](auto&& __input) {
-      size_t __size = __input->size();
-      std::vector<WebmAudioRoute> __vector;
-      __vector.reserve(__size);
-      for (size_t __i = 0; __i < __size; __i++) {
-        auto __element = __input->getElement(__i);
-        __vector.push_back(__element->toCpp());
-      }
-      return __vector;
-    }(__result);
-  }
-  void JHybridWebmPlayerSpec::setRouteChangeCallback(const std::function<void(WebmAudioRoute /* route */)>& callback) {
-    static const auto method = _javaPart->javaClassStatic()->getMethod<void(jni::alias_ref<JFunc_void_WebmAudioRoute::javaobject> /* callback */)>("setRouteChangeCallback_cxx");
-    method(_javaPart, JFunc_void_WebmAudioRoute_cxx::fromCpp(callback));
   }
 
 } // namespace margelo::nitro::webmplayer

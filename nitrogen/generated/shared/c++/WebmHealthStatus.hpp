@@ -28,7 +28,6 @@ namespace margelo::nitro::webmplayer {
     PLAYING      SWIFT_NAME(playing) = 1,
     ENDED      SWIFT_NAME(ended) = 2,
     FAILED      SWIFT_NAME(failed) = 3,
-    INTERRUPTED      SWIFT_NAME(interrupted) = 4,
   } CLOSED_ENUM;
 
 } // namespace margelo::nitro::webmplayer
@@ -58,7 +57,7 @@ namespace margelo::nitro {
         return false;
       }
       // Check if we are within the bounds of the enum.
-      return integer >= 0 && integer <= 4;
+      return integer >= 0 && integer <= 3;
     }
   };
 

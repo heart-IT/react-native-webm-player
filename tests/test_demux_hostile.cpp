@@ -52,7 +52,7 @@ TEST(huge_sampling_frequency_is_rejected_not_ub) {
     // hostile rate is surfaced as 0 — the value the decoder config downstream
     // rejects cleanly — instead of an arbitrary wrapped int.
     ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
-    auto info = demuxer.trackInfoSnapshot();
+    auto info = demuxer.trackInfo();
     ASSERT_EQ(info.audioTrackNum, 1);
     ASSERT_EQ(info.audioSampleRate, 0);
     ASSERT_EQ(info.audioChannels, 2);
@@ -79,7 +79,7 @@ TEST(huge_sampling_frequency_in_real_fixture_is_rejected_not_ub) {
     }
 
     ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
-    ASSERT_EQ(demuxer.trackInfoSnapshot().audioSampleRate, 0);
+    ASSERT_EQ(demuxer.trackInfo().audioSampleRate, 0);
 }
 
 TEST(valid_sampling_frequency_still_parses) {
@@ -88,7 +88,7 @@ TEST(valid_sampling_frequency_still_parses) {
     demuxer.feedData(webm_synth::kMinimalWebmHeader,
                      sizeof(webm_synth::kMinimalWebmHeader));
     ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
-    ASSERT_EQ(demuxer.trackInfoSnapshot().audioSampleRate, 48000);
+    ASSERT_EQ(demuxer.trackInfo().audioSampleRate, 48000);
 }
 
 // ---- R3-5: a cluster larger than the parse window must error, not wedge ----
@@ -237,6 +237,67 @@ TEST(seven_byte_chunks_emit_same_packets_as_single_shot) {
     ASSERT_EQ(trickle.videoPts.size(), whole.videoPts.size());
     ASSERT_TRUE(trickle.audioPts == whole.audioPts);
     ASSERT_TRUE(trickle.videoPts == whole.videoPts);
+}
+
+// ---- Feeds that end mid-cluster must keep the parse window trimmed ----
+//
+// Every feed of a live stream ends mid-cluster, so parseBlocks() leaves
+// through a "need more data" exit on nearly every call. Those exits returned
+// before the compaction schedule, so the window was never trimmed: on the
+// iPhone 11 (2026-10-12) it filled at kMaxBufferSize after ~80 s and every
+// later feed was dropped as "demuxer buffer overflow", with no rejoin. The
+// bound is what deferred compaction allows: the cluster scheduled by the
+// previous feed, the current one, and this feed's bytes. The unfixed code
+// holds the whole stream.
+
+namespace {
+
+// One cluster holding a single 3000-byte SimpleBlock on track 1: a block the
+// size of a real frame, so a chunk boundary lands inside its payload. The
+// two-byte Timecode keeps hundreds of clusters monotonic (the block-level
+// dedup skips a repeated PTS).
+constexpr size_t kFramePayloadBytes = 3000;
+constexpr size_t kFrameClusterBytes = 17 + kFramePayloadBytes;
+
+std::vector<uint8_t> frameCluster(uint16_t timecodeMs) {
+    std::vector<uint8_t> c = {
+        0x1F, 0x43, 0xB6, 0x75, 0x4B, 0xC3,  // Cluster, body = 3011 bytes
+        0xE7, 0x82, static_cast<uint8_t>(timecodeMs >> 8), static_cast<uint8_t>(timecodeMs),
+        0xA3, 0x4B, 0xBC,                    // SimpleBlock, body = 3004 bytes
+        0x81, 0x00, 0x00, 0x80,              // track 1, offset 0, keyframe
+    };
+    c.resize(kFrameClusterBytes, 0x5A);
+    return c;
+}
+
+}  // namespace
+
+TEST(mid_cluster_feeds_keep_the_window_trimmed) {
+    constexpr size_t kClusters = 200;
+    constexpr size_t kChunk = 1000;
+    std::vector<uint8_t> stream(
+        webm_synth::kMinimalWebmHeader,
+        webm_synth::kMinimalWebmHeader + sizeof(webm_synth::kMinimalWebmHeader));
+    for (size_t i = 0; i < kClusters; ++i) {
+        auto c = frameCluster(static_cast<uint16_t>(i * 20));
+        stream.insert(stream.end(), c.begin(), c.end());
+    }
+
+    WebmDemuxer demuxer;
+    size_t maxWindow = 0;
+    size_t packets = 0;
+    for (size_t offset = 0; offset < stream.size(); offset += kChunk) {
+        size_t chunk = std::min(kChunk, stream.size() - offset);
+        packets += demuxer.feedData(stream.data() + offset, chunk).audioPackets.size();
+        maxWindow = std::max(maxWindow, demuxer.bufferBytes());
+    }
+    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
+    ASSERT_EQ(packets, kClusters);
+    // Compaction trims to Cluster::GetPosition(), which mkvparser measures
+    // from the Segment payload, so the trim point sits the EBML header (36
+    // bytes) and the Segment header (12) before the cluster.
+    constexpr size_t kSegmentPayloadOffset = 48;
+    ASSERT_LE(maxWindow, 2 * kFrameClusterBytes + kChunk + kSegmentPayloadOffset);
 }
 
 TEST_MAIN("Hostile-Input Demux Tests")

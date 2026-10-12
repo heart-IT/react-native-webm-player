@@ -121,20 +121,6 @@ open class HybridWebmPlayerSpec_cxx {
   }
 
   // Properties
-  public final var isRunning: Bool {
-    @inline(__always)
-    get {
-      return self.__implementation.isRunning
-    }
-  }
-  
-  public final var isPaused: Bool {
-    @inline(__always)
-    get {
-      return self.__implementation.isPaused
-    }
-  }
-  
   public final var playbackState: Int32 {
     @inline(__always)
     get {
@@ -152,101 +138,12 @@ open class HybridWebmPlayerSpec_cxx {
       self.__implementation.muted = newValue
     }
   }
-  
-  public final var gain: Double {
-    @inline(__always)
-    get {
-      return self.__implementation.gain
-    }
-    @inline(__always)
-    set {
-      self.__implementation.gain = newValue
-    }
-  }
-  
-  public final var playbackRate: Double {
-    @inline(__always)
-    get {
-      return self.__implementation.playbackRate
-    }
-    @inline(__always)
-    set {
-      self.__implementation.playbackRate = newValue
-    }
-  }
-  
-  public final var currentAudioRoute: Int32 {
-    @inline(__always)
-    get {
-      return self.__implementation.currentAudioRoute.rawValue
-    }
-  }
 
   // Methods
   @inline(__always)
-  public final func start() -> bridge.Result_bool_ {
+  public final func play(key: std.string) -> bridge.Result_void_ {
     do {
-      let __result = try self.__implementation.start()
-      let __resultCpp = __result
-      return bridge.create_Result_bool_(__resultCpp)
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_bool_(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func stop() -> bridge.Result_bool_ {
-    do {
-      let __result = try self.__implementation.stop()
-      let __resultCpp = __result
-      return bridge.create_Result_bool_(__resultCpp)
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_bool_(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func pause() -> bridge.Result_bool_ {
-    do {
-      let __result = try self.__implementation.pause()
-      let __resultCpp = __result
-      return bridge.create_Result_bool_(__resultCpp)
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_bool_(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func resume() -> bridge.Result_bool_ {
-    do {
-      let __result = try self.__implementation.resume()
-      let __resultCpp = __result
-      return bridge.create_Result_bool_(__resultCpp)
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_bool_(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func feedData(data: ArrayBuffer) -> bridge.Result_bool_ {
-    do {
-      let __result = try self.__implementation.feedData(data: data)
-      let __resultCpp = __result
-      return bridge.create_Result_bool_(__resultCpp)
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_bool_(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func setEndOfStream() -> bridge.Result_void_ {
-    do {
-      try self.__implementation.setEndOfStream()
+      try self.__implementation.play(key: String(key))
       return bridge.create_Result_void_()
     } catch (let __error) {
       let __exceptionPtr = __error.toCpp()
@@ -255,9 +152,9 @@ open class HybridWebmPlayerSpec_cxx {
   }
   
   @inline(__always)
-  public final func resetStream() -> bridge.Result_void_ {
+  public final func stop() -> bridge.Result_void_ {
     do {
-      try self.__implementation.resetStream()
+      try self.__implementation.stop()
       return bridge.create_Result_void_()
     } catch (let __error) {
       let __exceptionPtr = __error.toCpp()
@@ -284,40 +181,6 @@ open class HybridWebmPlayerSpec_cxx {
         let __wrappedFunction = bridge.wrap_Func_void_WebmHealthEvent(callback)
         return { (__event: WebmHealthEvent) -> Void in
           __wrappedFunction.call(__event)
-        }
-      }())
-      return bridge.create_Result_void_()
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_void_(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func getAvailableAudioRoutes() -> bridge.Result_std__vector_WebmAudioRoute__ {
-    do {
-      let __result = try self.__implementation.getAvailableAudioRoutes()
-      let __resultCpp = { () -> bridge.std__vector_WebmAudioRoute_ in
-        var __vector = bridge.create_std__vector_WebmAudioRoute_(__result.count)
-        for __item in __result {
-          __vector.push_back(__item)
-        }
-        return __vector
-      }()
-      return bridge.create_Result_std__vector_WebmAudioRoute__(__resultCpp)
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_std__vector_WebmAudioRoute__(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func setRouteChangeCallback(callback: bridge.Func_void_WebmAudioRoute) -> bridge.Result_void_ {
-    do {
-      try self.__implementation.setRouteChangeCallback(callback: { () -> (WebmAudioRoute) -> Void in
-        let __wrappedFunction = bridge.wrap_Func_void_WebmAudioRoute(callback)
-        return { (__route: WebmAudioRoute) -> Void in
-          __wrappedFunction.call(__route.rawValue)
         }
       }())
       return bridge.create_Result_void_()

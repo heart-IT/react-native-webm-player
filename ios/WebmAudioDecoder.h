@@ -1,6 +1,6 @@
 // Opus decode + PCM presentation for the iOS engine. Peer of WebmVideoDecoder.
 //
-// Owns the Opus decoder, packet-loss recovery, and the conversion of decoded PCM
+// Owns the Opus decoder and the conversion of decoded PCM
 // into CMSampleBuffers enqueued on an AVSampleBufferAudioRenderer. The engine
 // hands it demuxed packets and does not otherwise know how audio is produced.
 #pragma once
@@ -20,31 +20,23 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Configure for the container's track parameters. Safe to call repeatedly; the
 /// decoder is rebuilt only when they actually change.
-/// `opusHead` is the track's CodecPrivate; multichannel layouts cannot be
-/// decoded without it.
-- (BOOL)configureWithSampleRate:(int)sampleRate
-                       channels:(int)channels
-                       opusHead:(nullable const uint8_t*)opusHead
-                   opusHeadSize:(size_t)opusHeadSize;
+- (BOOL)configureWithSampleRate:(int)sampleRate channels:(int)channels;
 
-/// Decode one Opus packet and enqueue it. `durationUs` comes from the container
-/// and is used to detect a missing frame ahead of this one, which is recovered
-/// from this packet's embedded FEC where possible.
+/// Decode one Opus packet and enqueue it.
 /// Returns NO if the packet could not be decoded or the renderer refused it.
-- (BOOL)submitPacket:(const uint8_t*)data
-              length:(size_t)length
-               ptsUs:(int64_t)ptsUs
-          durationUs:(int64_t)durationUs;
+- (BOOL)submitPacket:(const uint8_t*)data length:(size_t)length ptsUs:(int64_t)ptsUs;
 
 /// Drop decoder state so a new stream starts clean.
 - (void)reset;
 
 @property(nonatomic, readonly) uint64_t packetsDecoded;
-/// Frames reconstructed from FEC or concealed by PLC after a detected gap.
-@property(nonatomic, readonly) uint64_t framesRecovered;
 /// Presentation time of the most recent buffer handed to the renderer, in
 /// microseconds. -1 before anything has played.
 @property(nonatomic, readonly) int64_t lastPresentedPtsUs;
+
+/// Decoded buffers waiting for the renderer to pull them. The demux thread
+/// paces on this so the margin stays in the ring, not here.
+@property(nonatomic, readonly) size_t pendingBuffers;
 
 @end
 

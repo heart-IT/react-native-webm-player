@@ -5,67 +5,28 @@ import NitroModules
 /// Nitro facade over `WebmPlaybackEngine`.
 ///
 /// Deliberately thin: it holds no playback state of its own, so there is nothing
-/// here that can disagree with the engine. Its one real job is the ArrayBuffer
-/// hand-off in `feedData`.
+/// here that can disagree with the engine.
 final class HybridWebmPlayer: HybridWebmPlayerSpec {
   private let engine = WebmPlaybackEngine()
-  private let routes = WebmAudioRouteMonitor()
 
   // MARK: - Lifecycle
 
-  func start() throws -> Bool { engine.start() }
-  func stop() throws -> Bool { engine.stop() }
-  func pause() throws -> Bool { engine.pause() }
-  func resume() throws -> Bool { engine.resume() }
-
-  var isRunning: Bool { engine.isRunning() }
-  var isPaused: Bool { engine.isPaused() }
+  func play(key: String) throws { engine.play(withKey: key) }
+  func stop() throws { engine.stop() }
 
   var playbackState: WebmPlaybackState {
     switch engine.playbackState() {
     case .idle: return .idle
     case .buffering: return .buffering
     case .playing: return .playing
-    case .paused: return .paused
     case .failed: return .failed
     @unknown default: return .idle
     }
   }
 
-  // MARK: - Stream data
-
-  func feedData(data: ArrayBuffer) throws -> Bool {
-    // A JS-created ArrayBuffer is non-owning: its memory is only valid for the
-    // duration of this synchronous call. The engine copies into the ring before
-    // returning, so nothing outlives the buffer.
-    let size = data.size
-    if size == 0 { return false }
-    return engine.feedData(data.data, length: size) == size
-  }
-
-  func setEndOfStream() throws {
-    _ = engine.setEndOfStream()
-  }
-
-  func resetStream() throws {
-    _ = engine.resetStream()
-  }
-
-  // MARK: - Controls
-
   var muted: Bool {
     get { engine.muted() }
-    set { _ = engine.setMuted(newValue) }
-  }
-
-  var gain: Double {
-    get { Double(engine.gain()) }
-    set { _ = engine.setGain(Float(newValue)) }
-  }
-
-  var playbackRate: Double {
-    get { Double(engine.playbackRate()) }
-    set { _ = engine.setPlaybackRate(Float(newValue)) }
+    set { engine.setMuted(newValue) }
   }
 
   // MARK: - Video surface
@@ -84,7 +45,7 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
     engine.detachDisplayLayer(layer)
   }
 
-  // MARK: - Health and routing
+  // MARK: - Health
 
   func setHealthCallback(callback: @escaping (WebmHealthEvent) -> Void) throws {
     // The engine reports transitions as strings; Nitro marshals the call onto
@@ -94,22 +55,11 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
     }
   }
 
-  var currentAudioRoute: WebmAudioRoute { routes.currentRoute }
-
-  func getAvailableAudioRoutes() throws -> [WebmAudioRoute] {
-    routes.availableRoutes
-  }
-
-  func setRouteChangeCallback(callback: @escaping (WebmAudioRoute) -> Void) throws {
-    routes.setCallback(callback)
-  }
-
   private static func healthStatus(_ raw: String) -> WebmHealthStatus {
     switch raw {
     case "playing": return .playing
     case "ended": return .ended
     case "failed": return .failed
-    case "interrupted": return .interrupted
     default: return .buffering
     }
   }
@@ -119,14 +69,10 @@ final class HybridWebmPlayer: HybridWebmPlayerSpec {
   func getMetrics() throws -> WebmPlayerMetrics {
     let m = engine.metrics()
     return WebmPlayerMetrics(
-      bytesFedTotal: Double(m.bytesFedTotal),
-      bytesDropped: Double(m.bytesDropped),
-      ringFillRatio: m.ringFillRatio,
+      bytesReceived: Double(m.bytesReceived),
       audioPacketsDecoded: Double(m.audioPacketsDecoded),
       videoPacketsDecoded: Double(m.videoPacketsDecoded),
-      audioUnderruns: Double(m.audioUnderruns),
       videoFramesDropped: Double(m.videoFramesDropped),
-      audioFramesRecovered: Double(m.audioFramesRecovered),
       videoWidth: Double(m.videoWidth),
       videoHeight: Double(m.videoHeight),
       currentTimeSeconds: m.currentTimeSeconds

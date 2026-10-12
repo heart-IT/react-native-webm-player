@@ -19,7 +19,6 @@
 #include "views/JHybridWebmPlayerViewStateUpdater.hpp"
 #include "JHybridWebmPlayerSpec.hpp"
 #include "JFunc_void_WebmHealthEvent.hpp"
-#include "JFunc_void_WebmAudioRoute.hpp"
 #include <NitroModules/DefaultConstructableObject.hpp>
 
 namespace margelo::nitro::webmplayer {
@@ -56,7 +55,6 @@ void registerAllNatives() {
   margelo::nitro::webmplayer::views::JHybridWebmPlayerViewStateUpdater::registerNatives();
   margelo::nitro::webmplayer::JHybridWebmPlayerSpec::CxxPart::registerNatives();
   margelo::nitro::webmplayer::JFunc_void_WebmHealthEvent_cxx::registerNatives();
-  margelo::nitro::webmplayer::JFunc_void_WebmAudioRoute_cxx::registerNatives();
 
   // Register Nitro Hybrid Objects
   HybridObjectRegistry::registerHybridObjectConstructor(

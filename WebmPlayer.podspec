@@ -11,8 +11,9 @@ Pod::Spec.new do |s|
   s.authors      = package["author"]
 
   # iOS only: the vendored opus.xcframework carries no visionOS slice, so a
-  # visionOS consumer would fail at link, not at pod install.
-  s.platforms    = { :ios => min_ios_version_supported }
+  # visionOS consumer would fail at link, not at pod install. The floor is
+  # the consuming app's, above React Native's own min_ios_version_supported.
+  s.platforms    = { :ios => "16.6" }
   s.source       = { :git => "https://github.com/heart-IT/react-native-webm-player.git", :tag => "#{s.version}" }
 
   # Build the Opus XCFramework from source during pod install, mirroring the
@@ -42,12 +43,14 @@ Pod::Spec.new do |s|
 
   s.vendored_frameworks = ["ios/opus/lib/opus.xcframework"]
 
-  # AVFoundation: renderer/synchronizer + audio session. AudioToolbox: LPCM
-  # format descriptions. VideoToolbox: VP9 decompression sessions.
-  # CoreMedia/CoreVideo: sample and pixel buffers.
+  # The broadcast worklet (worklet/feeder.js packed by `npm run bundle:worklet`),
+  # loaded by WebmWorkletSource from this resource bundle.
+  s.resource_bundles = { "WebmPlayerWorklet" => ["worklet/dist/feeder.bundle"] }
+
+  # AVFoundation: renderer/synchronizer + audio session. VideoToolbox: VP9
+  # decompression sessions. CoreMedia/CoreVideo: sample and pixel buffers.
   s.frameworks = [
     "AVFoundation",
-    "AudioToolbox",
     "VideoToolbox",
     "CoreMedia",
     "CoreVideo",
@@ -57,6 +60,15 @@ Pod::Spec.new do |s|
   # Swift must see has to be declared public here too. Appended before
   # add_nitrogen_files so the autolinking script preserves it.
   s.public_header_files = ["ios/WebmPlaybackEngine.h"]
+
+  # BareKit.xcframework belongs to react-native-bare-kit, which the app depends
+  # on directly: its pod embeds the framework and the worklet's addons. It is
+  # not a pod dependency here because that pod defines no module map and
+  # CocoaPods refuses such a dependency from a Swift pod. WebmWorkletSource.mm
+  # finds the header through the framework search path instead, and the
+  # framework is linked into the app by that pod.
+  bare_kit = File.dirname(%x(node -p "require.resolve('react-native-bare-kit/package.json', {paths: ['#{__dir__}']})").strip)
+  bare_kit_xcframework = "#{bare_kit}/ios/BareKit.xcframework"
 
   # The shared C++ includes are rooted at cpp/ ("common/MediaLog.h",
   # "demux/WebmDemuxer.h"), at the libwebm root ("mkvparser/mkvparser.h") and at
@@ -69,6 +81,11 @@ Pod::Spec.new do |s|
       '"$(PODS_TARGET_SRCROOT)/ios/opus/lib/include"',
       '"$(PODS_TARGET_SRCROOT)/ios/opus/lib/include/opus"',
     ].join(' '),
+    # $(inherited) keeps the paths CocoaPods adds for the other pods: with a
+    # prebuilt React Core, React's own headers come from a framework too.
+    'FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]' => "$(inherited) \"#{bare_kit_xcframework}/ios-arm64\"",
+    'FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]' => "$(inherited) \"#{bare_kit_xcframework}/ios-arm64_x86_64-simulator\"",
+    'OTHER_LDFLAGS' => '-framework BareKit',
   }
 
   load 'nitrogen/generated/ios/WebmPlayer+autolinking.rb'

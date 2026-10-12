@@ -5,9 +5,8 @@
 
 namespace media {
 
-// Shared VP9 uncompressed header parser. Extracts frame dimensions from keyframes.
-// Used by both iOS (VTDecompressionSession) and Android (MediaCodec) to get accurate
-// initial dimensions without waiting for decoder format change events.
+// VP9 uncompressed header parser. Extracts frame dimensions and profile from
+// keyframes for the VideoToolbox session.
 struct VP9FrameInfo {
     int width = 0;
     int height = 0;

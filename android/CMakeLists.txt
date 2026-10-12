@@ -11,9 +11,6 @@ add_compile_options(-DRN_SERIALIZABLE_STATE=1)
 # Define C++ library and add all sources
 add_library(${PACKAGE_NAME} SHARED
         src/main/cpp/cpp-adapter.cpp
-        src/main/cpp/webmstream_jni.cpp
-        ../cpp/common/RingRegistry.cpp
-        ../cpp/common/WebMStreamBuffer.cpp
 )
 
 # Add Nitrogen specs :)
@@ -22,7 +19,6 @@ include(${CMAKE_SOURCE_DIR}/../nitrogen/generated/android/WebmPlayer+autolinking
 # Set up local includes
 include_directories(
         "src/main/cpp"
-        "../cpp"
 )
 
 find_library(LOG_LIB log)

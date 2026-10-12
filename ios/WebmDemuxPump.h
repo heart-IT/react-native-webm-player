@@ -1,10 +1,10 @@
-// Turns fed WebM bytes into decoded packets.
+// Turns received WebM bytes into decoded packets.
 //
 // Owns the byte ring, the WebmDemuxer, and the thread that moves data between
-// them: feedData() writes, the thread drains, parses, and hands the emitted
-// Opus/VP9 packets to the decoders. Everything about *presentation* — the
-// synchronizer, the renderers, the display layer — belongs to
-// WebmPlaybackEngine, which owns one of these.
+// them: the worklet source writes through feedData(), the thread drains,
+// parses, and hands the emitted Opus/VP9 packets to the decoders. Everything
+// about *presentation* — the synchronizer, the renderers, the display layer —
+// belongs to WebmPlaybackEngine, which owns one of these.
 //
 // Pure Objective-C interface, matching WebmPlaybackEngine's rationale: the C++
 // ring and demuxer are implementation details that stay in the .mm.
@@ -23,7 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// First sample of the stream decoded — audio when the stream has an audio
 /// track, otherwise the first video frame. The media clock starts here rather
-/// than at start(), so it never runs ahead of the data.
+/// than at play(), so it never runs ahead of the data.
 - (void)demuxPump:(id)pump didDecodeFirstSampleAtPts:(int64_t)ptsUs;
 
 /// A health transition. Delivered on the main queue.
@@ -44,6 +44,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property(nonatomic, weak) id<WebmDemuxPumpDelegate> delegate;
 
+/// The media clock in seconds, or a negative value before it starts. Read on
+/// the demux thread for the summary log: how far decoded audio runs ahead of it.
+@property(nonatomic, copy, nullable) double (^clock)(void);
+
 /// Allocates the ring and starts the demux thread.
 ///
 /// The decoders belong to the engine, which wires them to the renderer and
@@ -56,16 +60,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Shuts the ring down and joins the thread. Idempotent.
 - (void)stop;
 
-/// Park the demux thread without tearing anything down.
-///
-/// Stopping the renderer alone is not enough: the thread would keep draining the
-/// ring and decoding into a queue nobody consumes, and the decoder discards what
-/// does not fit — silently losing audio for the whole pause. Parked, the bytes
-/// stay in the ring and playback continues from exactly where it stopped.
-- (void)setPaused:(BOOL)paused;
-
-/// Accepts muxed WebM bytes. Returns the number accepted; short means the ring
-/// is full and the caller is outrunning the demuxer.
+/// Accepts muxed WebM bytes from the worklet source's reader thread. Returns
+/// the number accepted: all of them, or none when the ring has no room yet.
+/// The producer must be stopped before stop() or requestReset().
 - (size_t)feedData:(const uint8_t*)bytes length:(size_t)length;
 
 - (void)setEndOfStream;
@@ -74,11 +71,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// lives on that thread, so it cannot be reset directly from here.
 - (void)requestReset;
 
-@property(nonatomic, readonly) uint64_t bytesFedTotal;
-/// Muxed bytes rejected whole at feedData because the ring was full.
-@property(nonatomic, readonly) uint64_t bytesDropped;
-/// Ring occupancy 0.0–1.0 — the feeder's backpressure signal.
-@property(nonatomic, readonly) double ringFillRatio;
+/// Muxed bytes accepted into the ring, cumulative across sessions.
+@property(nonatomic, readonly) uint64_t bytesReceived;
 @property(nonatomic, readonly) uint64_t videoFramesDropped;
 @property(nonatomic, readonly) int videoWidth;
 @property(nonatomic, readonly) int videoHeight;

@@ -16,12 +16,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Atomic-replace of the output layer. Old frames in flight still render to the
 /// previous layer until the VT callback drains; new frames target the new one.
+///
+/// Also watches the layer's requiresFlushToResumeDecoding: iOS fails the layer
+/// when the app loses decoder access and only a flush makes it accept media
+/// again, which the decoder does itself. Call on the main thread.
 - (void)setOutputLayer:(nullable AVSampleBufferDisplayLayer*)layer;
-
-/// Frame size as declared by the WebM container. Used when a keyframe's VP9
-/// uncompressed header cannot be parsed — without it a single unparseable
-/// keyframe means the session is never created and no video ever plays.
-- (void)setContainerWidth:(int)width height:(int)height;
 
 /// Submit a VP9 packet. Returns NO if the session can't be created or if the
 /// frame is rejected (no keyframe seen yet, dimensions unparseable, etc.).
@@ -36,6 +35,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// useful thing to know when a device shows no picture.
 @property(nonatomic, readonly) BOOL hardwareDecodeSupported;
 
+/// Whether a decode session exists right now. Frames submitted without one
+/// (before the first keyframe, or after iOS invalidated it) are dropped.
+@property(nonatomic, readonly) BOOL hasSession;
+
 /// Frames actually handed to the display layer. Diverging from the submitted
 /// count means frames are decoding but never reaching the screen.
 @property(nonatomic, readonly) uint64_t framesPresented;
@@ -45,13 +48,22 @@ NS_ASSUME_NONNULL_BEGIN
 /// droppedBufferCount.
 @property(nonatomic, readonly) uint64_t pendingCapDrops;
 
-/// Release decoder resources for a background trip. iOS revokes them anyway;
-/// doing it explicitly keeps the invalid session from being reused. Frames are
-/// refused until resume(), then decoding restarts at the next keyframe.
-- (void)suspend;
+/// Decoded frames waiting for the layer to pull them. The demux thread paces
+/// on this so the margin stays in the ring, not here.
+@property(nonatomic, readonly) size_t pendingFrames;
 
-/// Allow decoding again. The session is rebuilt on the next keyframe.
-- (void)resume;
+/// Forwards to the layer watch's performance log. Main thread.
+- (void)logLayerPerformance;
+
+/// The media clock in seconds, or negative before it starts. Set before frames
+/// flow; read on the decode callback and the render queue.
+@property(nonatomic, copy, nullable) double (^clock)(void);
+
+/// Lead time, PTS minus clock, at its smallest since the last call: once at
+/// decode completion and once at enqueue onto the layer, plus the running
+/// count of frames enqueued already behind the clock. Separates a slow
+/// decoder, a slow pull and a layer dropping on its own.
+- (NSString*)leadReport;
 
 /// Discard the session, the decoded backlog, and the layer's queue: everything
 /// belonging to the previous stream's timeline. For stream reset.

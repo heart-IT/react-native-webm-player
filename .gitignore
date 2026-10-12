@@ -89,4 +89,7 @@ CLAUDE.md
 .claude/
 
 # Xcode derived data for device builds
-example/ios/build-device/
+example/ios/build-device*/
+
+# Worklet bundle (built by npm run bundle:worklet)
+worklet/dist/

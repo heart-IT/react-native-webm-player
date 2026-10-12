@@ -18,23 +18,13 @@ public extension WebmPlayerMetrics {
   /**
    * Create a new instance of `WebmPlayerMetrics`.
    */
-  init(bytesFedTotal: Double, bytesDropped: Double, ringFillRatio: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, audioUnderruns: Double, videoFramesDropped: Double, audioFramesRecovered: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double) {
-    self.init(bytesFedTotal, bytesDropped, ringFillRatio, audioPacketsDecoded, videoPacketsDecoded, audioUnderruns, videoFramesDropped, audioFramesRecovered, videoWidth, videoHeight, currentTimeSeconds)
+  init(bytesReceived: Double, audioPacketsDecoded: Double, videoPacketsDecoded: Double, videoFramesDropped: Double, videoWidth: Double, videoHeight: Double, currentTimeSeconds: Double) {
+    self.init(bytesReceived, audioPacketsDecoded, videoPacketsDecoded, videoFramesDropped, videoWidth, videoHeight, currentTimeSeconds)
   }
 
   @inline(__always)
-  var bytesFedTotal: Double {
-    return self.__bytesFedTotal
-  }
-  
-  @inline(__always)
-  var bytesDropped: Double {
-    return self.__bytesDropped
-  }
-  
-  @inline(__always)
-  var ringFillRatio: Double {
-    return self.__ringFillRatio
+  var bytesReceived: Double {
+    return self.__bytesReceived
   }
   
   @inline(__always)
@@ -48,18 +38,8 @@ public extension WebmPlayerMetrics {
   }
   
   @inline(__always)
-  var audioUnderruns: Double {
-    return self.__audioUnderruns
-  }
-  
-  @inline(__always)
   var videoFramesDropped: Double {
     return self.__videoFramesDropped
-  }
-  
-  @inline(__always)
-  var audioFramesRecovered: Double {
-    return self.__audioFramesRecovered
   }
   
   @inline(__always)

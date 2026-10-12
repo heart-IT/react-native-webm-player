@@ -25,8 +25,6 @@ public extension WebmHealthStatus {
         self = .ended
       case "Failed":
         self = .failed
-      case "Interrupted":
-        self = .interrupted
       default:
         return nil
     }
@@ -45,8 +43,6 @@ public extension WebmHealthStatus {
         return "Ended"
       case .failed:
         return "Failed"
-      case .interrupted:
-        return "Interrupted"
     }
   }
 }

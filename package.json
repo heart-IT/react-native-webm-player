@@ -1,7 +1,7 @@
 {
   "name": "@heartit/webm-player",
   "version": "2.0.0",
-  "description": "Native WebM broadcast player for React Native \u2014 VP9 video + Opus audio with platform-owned A/V sync",
+  "description": "Native WebM broadcast player for React Native — VP9 video + Opus audio with platform-owned A/V sync",
   "main": "./lib/commonjs/index.js",
   "module": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
@@ -22,7 +22,11 @@
     "release": "semantic-release",
     "build": "npm run typecheck && bob build && mkdir -p lib/nitrogen/generated/shared/json && cp nitrogen/generated/shared/json/*.json lib/nitrogen/generated/shared/json/",
     "codegen": "nitrogen --logLevel=\"debug\" && npm run build",
-    "test:fuzz": "cmake -B tests/build-asan -S tests -DSANITIZER=address && cmake --build tests/build-asan --target fuzz_demuxer && ./tests/build-asan/fuzz_demuxer"
+    "test:fuzz": "cmake -B tests/build-asan -S tests -DSANITIZER=address && cmake --build tests/build-asan --target fuzz_demuxer && ./tests/build-asan/fuzz_demuxer",
+    "bundle:worklet": "bare-pack --preset mobile --format bundle --out worklet/dist/feeder.bundle worklet/feeder.js",
+    "prepack": "npm run bundle:worklet",
+    "test:worklet": "node node_modules/bare/bin/bare worklet/test/remux.test.js",
+    "postinstall": "node scripts/link-bare-addons.js android && node scripts/link-bare-addons.js ios"
   },
   "keywords": [
     "react-native",
@@ -38,6 +42,9 @@
     "lib",
     "nitrogen",
     "cpp",
+    "worklet/feeder.js",
+    "worklet/remux.js",
+    "worklet/dist",
     "nitro.json",
     "android/build.gradle",
     "android/fix-prefab.gradle",
@@ -53,7 +60,8 @@
     "!ios/opus/build",
     "!ios/opus/lib",
     "*.podspec",
-    "README.md"
+    "README.md",
+    "scripts/link-bare-addons.js"
   ],
   "workspaces": [
     "example"
@@ -71,27 +79,35 @@
     "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@jamesacarr/eslint-formatter-github-actions": "^0.2.0",
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/git": "^10.0.1",
-    "@types/jest": "^29.5.12",
-    "@types/react": "19.2.0",
-    "nitrogen": "^0.36.1",
-    "react": "19.2.3",
-    "react-native": "0.86.0",
-    "react-native-builder-bob": "^0.40.18",
-    "react-native-nitro-modules": "^0.36.1",
-    "conventional-changelog-conventionalcommits": "^10.2.1",
-    "semantic-release": "^25.0.7",
+    "@types/jest": "^30.0.0",
+    "@types/react": "^19.3.0",
+    "bare": "^1.34.1",
+    "bare-fs": "^4.8.3",
+    "bare-os": "^3.9.3",
+    "bare-pack": "^2.2.4",
+    "bare-path": "^3.1.2",
+    "brittle": "^4.5.0",
+    "conventional-changelog-conventionalcommits": "^10.4.1",
+    "eslint": "^9.39.5",
+    "nitrogen": "^0.37.1",
+    "prettier": "^3.9.9",
+    "react": "^19.3.0",
+    "react-native": "^0.87.1",
+    "react-native-bare-kit": "^0.16.0",
+    "react-native-builder-bob": "^0.43.1",
+    "react-native-nitro-modules": "^0.37.1",
+    "semantic-release": "^25.0.9",
     "typescript": "^6.0.3",
-    "@eslint/js": "^9.0.0",
-    "eslint": "^9.0.0",
-    "typescript-eslint": "^8.0.0",
-    "prettier": "^3.0.0"
+    "typescript-eslint": "^8.71.1"
   },
   "peerDependencies": {
     "react": "*",
     "react-native": "*",
+    "react-native-bare-kit": ">=0.16.0",
     "react-native-nitro-modules": "^0.36.1"
   },
   "prettier": {
@@ -115,5 +131,13 @@
         }
       ]
     ]
+  },
+  "dependencies": {
+    "@holepunchto/vcr-core": "^2.15.4",
+    "bare-ffmpeg": "^1.2.2",
+    "bare-link": "^4.0.1",
+    "corestore": "^7.9.2",
+    "framed-stream": "^1.0.1",
+    "hyperswarm": "^4.17.0"
   }
 }

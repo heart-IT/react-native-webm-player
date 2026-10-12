@@ -120,6 +120,8 @@ android {
 
   sourceSets {
     main {
+      // The worklet build emits feeder.bundle here; WorkletSource opens it by that asset name.
+      assets.srcDirs += '../worklet/dist'
       if (isNewArchitectureEnabled()) {
         java.srcDirs += [
           // React Codegen files
@@ -135,6 +137,22 @@ repositories {
   google()
 }
 
+// The worklet's native addons go into react-native-bare-kit's addon directory,
+// which that module packages as jniLibs, so the app needs no bare-link step of
+// its own. It must run before that module merges its jniLibs, hence the
+// cross-project dependency added once every project is evaluated.
+def linkBareAddons = tasks.register("linkBareAddons", Exec) {
+  workingDir file("${projectDir}/..")
+  commandLine "node", "scripts/link-bare-addons.js", "android"
+}
+tasks.named("preBuild").configure { dependsOn(linkBareAddons) }
+gradle.projectsEvaluated {
+  def bareKit = rootProject.findProject(":react-native-bare-kit")
+  if (bareKit != null) {
+    bareKit.tasks.named("preBuild").configure { dependsOn(linkBareAddons) }
+  }
+}
+
 
 dependencies {
   // For < 0.71, this will be from the local maven repo
@@ -145,10 +163,13 @@ dependencies {
   // Add a dependency on NitroModules
   implementation project(":react-native-nitro-modules")
 
+  // bare-kit's Worklet and IPC classes: the feeder worklet joins the broadcast swarm.
+  implementation project(":react-native-bare-kit")
+
   // ExoPlayer owns demux, decode and A/V sync on Android. media3-extractor
   // supplies MatroskaExtractor, which reads the same muxed WebM bytes that
   // libwebm parses on iOS. media3-ui provides PlayerView for the video surface.
-  def media3Version = "1.8.0"
+  def media3Version = "1.11.1"
   implementation "androidx.media3:media3-exoplayer:${media3Version}"
   implementation "androidx.media3:media3-extractor:${media3Version}"
   implementation "androidx.media3:media3-ui:${media3Version}"

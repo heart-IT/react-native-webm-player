@@ -8,8 +8,6 @@
 #include "test_common.h"
 #include <vector>
 #include <algorithm>
-#include <chrono>
-#include <thread>
 
 #include "demux/WebmDemuxer.h"
 #include "video/VP9HeaderParser.h"
@@ -36,7 +34,6 @@ using namespace media::demux;
 struct CollectedPackets {
     std::vector<std::vector<uint8_t>> audioData;
     std::vector<int64_t> audioPts;
-    std::vector<int64_t> audioDuration;
     std::vector<std::vector<uint8_t>> videoData;
     std::vector<int64_t> videoPts;
     std::vector<bool> videoKeyFrame;
@@ -56,7 +53,6 @@ static CollectedPackets feedAll(WebmDemuxer& demuxer,
         for (const auto& pkt : result.audioPackets) {
             out.audioData.emplace_back(pkt.data, pkt.data + pkt.size);
             out.audioPts.push_back(pkt.ptsUs);
-            out.audioDuration.push_back(pkt.durationUs);
         }
         for (const auto& pkt : result.videoPackets) {
             out.videoData.emplace_back(pkt.data, pkt.data + pkt.size);
@@ -85,9 +81,7 @@ TEST(track_info_correct) {
     WebmDemuxer demuxer;
     feedAll(demuxer, fixture::kWebmData, fixture::kWebmDataSize, 65536);
 
-    auto info = demuxer.trackInfoSnapshot();
-    ASSERT_EQ(info.audioCodecId, std::string("A_OPUS"));
-    ASSERT_EQ(info.videoCodecId, std::string("V_VP9"));
+    const auto& info = demuxer.trackInfo();
     ASSERT_EQ(info.videoWidth, 320);
     ASSERT_EQ(info.videoHeight, 240);
     ASSERT_TRUE(info.audioTrackNum >= 0);
@@ -285,33 +279,10 @@ TEST(reset_and_refeed_produces_same_packets) {
     }
 }
 
-TEST(metrics_reflect_actual_output) {
-    WebmDemuxer demuxer;
-    auto pkts = feedAll(demuxer, fixture::kWebmData, fixture::kWebmDataSize, 4096);
-
-    auto metrics = demuxer.demuxerMetrics();
-    ASSERT_EQ(metrics.totalBytesFed, fixture::kWebmDataSize);
-    ASSERT_EQ(metrics.audioPacketsEmitted, pkts.audioData.size());
-    ASSERT_EQ(metrics.videoPacketsEmitted, pkts.videoData.size());
-    ASSERT_EQ(metrics.overflowCount, 0u);
-    ASSERT_EQ(metrics.blockStallCount, 0u);
-    ASSERT_GT(metrics.feedDataCalls, 0u);
-    ASSERT_EQ(metrics.parseState, ParseState::Streaming);
-}
-
 TEST(demuxer_reaches_streaming_state) {
     WebmDemuxer demuxer;
     feedAll(demuxer, fixture::kWebmData, fixture::kWebmDataSize, 4096);
     ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
-}
-
-TEST(audio_durations_are_20ms) {
-    WebmDemuxer demuxer;
-    auto pkts = feedAll(demuxer, fixture::kWebmData, fixture::kWebmDataSize, 65536);
-
-    for (auto dur : pkts.audioDuration) {
-        ASSERT_EQ(dur, 20000);  // 20ms in microseconds
-    }
 }
 
 TEST(decoded_audio_contains_nonzero_samples) {
@@ -357,111 +328,17 @@ TEST(stream_reader_rejects_data_beyond_max_buffer_size) {
 
     std::vector<uint8_t> filler(kChunkSize, 0xAA);
     size_t fed = 0;
+    size_t packets = 0;
     while (fed < kTotalFiller) {
-        demuxer.feedData(filler.data(), filler.size());
+        const auto& result = demuxer.feedData(filler.data(), filler.size());
+        packets += result.audioPackets.size() + result.videoPackets.size();
         fed += filler.size();
+        ASSERT_LE(demuxer.bufferBytes(), kMaxBuffer);
     }
 
-    auto metrics = demuxer.demuxerMetrics();
-
-    // Buffer must be capped at kMaxBufferSize
-    ASSERT_LE(metrics.bufferBytes, kMaxBuffer);
-
-    // Overflow or partial drops must have been detected
-    ASSERT_GT(metrics.overflowCount + metrics.partialDropCount, 0u);
-}
-
-TEST(demuxer_split_drop_counters_separate_from_aggregate) {
-    // Empty-state baseline — all counters zero.
-    WebmDemuxer demuxer;
-    auto m = demuxer.demuxerMetrics();
-    ASSERT_EQ(m.partialDropCount, 0u);
-    ASSERT_EQ(m.oversizedFrameDrops, 0u);
-    ASSERT_EQ(m.packetCapDrops, 0u);
-    ASSERT_EQ(m.appendBackpressureDrops, 0u);
-
-    // Flood stream-mode demuxer until append backpressure kicks in.
-    feedAll(demuxer, fixture::kWebmData, fixture::kWebmDataSize, 65536);
-    constexpr size_t kFiller = 3 * 1024 * 1024;  // >> StreamReader::kMaxBufferSize (2 MiB)
-    std::vector<uint8_t> filler(65536, 0xBB);
-    size_t fed = 0;
-    while (fed < kFiller) {
-        demuxer.feedData(filler.data(), filler.size());
-        fed += filler.size();
-    }
-    m = demuxer.demuxerMetrics();
-    // Append-backpressure counter bumped at least once; partialDropCount is the sum.
-    ASSERT_GT(m.appendBackpressureDrops, 0u);
-    ASSERT_GE(m.partialDropCount,
-              m.oversizedFrameDrops + m.packetCapDrops + m.appendBackpressureDrops);
-}
-
-TEST(demuxer_cumulative_counters_survive_reset) {
-    WebmDemuxer demuxer;
-    auto initial = demuxer.demuxerMetrics();
-    ASSERT_EQ(initial.parseErrorCount, 0u);
-    ASSERT_EQ(initial.cumulativeParseErrorCount, 0u);
-    ASSERT_EQ(initial.sessionResetCount, 0u);
-
-    // Drive the demuxer into Error state so parse errors actually bump.
-    std::vector<uint8_t> garbage(1024, 0xCC);
-    for (int i = 0; i < 20; ++i) {
-        demuxer.feedData(garbage.data(), garbage.size());
-        if (demuxer.parseState() == ParseState::Error) break;
-    }
-    ASSERT_EQ(demuxer.parseState(), ParseState::Error);
-
-    auto afterError = demuxer.demuxerMetrics();
-    ASSERT_GT(afterError.parseErrorCount, 0u);
-    ASSERT_EQ(afterError.parseErrorCount, afterError.cumulativeParseErrorCount);
-
-    uint64_t errsBeforeReset = afterError.cumulativeParseErrorCount;
-    demuxer.reset();
-
-    auto afterReset = demuxer.demuxerMetrics();
-    // Session counters zeroed, cumulative preserved, sessionResetCount bumped.
-    ASSERT_EQ(afterReset.parseErrorCount, 0u);
-    ASSERT_EQ(afterReset.cumulativeParseErrorCount, errsBeforeReset);
-    ASSERT_EQ(afterReset.sessionResetCount, 1u);
-
-    // A second round of errors + reset: cumulative keeps growing monotonically.
-    for (int i = 0; i < 20; ++i) {
-        demuxer.feedData(garbage.data(), garbage.size());
-        if (demuxer.parseState() == ParseState::Error) break;
-    }
-    auto afterSecondError = demuxer.demuxerMetrics();
-    ASSERT_GT(afterSecondError.cumulativeParseErrorCount, errsBeforeReset);
-
-    demuxer.reset();
-    auto afterSecondReset = demuxer.demuxerMetrics();
-    ASSERT_EQ(afterSecondReset.sessionResetCount, 2u);
-    ASSERT_EQ(afterSecondReset.cumulativeParseErrorCount,
-              afterSecondError.cumulativeParseErrorCount);
-}
-
-TEST(demuxer_timeInErrorMs_positive_after_permanent_error) {
-    WebmDemuxer demuxer;
-    // Feed persistent garbage (non-EBML) until parse retries exhaust and the
-    // demuxer transitions to permanent Error state. kMaxParseRetries=3.
-    std::vector<uint8_t> garbage(1024, 0xCC);
-    for (int i = 0; i < 20; ++i) {
-        demuxer.feedData(garbage.data(), garbage.size());
-        if (demuxer.parseState() == ParseState::Error) break;
-    }
-    ASSERT_EQ(demuxer.parseState(), ParseState::Error);
-
-    // Sleep long enough that (nowUs-entry)/1000 is safely >= 1 ms even under
-    // scheduler jitter from sanitizers.
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    auto m = demuxer.demuxerMetrics();
-    ASSERT_EQ(m.parseState, ParseState::Error);
-    ASSERT_GT(m.timeInErrorMs, 0);
-
-    // After reset, state returns to WaitingForEBML and the counter must zero.
-    demuxer.reset();
-    auto after = demuxer.demuxerMetrics();
-    ASSERT_EQ(after.parseState, ParseState::WaitingForEBML);
-    ASSERT_EQ(after.timeInErrorMs, 0);
+    // Filler is not a cluster: nothing is emitted and the state holds.
+    ASSERT_EQ(packets, size_t(0));
+    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
 }
 
 TEST_MAIN("End-to-End Demux Tests")

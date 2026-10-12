@@ -3,10 +3,8 @@
   "include": ["**/*.ts", "**/*.tsx"],
   "exclude": ["**/node_modules", "**/Pods"],
   "compilerOptions": {
-    "strict": true,
-    "baseUrl": ".",
     "paths": {
-      "react-native-webm-player": ["../src"]
+      "@heartit/webm-player": ["../src"]
     }
   }
 }

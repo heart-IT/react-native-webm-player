@@ -1,5 +1,8 @@
 #import "WebmVideoDecoder.h"
 
+#import "WebmDisplayLayerWatch.h"
+#import "WebmVP9Session.h"
+
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <atomic>
@@ -10,9 +13,6 @@
 
 namespace {
 
-// vpcC (VP Codec Configuration Record) — 12 bytes, ISO/IEC 14496-15 Annex H.
-// Required as a SampleDescriptionExtensionAtoms entry on iOS 14+; mandatory
-// since the iOS 26.2 supplemental-decoder reclassification.
 // Advisory only — presentation order and pacing come from each sample's PTS;
 // this fills the CMSampleTimingInfo duration field for a nominal 30 fps stream.
 constexpr CMTime kNominalFrameDuration = {1, 30, kCMTimeFlags_Valid, 0};
@@ -24,20 +24,12 @@ constexpr size_t kMaxPendingFrames = 30;
 // Drop logs sample every 512th occurrence: a wedged layer drops ~30/s.
 constexpr uint64_t kDropLogMask = 511;
 
-// Marks _renderQueue so teardown can detect it is already running on it — a
-// dispatch_sync from the queue onto itself deadlocks, and dealloc can land
-// here when a queued block held the last strong reference.
-void* const kRenderQueueKey = (void*)&kRenderQueueKey;
+// Presented-frame progress: one line per ~10 s at 30 fps.
+constexpr uint64_t kPresentedLogEvery = 300;
 
-NSData* BuildVpcCConfig(int profile) {
-    uint8_t buf[12] = {0};
-    buf[0] = 0x01;
-    buf[4] = static_cast<uint8_t>(profile);
-    buf[5] = 30;                            // level 3.0 (covers 720p30)
-    buf[6] = (8u << 4) | (1u << 1) | 0u;    // 8-bit, 4:2:0, limited range
-    buf[7] = 1; buf[8] = 1; buf[9] = 1;     // BT.709
-    return [NSData dataWithBytes:buf length:sizeof(buf)];
-}
+// Marks _renderQueue so teardown can tell it is already on it: a dispatch_sync
+// onto itself deadlocks, and dealloc can run from a queued block's last ref.
+void* const kRenderQueueKey = (void*)&kRenderQueueKey;
 
 }  // namespace
 
@@ -48,35 +40,42 @@ NSData* BuildVpcCConfig(int profile) {
     int _width;
     int _height;
     int _profile;
-    int _containerWidth;
-    int _containerHeight;
     BOOL _hwSupported;
     dispatch_queue_t _renderQueue;
-    // Decoded frames waiting for the layer to pull them. Enqueuing directly from
-    // the VideoToolbox callback dropped every frame the layer was not
-    // instantaneously ready for, which is most of them.
+    // Decoded frames waiting for the layer to pull them: enqueuing straight from
+    // the VideoToolbox callback dropped every frame the layer was not ready for.
     std::deque<CMSampleBufferRef> _pending;
     std::mutex _pendingMutex;
-    // submitFrame runs on the demux thread; suspend/resume arrive on main.
-    // Guards _session and _formatDesc against teardown mid-submit. Taken only at
-    // public entry points — ensureSession/shutdownSession assume it is held.
+    // submitFrame runs on the demux thread; shutdown and reset arrive on the
+    // engine's control thread. Guards _session and _formatDesc against teardown
+    // mid-submit. Taken only at public entry points — ensureSession and
+    // shutdownSession assume it is held.
     std::mutex _sessionMutex;
-    BOOL _suspended;
+    WebmDisplayLayerWatch* _layerWatch;  // main thread only
     BOOL _requesting;  // _renderQueue only
     std::atomic<uint64_t> _framesPresented;
     std::atomic<uint64_t> _pendingCapDrops;
+    std::atomic<int64_t> _minDecodeLeadUs;
+    std::atomic<int64_t> _minEnqueueLeadUs;
+    std::atomic<uint64_t> _lateEnqueues;
+}
+
+static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
+    int64_t cur = slot.load();
+    while (value < cur && !slot.compare_exchange_weak(cur, value)) {}
 }
 
 - (instancetype)init {
     self = [super init];
     if (!self) return nil;
     _renderQueue = dispatch_queue_create("webmplayer.video.render", DISPATCH_QUEUE_SERIAL);
+    _minDecodeLeadUs = INT64_MAX;
+    _minEnqueueLeadUs = INT64_MAX;
     dispatch_queue_set_specific(_renderQueue, kRenderQueueKey, (void*)1, nullptr);
-    constexpr CMVideoCodecType kVP9CodecType = 'vp09';
     if (@available(iOS 26.2, *)) {
-        VTRegisterSupplementalVideoDecoderIfAvailable(kVP9CodecType);
+        VTRegisterSupplementalVideoDecoderIfAvailable(kWebmVP9CodecType);
     }
-    _hwSupported = VTIsHardwareDecodeSupported(kVP9CodecType);
+    _hwSupported = VTIsHardwareDecodeSupported(kWebmVP9CodecType);
     if (!_hwSupported) {
         MEDIA_LOG_E("WebmVideoDecoder: no VP9 decoder on this device; video cannot play");
     }
@@ -87,9 +86,34 @@ NSData* BuildVpcCConfig(int profile) {
 
 - (BOOL)hardwareDecodeSupported { return _hwSupported; }
 
+- (BOOL)hasSession {
+    std::lock_guard<std::mutex> lock(_sessionMutex);
+    return _session != nullptr;
+}
+
 - (uint64_t)framesPresented { return _framesPresented.load(); }
 
 - (uint64_t)pendingCapDrops { return _pendingCapDrops.load(); }
+
+- (size_t)pendingFrames {
+    std::lock_guard<std::mutex> lock(_pendingMutex);
+    return _pending.size();
+}
+
+- (int64_t)leadUs:(int64_t)ptsUs {
+    double (^clock)(void) = _clock;
+    double now = clock ? clock() : -1.0;
+    return now < 0 ? INT64_MAX : ptsUs - static_cast<int64_t>(now * 1000000.0);
+}
+
+- (NSString*)leadReport {
+    int64_t decode = _minDecodeLeadUs.exchange(INT64_MAX);
+    int64_t enqueue = _minEnqueueLeadUs.exchange(INT64_MAX);
+    return [NSString stringWithFormat:@"lead decode %.2fs enqueue %.2fs late %llu",
+                                      decode == INT64_MAX ? NAN : decode / 1000000.0,
+                                      enqueue == INT64_MAX ? NAN : enqueue / 1000000.0,
+                                      static_cast<unsigned long long>(_lateEnqueues.load())];
+}
 
 - (void)armRequest {
     AVSampleBufferDisplayLayer* layer = _layer;
@@ -122,9 +146,18 @@ NSData* BuildVpcCConfig(int profile) {
             next = _pending.front();
             _pending.pop_front();
         }
+        int64_t lead = [self leadUs:static_cast<int64_t>(
+                                        CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(next)) * 1000000.0)];
+        NoteMin(_minEnqueueLeadUs, lead);
+        if (lead < 0) _lateEnqueues.fetch_add(1);
         [layer enqueueSampleBuffer:next];
         CFRelease(next);
-        _framesPresented.fetch_add(1);
+        // In a device log, these lines are the evidence video reaches the layer.
+        uint64_t presented = _framesPresented.fetch_add(1) + 1;
+        if (presented == 1 || presented % kPresentedLogEvery == 0) {
+            MEDIA_LOG_I("WebmVideoDecoder: %llu frames presented",
+                        static_cast<unsigned long long>(presented));
+        }
     }
 }
 
@@ -134,11 +167,39 @@ NSData* BuildVpcCConfig(int profile) {
     _pending.clear();
 }
 
-- (void)setOutputLayer:(AVSampleBufferDisplayLayer*)layer { _layer = layer; }
+- (void)setOutputLayer:(AVSampleBufferDisplayLayer*)layer {
+    [_layerWatch invalidate];
+    _layerWatch = nil;
+    _layer = layer;
+    if (!layer) return;
+    __weak WebmVideoDecoder* weakSelf = self;
+    _layerWatch = [[WebmDisplayLayerWatch alloc] initWithLayer:layer
+                                                 onFlushNeeded:^{
+                                                     [weakSelf recoverLayer:layer];
+                                                 }];
+}
 
-- (void)setContainerWidth:(int)width height:(int)height {
-    _containerWidth = width;
-    _containerHeight = height;
+- (void)logLayerPerformance {
+    [_layerWatch logPerformance];
+}
+
+// The layer reported that only a flush will make it accept media again.
+- (void)recoverLayer:(AVSampleBufferDisplayLayer*)layer {
+    dispatch_async(_renderQueue, ^{
+        long before = (long)layer.status;
+        [layer flush];
+        // Decoded while the layer was failed, so already behind the clock.
+        [self drainPending];
+        MEDIA_LOG_I("WebmVideoDecoder: layer required flush: status %ld->%ld",
+                    before, (long)layer.status);
+        // Re-arm from scratch: the request installed before the failure died
+        // with the layer's old status.
+        if (self->_requesting) {
+            self->_requesting = NO;
+            [layer stopRequestingMediaData];
+        }
+        [self armRequest];
+    });
 }
 
 - (BOOL)ensureSession:(int)width height:(int)height profile:(int)profile {
@@ -146,32 +207,10 @@ NSData* BuildVpcCConfig(int profile) {
     [self shutdownSession];
     if (!_hwSupported) return NO;  // already logged once at init
 
-    NSData* vpcc = BuildVpcCConfig(profile);
-    NSDictionary* extensions = @{
-        (NSString*)kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: @{ @"vpcC": vpcc }
-    };
-    constexpr CMVideoCodecType kVP9CodecType = 'vp09';
-    OSStatus s = CMVideoFormatDescriptionCreate(kCFAllocatorDefault, kVP9CodecType,
-                                                width, height,
-                                                (__bridge CFDictionaryRef)extensions, &_formatDesc);
-    if (s != noErr || !_formatDesc) {
-        MEDIA_LOG_E("WebmVideoDecoder: CMVideoFormatDescriptionCreate failed: %d", (int)s);
-        return NO;
-    }
-
-    NSDictionary* destAttrs = @{
-        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-        (NSString*)kCVPixelBufferWidthKey: @(width),
-        (NSString*)kCVPixelBufferHeightKey: @(height),
-        (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{}
-    };
-    VTDecompressionOutputCallbackRecord cb = {0};
-    cb.decompressionOutputCallback = &OutputCallback;
-    cb.decompressionOutputRefCon = (__bridge void*)self;
-    s = VTDecompressionSessionCreate(kCFAllocatorDefault, _formatDesc, nullptr,
-                                     (__bridge CFDictionaryRef)destAttrs, &cb, &_session);
-    if (s != noErr || !_session) {
-        MEDIA_LOG_E("WebmVideoDecoder: VTDecompressionSessionCreate failed: %d", (int)s);
+    _formatDesc = WebmCreateVP9FormatDescription(width, height, profile);
+    if (!_formatDesc) return NO;
+    _session = WebmCreateVP9Session(_formatDesc, width, height, &OutputCallback, (__bridge void*)self);
+    if (!_session) {
         CFRelease(_formatDesc); _formatDesc = nullptr;
         return NO;
     }
@@ -186,22 +225,12 @@ NSData* BuildVpcCConfig(int profile) {
     if (!data || length == 0) return NO;
 
     std::lock_guard<std::mutex> lock(_sessionMutex);
-    // Backgrounded: decoder resources are not ours to use, and rebuilding the
-    // session here would fail. Frames resume at the next keyframe after resume.
-    if (_suspended) return NO;
 
     if (isKey) {
         auto info = media::vp9::parseHeader(data, length);
-        if (info.valid && info.width > 0 && info.height > 0) {
-            if (![self ensureSession:info.width height:info.height profile:info.profile]) return NO;
-        } else if (!_session && _containerWidth > 0 && _containerHeight > 0) {
-            // Header unreadable. The container already declared the frame size,
-            // so fall back to it rather than never creating a session. Profile 0
-            // is the only one WebM/VP9 mandates support for, and a wrong guess
-            // surfaces as a decode error rather than silence.
-            MEDIA_LOG_W("WebmVideoDecoder: VP9 header unparseable, using container %dx%d",
-                        _containerWidth, _containerHeight);
-            if (![self ensureSession:_containerWidth height:_containerHeight profile:0]) return NO;
+        if (info.valid && info.width > 0 && info.height > 0 &&
+            ![self ensureSession:info.width height:info.height profile:info.profile]) {
+            return NO;
         }
     }
     if (!_session) return NO;
@@ -264,6 +293,7 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     if (!imageBuffer || (flags & kVTDecodeInfo_FrameDropped)) return;
     auto* self_ = (__bridge WebmVideoDecoder*)refCon;
     int64_t ptsUs = static_cast<int64_t>(reinterpret_cast<uintptr_t>(sourceFrameRefCon));
+    NoteMin(self_->_minDecodeLeadUs, [self_ leadUs:ptsUs]);
 
     CMVideoFormatDescriptionRef outFmt = nullptr;
     if (CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &outFmt) != noErr) return;
@@ -313,66 +343,6 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     _width = _height = _profile = 0;
 }
 
-- (void)suspend {
-    std::lock_guard<std::mutex> lock(_sessionMutex);
-    if (_suspended) return;
-    _suspended = YES;
-    // Released rather than left to be revoked, so the decoder is handed back
-    // cleanly. Already-decoded frames stay queued: the synchronizer's clock is
-    // stopped too, so their timestamps are still ahead of it on resume and they
-    // paint the first picture back with no wait for a keyframe.
-    [self shutdownSession];
-}
-
-- (void)resume {
-    {
-        std::lock_guard<std::mutex> lock(_sessionMutex);
-        _suspended = NO;
-    }
-
-    AVSampleBufferDisplayLayer* layer = _layer;
-    if (!layer) return;
-    // Losing the foreground leaves the layer in AVQueuedSampleBufferRenderingStatusFailed,
-    // and it only leaves that state on a -flush. The flush in feedLayer cannot do it: a
-    // failed layer never becomes ready for more media data, so the request block it runs
-    // from is never invoked again. Waiting to be asked means never being asked, and the
-    // picture stays frozen even though the decoder recovered at the next keyframe.
-    dispatch_async(_renderQueue, ^{
-        long statusBefore = (long)layer.status;
-        BOOL needsFlush = layer.status == AVQueuedSampleBufferRenderingStatusFailed ||
-                          layer.requiresFlushToResumeDecoding;
-        if (needsFlush) {
-            [layer flush];
-        }
-        // Pending PTS are timescale-1e6 by construction (OutputCallback), so
-        // .value reads back as microseconds directly.
-        size_t pendingCount = 0;
-        int64_t frontPtsUs = -1;
-        int64_t backPtsUs = -1;
-        {
-            std::lock_guard<std::mutex> lock(self->_pendingMutex);
-            pendingCount = self->_pending.size();
-            if (pendingCount > 0) {
-                frontPtsUs = CMSampleBufferGetPresentationTimeStamp(self->_pending.front()).value;
-                backPtsUs = CMSampleBufferGetPresentationTimeStamp(self->_pending.back()).value;
-            }
-        }
-        // Discriminates the open frozen-picture candidates: a layer still Failed
-        // after the flush needs re-adding to the synchronizer, not flushing; a
-        // pending queue whose PTS trail the resumed clock is discarded as late.
-        MEDIA_LOG_I("WebmVideoDecoder: resume: status %ld->%ld flushed %d, %zu pending pts %lld..%lld us",
-                    statusBefore, (long)layer.status, (int)needsFlush,
-                    pendingCount, (long long)frontPtsUs, (long long)backPtsUs);
-        // Re-arm from scratch: the request this decoder installed before the trip is
-        // dead along with the layer's old status.
-        if (self->_requesting) {
-            self->_requesting = NO;
-            [layer stopRequestingMediaData];
-        }
-        [self armRequest];
-    });
-}
-
 // Discards everything belonging to the previous stream: the session (in-flight
 // callbacks fenced by shutdownSession; the next keyframe rebuilds), the decoded
 // backlog, and the frames already enqueued on the layer. Called on stream
@@ -392,6 +362,8 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
 }
 
 - (void)shutdown {
+    [_layerWatch invalidate];
+    _layerWatch = nil;
     std::lock_guard<std::mutex> lock(_sessionMutex);
     [self shutdownSession];
     if (_requesting) {

@@ -6,12 +6,10 @@
 #include "DemuxLimits.h"
 
 #include "common/MediaLog.h"
-#include "common/MediaTime.h"
 
 #include "mkvparser/mkvparser.h"
 
 #include <cstring>
-#include <mutex>
 
 namespace media::demux {
 
@@ -33,18 +31,14 @@ bool WebmDemuxer::parseTracks() {
                 return false;  // Need more data
             }
             parseError_ = "segment load failed";
-            ++parseErrorCount_;
-            ++cumulativeParseErrorCount_;
             if (++parseRetryCount_ >= kMaxParseRetries) {
-                state_.store(ParseState::Error, std::memory_order_release);
-                errorEntryUs_ = nowUs();
+                state_ = ParseState::Error;
             }
         }
         return false;
     }
 
     unsigned long trackCount = tracks->GetTracksCount();
-    std::lock_guard<std::mutex> trackLk(trackMtx_);
     for (unsigned long i = 0; i < trackCount; ++i) {
         const mkvparser::Track* track = tracks->GetTrackByIndex(i);
         if (!track) {
@@ -57,17 +51,9 @@ bool WebmDemuxer::parseTracks() {
             continue;
         }
 
-        size_t codecPrivateSize = 0;
-        const unsigned char* codecPrivate = track->GetCodecPrivate(codecPrivateSize);
-
         if (trackType == mkvparser::Track::kAudio &&
             std::strcmp(codecId, "A_OPUS") == 0) {
             trackInfo_.audioTrackNum = static_cast<int>(track->GetNumber());
-            trackInfo_.audioCodecId = codecId;
-            if (codecPrivate && codecPrivateSize > 0) {
-                trackInfo_.audioCodecPrivate.assign(
-                    codecPrivate, codecPrivate + codecPrivateSize);
-            }
             const mkvparser::AudioTrack* audioTrack =
                 static_cast<const mkvparser::AudioTrack*>(track);
             // mkvparser only rejects SamplingFrequency <= 0; the double is
@@ -88,11 +74,6 @@ bool WebmDemuxer::parseTracks() {
         } else if (trackType == mkvparser::Track::kVideo &&
                    std::strcmp(codecId, "V_VP9") == 0) {
             trackInfo_.videoTrackNum = static_cast<int>(track->GetNumber());
-            trackInfo_.videoCodecId = codecId;
-            if (codecPrivate && codecPrivateSize > 0) {
-                trackInfo_.videoCodecPrivate.assign(
-                    codecPrivate, codecPrivate + codecPrivateSize);
-            }
             const mkvparser::VideoTrack* videoTrack =
                 static_cast<const mkvparser::VideoTrack*>(track);
             trackInfo_.videoWidth = static_cast<int>(videoTrack->GetWidth());
@@ -102,10 +83,7 @@ bool WebmDemuxer::parseTracks() {
 
     if (trackInfo_.audioTrackNum < 0 && trackInfo_.videoTrackNum < 0) {
         parseError_ = "no supported tracks (need A_OPUS or V_VP9)";
-        ++parseErrorCount_;
-        ++cumulativeParseErrorCount_;
-        state_.store(ParseState::Error, std::memory_order_release);
-        errorEntryUs_ = nowUs();
+        state_ = ParseState::Error;
         return false;
     }
 

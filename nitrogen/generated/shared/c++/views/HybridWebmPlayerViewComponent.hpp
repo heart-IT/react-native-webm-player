@@ -7,14 +7,15 @@
 
 #pragma once
 
-#include <optional>
-#include <NitroModules/NitroDefines.hpp>
-#include <NitroModules/NitroHash.hpp>
-#include <NitroModules/CachedProp.hpp>
-#include <react/renderer/core/ConcreteComponentDescriptor.h>
-#include <react/renderer/core/PropsParserContext.h>
+#include <NitroModules/ReactProp.hpp>
+#include <NitroModules/ViewComponentDescriptor.hpp>
+#include <NitroModules/ViewPropsHolderState.hpp>
 #include <react/renderer/components/view/ConcreteViewShadowNode.h>
 #include <react/renderer/components/view/ViewProps.h>
+#include <react/renderer/core/PropsParserContext.h>
+#include <react/renderer/core/RawProps.h>
+
+#include <string>
 
 #include <memory>
 #include "HybridWebmPlayerSpec.hpp"
@@ -43,9 +44,23 @@ namespace margelo::nitro::webmplayer::views {
                               const react::RawProps& rawProps);
 
   public:
-    CachedProp<std::optional<std::shared_ptr<HybridWebmPlayerSpec>>> player;
-    CachedProp<WebmScaleMode> scaleMode;
-    CachedProp<std::optional<std::function<void(const std::shared_ptr<HybridWebmPlayerViewSpec>& /* ref */)>>> hybridRef;
+    nitro::ReactProp<std::optional<std::shared_ptr<HybridWebmPlayerSpec>>> player;
+    nitro::ReactProp<WebmScaleMode> scaleMode;
+    nitro::ReactProp<std::optional<std::function<void(const std::shared_ptr<HybridWebmPlayerViewSpec>& /* ref */)>>> hybridRef;
+
+    [[nodiscard]]
+    bool hasSameProps(const HybridWebmPlayerViewProps& other) const noexcept {
+      return player.hasSameValue(other.player) &&
+             scaleMode.hasSameValue(other.scaleMode) &&
+             hybridRef.hasSameValue(other.hybridRef);
+    }
+
+    [[nodiscard]]
+    bool hasAnyProvidedProps() const noexcept {
+      return player.isProvided() ||
+             scaleMode.isProvided() ||
+             hybridRef.isProvided();
+    }
 
   private:
     static bool filterObjectKeys(const std::string& propName);
@@ -54,32 +69,7 @@ namespace margelo::nitro::webmplayer::views {
   /**
    * State for the "WebmPlayerView" View.
    */
-  class HybridWebmPlayerViewState final {
-  public:
-    HybridWebmPlayerViewState() = default;
-    explicit HybridWebmPlayerViewState(const std::shared_ptr<HybridWebmPlayerViewProps>& props):
-      _props(props) {}
-
-  public:
-    [[nodiscard]]
-    const std::shared_ptr<HybridWebmPlayerViewProps>& getProps() const {
-      return _props;
-    }
-
-  public:
-#ifdef ANDROID
-  HybridWebmPlayerViewState(const HybridWebmPlayerViewState& /* previousState */, folly::dynamic /* data */) {}
-  folly::dynamic getDynamic() const {
-    throw std::runtime_error("HybridWebmPlayerViewState does not support folly!");
-  }
-  react::MapBuffer getMapBuffer() const {
-    throw std::runtime_error("HybridWebmPlayerViewState does not support MapBuffer!");
-  };
-#endif
-
-  private:
-    std::shared_ptr<HybridWebmPlayerViewProps> _props;
-  };
+  using HybridWebmPlayerViewState = nitro::ViewPropsHolderState<HybridWebmPlayerViewProps>;
 
   /**
    * The Shadow Node for the "WebmPlayerView" View.
@@ -92,21 +82,7 @@ namespace margelo::nitro::webmplayer::views {
   /**
    * The Component Descriptor for the "WebmPlayerView" View.
    */
-  class HybridWebmPlayerViewComponentDescriptor final: public react::ConcreteComponentDescriptor<HybridWebmPlayerViewShadowNode> {
-  public:
-    explicit HybridWebmPlayerViewComponentDescriptor(const react::ComponentDescriptorParameters& parameters);
-
-  public:
-    /**
-     * A faster path for cloning props - reuses the caching logic from `HybridWebmPlayerViewProps`.
-     */
-    std::shared_ptr<const react::Props> cloneProps(const react::PropsParserContext& context,
-                                                   const std::shared_ptr<const react::Props>& props,
-                                                   react::RawProps rawProps) const override;
-#ifdef ANDROID
-    void adopt(react::ShadowNode& shadowNode) const override;
-#endif
-  };
+  using HybridWebmPlayerViewComponentDescriptor = nitro::ViewComponentDescriptor<HybridWebmPlayerViewShadowNode>;
 
   /* The actual view for "WebmPlayerView" needs to be implemented in platform-specific code. */
 

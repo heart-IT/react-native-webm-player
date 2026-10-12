@@ -4,23 +4,16 @@
 #import "WebmDemuxPump.h"
 #import "WebmEngineMetrics.h"
 #import "WebmInterruptionObserver.h"
-#import "WebmLifecycleObserver.h"
+#import "WebmPlaybackPolicy.h"
 #import "WebmVideoDecoder.h"
+#import "WebmWorkletSource.h"
 
-#import <UIKit/UIKit.h>
-#include <algorithm>
 #include <atomic>
+#include <mutex>
 
 #include "common/MediaLog.h"
 
 namespace {
-// Spec ranges (webm-player.nitro.ts); Android clamps to the same values, so an
-// out-of-range value must read back identically on both platforms.
-constexpr float kMinGain = 0.0f;
-// 1.0, not 2.0: media3 clamps volume to [0,1], so >1 was iOS-only behavior.
-constexpr float kMaxGain = 1.0f;
-constexpr float kMinPlaybackRate = 0.5f;
-constexpr float kMaxPlaybackRate = 2.0f;
 
 void RunOnMain(void (^block)(void)) {
   if ([NSThread isMainThread]) {
@@ -29,15 +22,15 @@ void RunOnMain(void (^block)(void)) {
     dispatch_async(dispatch_get_main_queue(), block);
   }
 }
+
 }  // namespace
 
-@interface WebmPlaybackEngine () <WebmDemuxPumpDelegate>
+@interface WebmPlaybackEngine () <WebmDemuxPumpDelegate, WebmWorkletSourceDelegate>
 @end
 
 @implementation WebmPlaybackEngine {
   WebmDemuxPump* _pump;
   WebmAudioSessionController* _session;
-  WebmLifecycleObserver* _lifecycle;
   WebmInterruptionObserver* _interruption;
   AVSampleBufferDisplayLayer* _displayLayer;
   AVSampleBufferAudioRenderer* _audioRenderer;
@@ -45,52 +38,50 @@ void RunOnMain(void (^block)(void)) {
   WebmVideoDecoder* _videoDecoder;
   WebmAudioDecoder* _audioDecoder;
 
-  std::atomic<bool> _running;
-  std::atomic<bool> _paused;
-  // Backgrounded is kept apart from _paused: resuming must not start playing a
-  // stream the user had explicitly paused before backgrounding.
-  std::atomic<bool> _backgrounded;
-  // Active audio-session interruption (phone call): resume() and rate changes
-  // must not restart the host clock while the system holds the session.
-  std::atomic<bool> _interrupted;
-  // Latched from the pump's terminal-parse-error health event, so a failure
-  // survives stop() as it does on Android. start() clears it.
-  std::atomic<bool> _failed;
-  // The synchronizer's clock is the media timeline. Starting it before any
-  // media exists makes it run ahead of the stream, so it is started at the
-  // first sample's presentation time instead.
-  std::atomic<bool> _clockStarted;
+  // Taken by everything that starts, stops or re-wires a session: play/stop on the
+  // JS thread, status, interruptions, the display layer and the rejoin timer on main.
+  std::recursive_mutex _control;
+  WebmWorkletSource* _source;
+  NSString* _key;
+  int _datalessSessions;
+  dispatch_block_t _pendingRejoin;
+  // The worklet said `ended`: its exit is the broadcast finishing, not a loss.
+  bool _streamEnded;
 
-  std::atomic<float> _gain;
+  std::atomic<bool> _running;
+  // Latched from the pump's terminal-parse-error health event and from a
+  // failed rejoin, so a failure survives stop() as it does on Android.
+  std::atomic<bool> _failed;
+  // The synchronizer's clock is the media timeline, started at the first
+  // sample's presentation time: started earlier it runs ahead of the stream.
+  std::atomic<bool> _clockStarted;
   std::atomic<bool> _muted;
-  std::atomic<float> _playbackRate;
+  // Set on the source's reader thread at the first byte of a session.
+  std::atomic<bool> _sessionReceivedData;
 
   void (^_healthCallback)(NSString*, NSString*);
   NSString* _lastHealthStatus;  // Main-thread only.
+  NSString* _lastHealthDetail;  // Main-thread only.
 }
 
 - (instancetype)init {
   self = [super init];
   if (!self) return nil;
   _running = false;
-  _paused = false;
-  _backgrounded = false;
   _failed = false;
   _clockStarted = false;
-  _gain = 1.0f;
   _muted = false;
-  _playbackRate = 1.0f;
-  _interrupted = false;
+  _sessionReceivedData = false;
+  _datalessSessions = 0;
+  _streamEnded = false;
   _lastHealthStatus = @"idle";
+  _lastHealthDetail = @"";
   _session = [[WebmAudioSessionController alloc] init];
-  // Outlives start/stop cycles so its cumulative counters do too.
+  // Outlives play/stop cycles so its cumulative counters do too.
   _pump = [[WebmDemuxPump alloc] init];
   _pump.delegate = self;
 
   __weak WebmPlaybackEngine* weakSelf = self;
-  _lifecycle = [[WebmLifecycleObserver alloc]
-      initWithOnBackground:^{ [weakSelf suspendForBackground]; }
-              onForeground:^{ [weakSelf resumeFromForeground]; }];
   _interruption = [[WebmInterruptionObserver alloc]
       initWithOnBegan:^{ [weakSelf interruptionBegan]; }
               onEnded:^(BOOL shouldResume) {
@@ -104,10 +95,10 @@ void RunOnMain(void (^block)(void)) {
 }
 
 - (void)setDisplayLayer:(AVSampleBufferDisplayLayer*)layer {
-  // CALayer parenting and the synchronizer's renderer set are main-thread only,
-  // so dispatch unconditionally — callers include the RN view manager and the
-  // demux thread.
+  // CALayer parenting and the synchronizer's renderer set are main-thread only;
+  // play() builds that set on the JS thread, so this takes _control as well.
   RunOnMain(^{
+    std::lock_guard<std::recursive_mutex> lock(self->_control);
     AVSampleBufferDisplayLayer* previous = self->_displayLayer;
     if (previous == layer) return;
 
@@ -130,12 +121,15 @@ void RunOnMain(void (^block)(void)) {
   });
 }
 
-- (BOOL)start {
-  if (_running) return YES;
+#pragma mark - Sessions
+
+- (void)playWithKey:(NSString*)key {
+  std::lock_guard<std::recursive_mutex> lock(_control);
+  [self stop];
+  _key = [key copy];
 
   _audioRenderer = [[AVSampleBufferAudioRenderer alloc] init];
   _audioRenderer.muted = _muted.load();
-  _audioRenderer.volume = _gain.load();
   _synchronizer = [[AVSampleBufferRenderSynchronizer alloc] init];
   [_synchronizer addRenderer:_audioRenderer];
   if (_displayLayer) [_synchronizer addRenderer:_displayLayer];
@@ -147,27 +141,28 @@ void RunOnMain(void (^block)(void)) {
 
   [_session activate];
 
-  _paused = false;
-  _interrupted = false;
   _failed = false;
   _clockStarted = false;
+  _streamEnded = false;
+  _datalessSessions = 0;
+  _sessionReceivedData = false;
   _running = true;
+  AVSampleBufferRenderSynchronizer* sync = _synchronizer;
+  _videoDecoder.clock = _pump.clock = ^double { return CMTimeGetSeconds(sync.currentTime); };
   [_pump startWithAudioDecoder:_audioDecoder videoDecoder:_videoDecoder];
-  // The lifecycle observer reports transitions only: a start() issued while
-  // already backgrounded must derive the current state itself (main-only API).
-  dispatch_async(dispatch_get_main_queue(), ^{
-    if (UIApplication.sharedApplication.applicationState ==
-        UIApplicationStateBackground) {
-      [self suspendForBackground];
-    }
-  });
-  return YES;
+  [self startSource];
 }
 
-- (BOOL)stop {
-  if (!_running) return YES;
+- (void)stop {
+  std::lock_guard<std::recursive_mutex> lock(_control);
+  if (!_running) return;
   _running = false;
+  [self cancelPendingRejoin];
+  // The source is joined before the pump it writes into goes away.
+  [_source stop];
+  _source = nil;
   [_pump stop];
+  _videoDecoder.clock = _pump.clock = nil;
 
   if (_synchronizer) {
     [_synchronizer setRate:0];
@@ -188,158 +183,112 @@ void RunOnMain(void (^block)(void)) {
   _audioRenderer = nil;
   _synchronizer = nil;
   [_session deactivate];
-  // Cleared so the getters do not report a stale pause on a stopped player.
-  // _backgrounded deliberately survives: it mirrors app state, not the session.
-  _paused = false;
-  _interrupted = false;
-  return YES;
 }
 
-- (BOOL)pause {
-  _paused = true;
-  if (_synchronizer) [_synchronizer setRate:0];
-  [_pump setPaused:YES];
-  return YES;
-}
-
-- (BOOL)resume {
-  _paused = false;
-  // Held playback stays stopped until the app returns / the call ends: the
-  // decoder has no session and the audio session belongs to the system.
-  if ([self platformHeld]) return YES;
-  [_pump setPaused:NO];
-  if (_synchronizer && _clockStarted.load()) {
-    [_synchronizer setRate:_playbackRate.load()];
+// Starts a worklet for the current key, feeding the pump. _control held.
+- (void)startSource {
+  WebmWorkletSource* source = [[WebmWorkletSource alloc] init];
+  source.delegate = self;
+  WebmDemuxPump* pump = _pump;
+  // A raw pointer, not a weak self: stop() joins the reader before the engine
+  // can go away, and a weak load there could take the last strong reference.
+  std::atomic<bool>* receivedData = &_sessionReceivedData;
+  _sessionReceivedData = false;
+  BOOL started = [source startWithKey:_key
+                                 sink:^size_t(const uint8_t* bytes, size_t length) {
+                                   size_t wrote = [pump feedData:bytes length:length];
+                                   if (wrote) receivedData->store(true);
+                                   return wrote;
+                                 }];
+  if (!started) {
+    _failed = true;
+    [self fireHealth:@"failed" detail:@"feeder bundle missing from the app"];
+    [self stop];
+    return;
   }
-  return YES;
+  _source = source;
 }
 
-// Records app state unconditionally (the flag survives stop()/start()), parks
-// playback only when running. Apply steps are idempotent for the start probe.
-- (void)suspendForBackground {
-  _backgrounded.store(true);
-  if (!_running.load()) return;
-  // Rate 0 rather than leaving it running: the synchronizer's timebase is driven
-  // by the host clock and keeps advancing while the process is suspended, so a
-  // running rate would return from a 30s background trip 30s ahead of the audio
-  // that actually played.
-  if (_synchronizer) [_synchronizer setRate:0];
-  MEDIA_LOG_I("WebmPlaybackEngine: background at clock %.3fs",
-              _synchronizer ? CMTimeGetSeconds(_synchronizer.currentTime) : -1.0);
-  [_pump setPaused:YES];
-  [_videoDecoder suspend];
-}
+// Drops the current source and starts another after a backoff. _control held.
+- (void)rejoinWithReason:(NSString*)reason {
+  [_source stop];
+  _source = nil;
+  [self cancelPendingRejoin];
 
-- (void)resumeFromForeground {
-  if (!_backgrounded.exchange(false)) return;
-  if (!_running.load()) return;
-  // Paired with the background line: if the clock moved across the trip, the
-  // suspension did not actually stop the timebase and queued frames are late.
-  MEDIA_LOG_I("WebmPlaybackEngine: foreground at clock %.3fs, layer %d",
-              _synchronizer ? CMTimeGetSeconds(_synchronizer.currentTime) : -1.0,
-              (int)(_displayLayer != nil));
-  [_videoDecoder resume];
-  // Gated on the JS pause: unparking unconditionally resurrected the measured
-  // 401-packet silent hole for pause() → background → foreground — the pump
-  // decoded into queues while the renderer stayed stopped.
-  if (!_paused.load()) [_pump setPaused:NO];
-  // iOS may have deactivated the session while we were away; reactivating is a
-  // no-op if it did not.
-  [_session activate];
-  if (_synchronizer && _clockStarted.load() && !_paused.load()) {
-    [_synchronizer setRate:_playbackRate.load()];
+  if (_sessionReceivedData.load()) {
+    _datalessSessions = 0;
+  } else if (++_datalessSessions >= kMaxDatalessSessions) {
+    _failed = true;
+    [self fireHealth:@"failed"
+              detail:[NSString stringWithFormat:@"rejoin failed: %@", reason]];
+    [self stop];
+    return;
   }
+  double delay = WebmRejoinDelaySeconds(_datalessSessions);
+  MEDIA_LOG_I("WebmPlaybackEngine: rejoining in %.1fs (%s)", delay, reason.UTF8String);
+  [self fireHealth:@"buffering"
+            detail:[NSString stringWithFormat:@"rejoining: %@", reason]];
+
+  __weak WebmPlaybackEngine* weakSelf = self;
+  __block dispatch_block_t block = dispatch_block_create(DISPATCH_BLOCK_INHERIT_QOS_CLASS, ^{
+    WebmPlaybackEngine* self_ = weakSelf;
+    if (!self_) return;
+    std::lock_guard<std::recursive_mutex> lock(self_->_control);
+    if (!self_->_running || self_->_pendingRejoin != block) return;
+    self_->_pendingRejoin = nil;
+    // The old source is joined, so nothing writes while the ring is cleared;
+    // the demux thread resets its parser and demuxPumpDidResetStream re-anchors.
+    [self_->_pump requestReset];
+    [self_ startSource];
+  });
+  _pendingRejoin = block;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), block);
+}
+
+- (void)cancelPendingRejoin {
+  if (!_pendingRejoin) return;
+  dispatch_block_cancel(_pendingRejoin);
+  _pendingRejoin = nil;
 }
 
 - (void)interruptionBegan {
-  if (!_running.load() || _backgrounded.load()) return;
-  _interrupted.store(true);
-  // The system already forced the synchronizer's rate to zero. Park the pump so
-  // the bytes stay in the ring instead of being decoded into queues nobody
-  // drains — the same silent hole the pause() parking exists to prevent.
-  [_pump setPaused:YES];
-  [self fireHealth:@"interrupted" detail:@"audio session interruption"];
+  std::lock_guard<std::recursive_mutex> lock(_control);
+  if (!_running || !_source) return;
+  // The system already forced the synchronizer's rate to zero. Stop feeding
+  // too: what the worklet produces during the call is behind the live edge.
+  [self cancelPendingRejoin];
+  [_source stop];
+  _source = nil;
+  [self fireHealth:@"buffering" detail:@"audio interrupted"];
 }
 
 - (void)interruptionEnded:(BOOL)shouldResume {
-  _interrupted.store(false);
-  if (!_running.load() || _backgrounded.load()) return;
-  // The interruption deactivated the session; reactivate before restoring rate.
-  [_session activate];
-  if (!shouldResume || _paused.load()) {
-    // System says wait for the user: record the (real) pause; resume() recovers.
-    _paused = true;
-    return;
-  }
-  [_pump setPaused:NO];
-  if (_synchronizer && _clockStarted.load()) {
-    [_synchronizer setRate:_playbackRate.load()];
-  }
-  [self fireHealth:@"playing" detail:@"interruption ended"];
+  std::lock_guard<std::recursive_mutex> lock(_control);
+  if (!_running || _source) return;
+  [_session activate];  // the interruption deactivated it
+  // Without ShouldResume the system wants the user to restart playback.
+  if (!shouldResume) return;
+  [self rejoinWithReason:@"interruption ended"];
 }
 
-- (BOOL)isRunning { return _running.load(); }
-- (BOOL)isPaused { return _paused.load(); }
-- (BOOL)muted { return _muted.load(); }
-- (float)gain { return _gain.load(); }
-- (float)playbackRate { return _playbackRate.load(); }
+#pragma mark - Controls and state
 
-// The platform is holding playback (app backgrounded or session interrupted):
-// the clock must not run regardless of what JS asks for.
-- (BOOL)platformHeld { return _backgrounded.load() || _interrupted.load(); }
-
-- (size_t)feedData:(const uint8_t*)bytes length:(size_t)length {
-  if (!_running) return 0;
-  return [_pump feedData:bytes length:length];
-}
-
-- (BOOL)setEndOfStream {
-  [_pump setEndOfStream];
-  return YES;
-}
-
-- (BOOL)resetStream {
-  // A failure belonging to the torn-down stream must not outlive the reset.
-  _failed = false;
-  [_pump requestReset];
-  return YES;
-}
-
-- (BOOL)setMuted:(BOOL)muted {
+// Getters take _control too: stop() nils the decoders and renderer under it while JS polls.
+- (void)setMuted:(BOOL)muted {
+  std::lock_guard<std::recursive_mutex> lock(_control);
   _muted = muted;
   if (_audioRenderer) _audioRenderer.muted = muted;
-  return YES;
 }
 
-- (BOOL)setGain:(float)gain {
-  gain = std::clamp(gain, kMinGain, kMaxGain);
-  _gain = gain;
-  if (_audioRenderer) _audioRenderer.volume = gain;
-  return YES;
-}
-
-- (BOOL)setPlaybackRate:(float)rate {
-  rate = std::clamp(rate, kMinPlaybackRate, kMaxPlaybackRate);
-  _playbackRate = rate;
-  // Held playback keeps rate 0 on purpose: restarting the host clock
-  // mid-suspension recreates exactly the drift the suspend prevents.
-  if (_synchronizer && _running && !_paused && ![self platformHeld] &&
-      _clockStarted.load()) {
-    [_synchronizer setRate:rate];
-  }
-  return YES;
-}
+- (BOOL)muted { return _muted.load(); }
 
 - (WebmPlaybackState)playbackState {
-  // Checked before _running so a failure survives stop(), as it does on Android.
-  // start() clears it.
+  std::lock_guard<std::recursive_mutex> lock(_control);
+  // Checked before _running so a failure survives stop(), as on Android; play() clears it.
   if (_failed.load()) return WebmPlaybackStateFailed;
   if (!_running) return WebmPlaybackStateIdle;
-  if (_paused) return WebmPlaybackStatePaused;
-  // Platform-halted (background, interruption): PAUSED with isPaused false.
-  if ([self platformHeld]) return WebmPlaybackStatePaused;
-  // Read from the decoders, not from mirrored counters: an audio-only stream
-  // must leave Buffering too.
+  // From the decoders, not mirrored counters: an audio-only stream must leave Buffering too.
   if (_videoDecoder.framesPresented == 0 && _audioDecoder.packetsDecoded == 0) {
     return WebmPlaybackStateBuffering;
   }
@@ -347,18 +296,26 @@ void RunOnMain(void (^block)(void)) {
 }
 
 - (WebmPlaybackMetrics)metrics {
+  std::lock_guard<std::recursive_mutex> lock(_control);
   return WebmCollectMetrics(_pump, _audioDecoder, _videoDecoder);
 }
 
 - (void)fireHealth:(NSString*)status detail:(NSString*)detail {
-  // Transition tracking and the callback both run on main, so _lastHealthStatus
-  // needs no lock. Health events are rare enough that the hop is free.
+  // Transition tracking and the callback both run on main, so the last-event
+  // fields need no lock. Health events are rare enough that the hop is free.
   RunOnMain(^{
     void (^cb)(NSString*, NSString*) = self->_healthCallback;
     if (!cb) return;
-    if ([self->_lastHealthStatus isEqualToString:status]) return;
+    NSString* d = detail ?: @"";
+    if ([self->_lastHealthStatus isEqualToString:status] &&
+        [self->_lastHealthDetail isEqualToString:d]) {
+      return;
+    }
     self->_lastHealthStatus = status;
-    cb(status, detail ?: @"");
+    self->_lastHealthDetail = d;
+    // The one trace of the session that survives into a collected device log.
+    MEDIA_LOG_I("WebmPlaybackEngine: health %s (%s)", status.UTF8String, d.UTF8String);
+    cb(status, d);
   });
 }
 
@@ -366,25 +323,48 @@ void RunOnMain(void (^block)(void)) {
   _healthCallback = [callback copy];
 }
 
-// Anchors the media timeline to the stream's own timestamps. Without this the
-// synchronizer counts from zero at the set rate the moment start() is called,
-// so currentTime reports wall-clock since start rather than stream position.
+// Anchors the media timeline to the stream's own timestamps, kLiveDelaySec
+// behind the first sample: the renderers hold what is enqueued until its time
+// comes, so the margin lives in the platform clock, not in a buffer of ours.
 - (void)startClockAtPts:(int64_t)ptsUs {
   if (_clockStarted.exchange(true)) return;
   AVSampleBufferRenderSynchronizer* sync = _synchronizer;
   if (!sync) return;
-  CMTime start = CMTimeMake(ptsUs, 1000000);
-  __weak WebmPlaybackEngine* weakSelf = self;
+  int64_t startUs = ptsUs - static_cast<int64_t>(kLiveDelaySec * 1000000);
+  CMTime start = CMTimeMake(startUs > 0 ? startUs : 0, 1000000);
   dispatch_async(dispatch_get_main_queue(), ^{
-    WebmPlaybackEngine* self_ = weakSelf;
-    if (!self_) return;
-    // Rate is read here, not captured at the call site: a pause() landing
-    // between the two would otherwise be overwritten by a stale nonzero rate.
-    float rate = (self_->_paused.load() || [self_ platformHeld])
-                     ? 0.0f
-                     : self_->_playbackRate.load();
-    [sync setRate:rate time:start];
+    [sync setRate:1.0f time:start];
   });
+}
+
+#pragma mark - WebmWorkletSourceDelegate (main queue)
+
+- (void)workletSource:(id)source didReportStatus:(NSString*)status {
+  std::lock_guard<std::recursive_mutex> lock(_control);
+  if (source != _source || !_running) return;
+  if ([status hasPrefix:@"net "]) {  // the swarm as the worklet sees it: log only
+    MEDIA_LOG_I("WebmPlaybackEngine: worklet %s", status.UTF8String);
+    return;
+  }
+  if ([status isEqualToString:@"joining"] || [status hasPrefix:@"connected"]) {
+    [self fireHealth:@"buffering"
+              detail:[NSString stringWithFormat:@"%@, waiting for data", status]];
+    return;
+  }
+  if ([status isEqualToString:@"ended"]) {
+    _streamEnded = true;
+    // The pump drains what is buffered, reports `ended`, and the engine stops itself there.
+    [_pump setEndOfStream];
+    return;
+  }
+  // `lag`, `reconfigured`, `error <message>` or unknown: the stream is lost.
+  [self rejoinWithReason:status];
+}
+
+- (void)workletSourceDidEnd:(id)source {
+  std::lock_guard<std::recursive_mutex> lock(_control);
+  if (source != _source || !_running || _streamEnded) return;
+  [self rejoinWithReason:@"worklet exited"];
 }
 
 #pragma mark - WebmDemuxPumpDelegate
@@ -405,10 +385,16 @@ void RunOnMain(void (^block)(void)) {
 - (void)demuxPump:(id)pump
     didReportHealth:(NSString*)status
              detail:(NSString*)detail {
-  // Latched here rather than read from the pump, so the state outlives the
-  // pump's own per-run flag being cleared by the next start().
-  if ([status isEqualToString:@"failed"]) _failed.store(true);
+  if ([status isEqualToString:@"failed"]) {
+    // A terminal parse error is a lost stream, not a dead player: the rejoin
+    // resets the parser and the dataless-session limit bounds retries.
+    std::lock_guard<std::recursive_mutex> lock(_control);
+    if (_running) [self rejoinWithReason:detail];
+    return;
+  }
   [self fireHealth:status detail:detail];
+  // A finished broadcast leaves the player stopped; play() starts another.
+  if ([status isEqualToString:@"ended"]) [self stop];
 }
 
 @end
