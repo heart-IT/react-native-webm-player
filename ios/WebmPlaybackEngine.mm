@@ -148,7 +148,7 @@ void RunOnMain(void (^block)(void)) {
   _sessionReceivedData = false;
   _running = true;
   AVSampleBufferRenderSynchronizer* sync = _synchronizer;
-  _videoDecoder.clock = _pump.clock = ^double { return CMTimeGetSeconds(sync.currentTime); };
+  _pump.clock = ^double { return CMTimeGetSeconds(sync.currentTime); };
   [_pump startWithAudioDecoder:_audioDecoder videoDecoder:_videoDecoder];
   [self startSource];
 }
@@ -162,7 +162,7 @@ void RunOnMain(void (^block)(void)) {
   [_source stop];
   _source = nil;
   [_pump stop];
-  _videoDecoder.clock = _pump.clock = nil;
+  _pump.clock = nil;
 
   if (_synchronizer) {
     [_synchronizer setRate:0];

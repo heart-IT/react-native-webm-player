@@ -57,15 +57,7 @@ void* const kRenderQueueKey = (void*)&kRenderQueueKey;
     BOOL _requesting;  // _renderQueue only
     std::atomic<uint64_t> _framesPresented;
     std::atomic<uint64_t> _pendingCapDrops;
-    std::atomic<int64_t> _minDecodeLeadUs;
-    std::atomic<int64_t> _minEnqueueLeadUs;
-    std::atomic<uint64_t> _lateEnqueues;
     std::atomic<int64_t> _frameDurationNs;  // demux thread writes, VT callback reads
-}
-
-static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
-    int64_t cur = slot.load();
-    while (value < cur && !slot.compare_exchange_weak(cur, value)) {}
 }
 
 - (void)setFrameDurationNs:(int64_t)ns {
@@ -76,8 +68,6 @@ static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
     self = [super init];
     if (!self) return nil;
     _renderQueue = dispatch_queue_create("webmplayer.video.render", DISPATCH_QUEUE_SERIAL);
-    _minDecodeLeadUs = INT64_MAX;
-    _minEnqueueLeadUs = INT64_MAX;
     dispatch_queue_set_specific(_renderQueue, kRenderQueueKey, (void*)1, nullptr);
     if (@available(iOS 26.2, *)) {
         VTRegisterSupplementalVideoDecoderIfAvailable(kWebmVP9CodecType);
@@ -105,21 +95,6 @@ static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
 - (size_t)pendingFrames {
     std::lock_guard<std::mutex> lock(_pendingMutex);
     return _pending.size();
-}
-
-- (int64_t)leadUs:(int64_t)ptsUs {
-    double (^clock)(void) = _clock;
-    double now = clock ? clock() : -1.0;
-    return now < 0 ? INT64_MAX : ptsUs - static_cast<int64_t>(now * 1000000.0);
-}
-
-- (NSString*)leadReport {
-    int64_t decode = _minDecodeLeadUs.exchange(INT64_MAX);
-    int64_t enqueue = _minEnqueueLeadUs.exchange(INT64_MAX);
-    return [NSString stringWithFormat:@"lead decode %.2fs enqueue %.2fs late %llu",
-                                      decode == INT64_MAX ? NAN : decode / 1000000.0,
-                                      enqueue == INT64_MAX ? NAN : enqueue / 1000000.0,
-                                      static_cast<unsigned long long>(_lateEnqueues.load())];
 }
 
 - (void)armRequest {
@@ -153,10 +128,6 @@ static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
             next = _pending.front();
             _pending.pop_front();
         }
-        int64_t lead = [self leadUs:static_cast<int64_t>(
-                                        CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(next)) * 1000000.0)];
-        NoteMin(_minEnqueueLeadUs, lead);
-        if (lead < 0) _lateEnqueues.fetch_add(1);
         [layer enqueueSampleBuffer:next];
         CFRelease(next);
         // In a device log, these lines are the evidence video reaches the layer.
@@ -317,7 +288,6 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     if (!imageBuffer || (flags & kVTDecodeInfo_FrameDropped)) return;
     auto* self_ = (__bridge WebmVideoDecoder*)refCon;
     int64_t ptsUs = static_cast<int64_t>(reinterpret_cast<uintptr_t>(sourceFrameRefCon));
-    NoteMin(self_->_minDecodeLeadUs, [self_ leadUs:ptsUs]);
 
     CMVideoFormatDescriptionRef outFmt = nullptr;
     if (CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &outFmt) != noErr) return;

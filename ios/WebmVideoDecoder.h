@@ -63,16 +63,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// the pump's pacing log: which side of the pull stopped.
 - (NSString*)layerReport;
 
-/// The media clock in seconds, or negative before it starts. Set before frames
-/// flow; read on the decode callback and the render queue.
-@property(nonatomic, copy, nullable) double (^clock)(void);
-
-/// Lead time, PTS minus clock, at its smallest since the last call: once at
-/// decode completion and once at enqueue onto the layer, plus the running
-/// count of frames enqueued already behind the clock. Separates a slow
-/// decoder, a slow pull and a layer dropping on its own.
-- (NSString*)leadReport;
-
 /// Discard the session, the decoded backlog, and the layer's queue: everything
 /// belonging to the previous stream's timeline. For stream reset.
 - (void)resetForNewStream;

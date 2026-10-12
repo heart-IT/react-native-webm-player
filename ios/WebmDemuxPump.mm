@@ -212,7 +212,7 @@ constexpr int kPacingSleepMs = 5;
     if (nowMs - lastSummaryMs >= kSummaryIntervalMs) {
       lastSummaryMs = nowMs;
       MEDIA_LOG_I("WebmDemuxPump: %llu B in, audio %llu decoded, video %llu presented %llu dropped, "
-                  "ring %.1f%%, window %zu KB, pending a%zu v%zu, ahead %.2fs, underruns %llu, %s",
+                  "ring %.1f%%, window %zu KB, pending a%zu v%zu, ahead %.2fs, underruns %llu",
                   static_cast<unsigned long long>(_bytesFed.load()),
                   static_cast<unsigned long long>(_audioDecoder.packetsDecoded),
                   static_cast<unsigned long long>(_videoDecoder.framesPresented),
@@ -220,8 +220,7 @@ constexpr int kPacingSleepMs = 5;
                   100.0 * _ring->sizeBytes() / _ring->capacity(),
                   demuxer.bufferBytes() / 1024,
                   _audioDecoder.pendingBuffers, _videoDecoder.pendingFrames, ahead,
-                  static_cast<unsigned long long>(underruns),
-                  [_videoDecoder leadReport].UTF8String);
+                  static_cast<unsigned long long>(underruns));
       WebmVideoDecoder* video = _videoDecoder;
       dispatch_async(dispatch_get_main_queue(), ^{ [video logLayerPerformance]; });
     }
