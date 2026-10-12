@@ -288,10 +288,10 @@ void RunOnMain(void (^block)(void)) {
   // Checked before _running so a failure survives stop(), as on Android; play() clears it.
   if (_failed.load()) return WebmPlaybackStateFailed;
   if (!_running) return WebmPlaybackStateIdle;
-  // From the decoders, not mirrored counters: an audio-only stream must leave Buffering too.
-  if (_videoDecoder.framesPresented == 0 && _audioDecoder.packetsDecoded == 0) {
-    return WebmPlaybackStateBuffering;
-  }
+  // Playing only while a session's source is running and has decoded its
+  // first sample: the join, a pending rejoin and an interruption are all
+  // Buffering, as on Android. _clockStarted is per session (reset re-arms it).
+  if (!_source || !_clockStarted.load()) return WebmPlaybackStateBuffering;
   return WebmPlaybackStatePlaying;
 }
 

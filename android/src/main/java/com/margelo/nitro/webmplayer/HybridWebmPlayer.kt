@@ -41,7 +41,8 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   private var surface: PlayerView? = null
   private var context: Context? = null
   private var key: String? = null
-  private var source: WorkletSource? = null
+  // Read by the playbackState getter on the JS thread.
+  @Volatile private var source: WorkletSource? = null
   private var broadcastEnded = false
   private var focusLost = false
   private var rejoinAttempts = 0
@@ -71,7 +72,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
     get() = when {
       stats.failed.get() -> WebmPlaybackState.FAILED
       !active.get() -> WebmPlaybackState.IDLE
-      stats.rendered.get() -> WebmPlaybackState.PLAYING
+      // A re-attached surface re-renders the last frame, so rendered alone
+      // would read Playing while the source is stopped for a focus loss.
+      stats.rendered.get() && source != null -> WebmPlaybackState.PLAYING
       else -> WebmPlaybackState.BUFFERING
     }
 
@@ -157,6 +160,9 @@ class HybridWebmPlayer : HybridWebmPlayerSpec() {
   private fun stopSource() {
     source?.stop()
     source = null
+    // Nothing renders until the next session's first frame: a pending rejoin
+    // and a focus loss read Buffering, not Playing.
+    stats.rendered.set(false)
   }
 
   private fun fail(detail: String) {

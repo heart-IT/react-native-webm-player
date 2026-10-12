@@ -253,12 +253,16 @@ broadcast as the iPhone runs, over `adb logcat -s WebmPlayer ReactNativeJS`.
   reported buffering every two seconds and the worklet's lag reached 13 s,
   227 fragments, and rejoined; playback was clean before and after. Not
   chased: Android tuning is outside this round.
-- **`playbackState` reads Playing while nothing plays**, on both platforms:
-  it is "something has rendered this session", so it stays Playing through
-  an interruption, a focus loss and, on iOS, a rejoin (Android's
-  `newSession` clears it there). Health is right in all three cases. A
-  follow-up for the spec: Buffering whenever the source is stopped or a
-  rejoin is pending.
+- **`playbackState` read Playing while nothing played**, on both platforms:
+  it was "something has rendered this session", so it stayed Playing through
+  an interruption, a focus loss and, on iOS, a rejoin. Now Playing only
+  while the session's source is running and has rendered (iOS: a source and
+  `_clockStarted`; Android: `rendered` cleared when the source stops, plus a
+  running source, since a re-attached surface re-renders the last frame and
+  set `rendered` again). Verified the same evening: Android read Buffering
+  through a YouTube focus loss and after returning to the app (log); the
+  iPhone read Buffering from "stream stalled" through the rejoin and Playing
+  after "stream resumed" (on screen; the console dropped with the Wi-Fi).
 
 ## Still to run on hardware
 

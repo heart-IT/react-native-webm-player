@@ -66,6 +66,11 @@ export interface WebmPlayer extends HybridObject<{
   play(key: string): void
   stop(): void
 
+  /**
+   * Playing only while a joined session is running and has rendered. Joining,
+   * a pending rejoin, an interruption and a focus loss are Buffering; a
+   * finished broadcast is Idle; Failed survives stop() until the next play().
+   */
   readonly playbackState: WebmPlaybackState
   muted: boolean
 
