@@ -52,6 +52,8 @@ struct TrackInfo {
     // decoder is configured from these rather than a hardcoded constant.
     int audioSampleRate = 0;
     int audioChannels = 0;
+    // The video TrackEntry's DefaultDuration; 0 when the container omits it.
+    int64_t videoFrameDurationNs = 0;
 };
 
 enum class ParseState {

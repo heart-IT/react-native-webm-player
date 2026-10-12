@@ -13,9 +13,11 @@
 
 namespace {
 
-// Advisory only — presentation order and pacing come from each sample's PTS;
-// this fills the CMSampleTimingInfo duration field for a nominal 30 fps stream.
-constexpr CMTime kNominalFrameDuration = {1, 30, kCMTimeFlags_Valid, 0};
+// CoreMedia's own kCMTimingInfoInvalid leaves every field invalid, so an
+// omitted DefaultDuration maps to kCMTimeInvalid.
+CMTime FrameDuration(int64_t ns) {
+    return ns > 0 ? CMTimeMake(ns, 1000000000) : kCMTimeInvalid;
+}
 
 // Bounds the decoded-frame backlog at ~1s of 30fps video; a layer that stops
 // pulling must not grow it without limit.
@@ -58,11 +60,16 @@ void* const kRenderQueueKey = (void*)&kRenderQueueKey;
     std::atomic<int64_t> _minDecodeLeadUs;
     std::atomic<int64_t> _minEnqueueLeadUs;
     std::atomic<uint64_t> _lateEnqueues;
+    std::atomic<int64_t> _frameDurationNs;  // demux thread writes, VT callback reads
 }
 
 static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
     int64_t cur = slot.load();
     while (value < cur && !slot.compare_exchange_weak(cur, value)) {}
+}
+
+- (void)setFrameDurationNs:(int64_t)ns {
+    _frameDurationNs.store(ns);
 }
 
 - (instancetype)init {
@@ -250,7 +257,7 @@ static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
 
     size_t sampleSize = length;
     CMSampleTimingInfo timing;
-    timing.duration = kNominalFrameDuration;
+    timing.duration = FrameDuration(_frameDurationNs.load());
     timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
     timing.decodeTimeStamp = kCMTimeInvalid;
 
@@ -299,7 +306,7 @@ static void OutputCallback(void* refCon, void* sourceFrameRefCon, OSStatus statu
     if (CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &outFmt) != noErr) return;
 
     CMSampleTimingInfo timing;
-    timing.duration = kNominalFrameDuration;
+    timing.duration = FrameDuration(self_->_frameDurationNs.load());
     timing.presentationTimeStamp = CMTimeMake(ptsUs, 1000000);
     timing.decodeTimeStamp = kCMTimeInvalid;
 

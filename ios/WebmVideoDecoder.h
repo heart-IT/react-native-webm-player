@@ -14,6 +14,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)init NS_DESIGNATED_INITIALIZER;
 
+/// The container's DefaultDuration for the video track, 0 when it has none.
+/// Fills each sample's duration; presentation is paced by PTS regardless.
+- (void)setFrameDurationNs:(int64_t)ns;
+
 /// Atomic-replace of the output layer. Old frames in flight still render to the
 /// previous layer until the VT callback drains; new frames target the new one.
 ///

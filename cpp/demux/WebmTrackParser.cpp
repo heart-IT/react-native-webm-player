@@ -78,6 +78,8 @@ bool WebmDemuxer::parseTracks() {
                 static_cast<const mkvparser::VideoTrack*>(track);
             trackInfo_.videoWidth = static_cast<int>(videoTrack->GetWidth());
             trackInfo_.videoHeight = static_cast<int>(videoTrack->GetHeight());
+            trackInfo_.videoFrameDurationNs =
+                static_cast<int64_t>(track->GetDefaultDuration());
         }
     }
 

@@ -84,6 +84,7 @@ TEST(track_info_correct) {
     const auto& info = demuxer.trackInfo();
     ASSERT_EQ(info.videoWidth, 320);
     ASSERT_EQ(info.videoHeight, 240);
+    ASSERT_EQ(info.videoFrameDurationNs, 33333333);  // DefaultDuration, 30 fps
     ASSERT_TRUE(info.audioTrackNum >= 0);
     ASSERT_TRUE(info.videoTrackNum >= 0);
     // The iOS engine configures the Opus decoder from these, so a silent zero

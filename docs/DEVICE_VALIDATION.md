@@ -174,7 +174,11 @@ item stays on the hardware list until more launches accumulate.
 - [ ] Broadcaster restarts into the same key: worklet reports `reconfigured`,
       native rejoins (the 60 s fixture is too short for the unattended script
       to reach this step).
-- [ ] Network off for 20 s: "stream stalled", playback resumes on reconnect.
+- [ ] Network off for 20 s: "stream stalled" once the renderer runs dry (round
+      5, row 10: it now fires on the pump's dry transition, not after 2 s of
+      empty reads), "stream resumed" and playback on reconnect.
+- [ ] Video sample duration from the container's DefaultDuration (row 11,
+      24 fps on the remuxed stream): frames presented, none dropped as late.
 - [ ] Android: audio focus loss and regain.
 - [ ] The 7 s between the swarm connection and the first audio frame on the
       iPhone, against 1 s on the simulator and 3 s on Android: measure where it

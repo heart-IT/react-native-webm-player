@@ -23,10 +23,6 @@ constexpr size_t kPumpChunkBytes = 64 * 1024;
 // the shutdown, since the ring wakes readers on shutdown() anyway.
 constexpr int kRingReadTimeoutMs = 50;
 
-// Consecutive empty reads before the pump reports a stall: 40 × 50 ms = 2 s.
-// A live feed that goes quiet for 2 s is already a visible stall.
-constexpr int kStallReadTimeouts = 40;
-
 // Per-pass logs sample every 512th occurrence: sustained corruption reports an
 // error on every demux pass, ~10+/s at stream bitrate.
 constexpr uint64_t kErrorLogMask = 511;
@@ -72,7 +68,7 @@ constexpr int kPacingSleepMs = 5;
   std::atomic<bool> _failed;
 
   std::atomic<uint64_t> _bytesFed;
-  std::atomic<int64_t> _lastAudioPtsUs;  // newest audio packet decoded
+  std::atomic<int64_t> _lastPtsUs;  // newest packet submitted, either track
   std::atomic<uint64_t> _videoFramesDropped;
   std::atomic<int> _videoWidth;
   std::atomic<int> _videoHeight;
@@ -85,7 +81,7 @@ constexpr int kPacingSleepMs = 5;
   _resetRequested = false;
   _failed = false;
   _bytesFed = 0;
-  _lastAudioPtsUs = -1;
+  _lastPtsUs = -1;
   _videoFramesDropped = 0;
   _videoWidth = 0;
   _videoHeight = 0;
@@ -183,10 +179,6 @@ constexpr int kPacingSleepMs = 5;
 
   [self reportHealth:@"buffering" detail:@"waiting for stream data"];
 
-  int emptyReads = 0;
-  bool stalled = false;
-  // Quiet before the first byte is the swarm connecting, not a stall.
-  bool receivedData = false;
   uint64_t demuxErrorLogs = 0;
   int64_t lastSummaryMs = media::log::detail::millisSinceStart();
   // Checked every pass, not every summary: the loop idles in 50 ms reads, so a
@@ -199,18 +191,23 @@ constexpr int kPacingSleepMs = 5;
   while (!_stop.load()) {
     @autoreleasepool {
     int64_t nowMs = media::log::detail::millisSinceStart();
-    // How far the newest decoded audio runs ahead of the clock; the rest of
+    // How far the newest submitted packet runs ahead of the clock; the rest of
     // the live delay waits in the ring as bytes. At or below zero the renderer
-    // has run dry.
+    // has run dry, which is the stall the health callback reports: a quiet
+    // input is not one while the margin still covers it.
     double clock = _clock ? _clock() : -1.0;
-    int64_t lastPts = _lastAudioPtsUs.load();
+    int64_t lastPts = _lastPtsUs.load();
     bool clocked = clock >= 0 && lastPts >= 0;
     double ahead = clocked ? lastPts / 1000000.0 - clock : 0.0;
-    if (clocked && ahead <= 0.0 && !dry) {
+    bool dryNow = clocked && ahead <= 0.0;
+    if (dryNow && !dry) {
       MEDIA_LOG_W("WebmDemuxPump: renderer ran dry, underrun %llu",
                   static_cast<unsigned long long>(++underruns));
+      [self reportHealth:@"buffering" detail:@"stream stalled"];
+    } else if (dry && !dryNow) {
+      [self reportHealth:@"playing" detail:@"stream resumed"];
     }
-    dry = clocked && ahead <= 0.0;
+    dry = dryNow;
     if (nowMs - lastSummaryMs >= kSummaryIntervalMs) {
       lastSummaryMs = nowMs;
       MEDIA_LOG_I("WebmDemuxPump: %llu B in, audio %llu decoded, video %llu presented %llu dropped, "
@@ -256,20 +253,7 @@ constexpr int kPacingSleepMs = 5;
         [self reportHealth:@"ended" detail:@"end of stream"];
         break;
       }
-      // Android reports rebuffering; this is the iOS side of that contract.
-      if (receivedData && ++emptyReads >= kStallReadTimeouts && !stalled) {
-        stalled = true;
-        [self reportHealth:@"buffering" detail:@"stream stalled"];
-      }
       continue;
-    }
-    receivedData = true;
-    emptyReads = 0;
-    if (stalled) {
-      stalled = false;
-      if (firstAudioSeen || firstVideoSeen) {
-        [self reportHealth:@"playing" detail:@"stream resumed"];
-      }
     }
 
     // Packets point into the demuxer's internal buffer and are invalidated by
@@ -343,7 +327,7 @@ constexpr int kPacingSleepMs = 5;
 - (void)submitAudio:(const media::demux::AudioPacket&)pkt firstSeen:(bool*)firstSeen {
   [self paceOn:^size_t { return self->_audioDecoder.pendingBuffers; } limit:kAudioPacingBuffers];
   if (![_audioDecoder submitPacket:pkt.data length:pkt.size ptsUs:pkt.ptsUs]) return;
-  _lastAudioPtsUs.store(pkt.ptsUs);
+  _lastPtsUs.store(pkt.ptsUs);
   if (!*firstSeen) {
     *firstSeen = true;
     [self notifyFirstSampleAtPts:pkt.ptsUs];
@@ -355,6 +339,7 @@ constexpr int kPacingSleepMs = 5;
   const auto& info = demuxer.trackInfo();
   _videoWidth.store(info.videoWidth);
   _videoHeight.store(info.videoHeight);
+  [_videoDecoder setFrameDurationNs:info.videoFrameDurationNs];
 }
 
 - (void)submitVideo:(const media::demux::VideoPacket&)pkt
@@ -366,6 +351,7 @@ constexpr int kPacingSleepMs = 5;
                                  ptsUs:pkt.ptsUs
                                  isKey:pkt.isKeyFrame ? YES : NO];
   if (ok) {
+    _lastPtsUs.store(pkt.ptsUs);
     if (!*firstSeen) {
       *firstSeen = true;
       // A video-only stream has no first audio packet to anchor the clock;
