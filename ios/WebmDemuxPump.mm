@@ -80,11 +80,6 @@ constexpr int kPacingSleepMs = 5;
   _stop = false;
   _resetRequested = false;
   _failed = false;
-  _bytesFed = 0;
-  _lastPtsUs = -1;
-  _videoFramesDropped = 0;
-  _videoWidth = 0;
-  _videoHeight = 0;
   return self;
 }
 
@@ -101,8 +96,14 @@ constexpr int kPacingSleepMs = 5;
   _stop = false;
   _failed = false;
   // The pump object is reused across start/stop cycles: a pending reset from
-  // the previous session must not leak into this one.
+  // the previous session must not leak into this one, and the counters are
+  // per session, as on Android (PlaybackStats.newSession).
   _resetRequested = false;
+  _bytesFed = 0;
+  _lastPtsUs = -1;
+  _videoFramesDropped = 0;
+  _videoWidth = 0;
+  _videoHeight = 0;
   _thread = std::thread([self] { [self run]; });
 }
 
@@ -301,11 +302,17 @@ constexpr int kPacingSleepMs = 5;
 
 // Holds the demux thread while a decoder's queue is at its pacing limit. A
 // stop or reset ends the wait; the packet is then submitted or discarded by
-// the caller's normal path.
-- (void)paceOn:(size_t (^)(void))pending limit:(size_t)limit {
+// the caller's normal path. A queue that never drains wedges this thread, so
+// a wait past the summary interval is logged rather than silent.
+- (void)paceOn:(size_t (^)(void))pending limit:(size_t)limit what:(NSString* (^)(void))what {
+  int waitedMs = 0;
   while (pending() >= limit && !_stop.load() &&
          !_resetRequested.load(std::memory_order_acquire)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(kPacingSleepMs));
+    waitedMs += kPacingSleepMs;
+    if (waitedMs % kSummaryIntervalMs == 0) {
+      MEDIA_LOG_W("WebmDemuxPump: paced %d s on %s", waitedMs / 1000, what().UTF8String);
+    }
   }
 }
 
@@ -325,7 +332,9 @@ constexpr int kPacingSleepMs = 5;
 }
 
 - (void)submitAudio:(const media::demux::AudioPacket&)pkt firstSeen:(bool*)firstSeen {
-  [self paceOn:^size_t { return self->_audioDecoder.pendingBuffers; } limit:kAudioPacingBuffers];
+  [self paceOn:^size_t { return self->_audioDecoder.pendingBuffers; }
+        limit:kAudioPacingBuffers
+         what:^NSString* { return [NSString stringWithFormat:@"audio, pending %zu", self->_audioDecoder.pendingBuffers]; }];
   if (![_audioDecoder submitPacket:pkt.data length:pkt.size ptsUs:pkt.ptsUs]) return;
   _lastPtsUs.store(pkt.ptsUs);
   if (!*firstSeen) {
@@ -345,7 +354,9 @@ constexpr int kPacingSleepMs = 5;
 - (void)submitVideo:(const media::demux::VideoPacket&)pkt
             demuxer:(const media::demux::WebmDemuxer&)demuxer
           firstSeen:(bool*)firstSeen {
-  [self paceOn:^size_t { return self->_videoDecoder.pendingFrames; } limit:kVideoPacingFrames];
+  [self paceOn:^size_t { return self->_videoDecoder.pendingFrames; }
+        limit:kVideoPacingFrames
+         what:^NSString* { return [self->_videoDecoder layerReport]; }];
   BOOL ok = [_videoDecoder submitFrame:pkt.data
                                 length:pkt.size
                                  ptsUs:pkt.ptsUs

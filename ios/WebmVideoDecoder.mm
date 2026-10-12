@@ -179,6 +179,15 @@ static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
     _layerWatch = nil;
     _layer = layer;
     if (!layer) return;
+    // The layer belongs to the view and outlives sessions, so it can fail
+    // while no session watches it: a session that ended in the background
+    // left it Failed, and the next play() paced forever on frames it would
+    // never pull (iPhone 11, 2026-10-12). Only a flush resets its status.
+    if (layer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+        MEDIA_LOG_W("WebmVideoDecoder: layer attached in failed state: %s",
+                    layer.error.localizedDescription.UTF8String ?: "no error");
+    }
+    dispatch_async(_renderQueue, ^{ [layer flush]; });
     __weak WebmVideoDecoder* weakSelf = self;
     _layerWatch = [[WebmDisplayLayerWatch alloc] initWithLayer:layer
                                                  onFlushNeeded:^{
@@ -188,6 +197,14 @@ static void NoteMin(std::atomic<int64_t>& slot, int64_t value) {
 
 - (void)logLayerPerformance {
     [_layerWatch logPerformance];
+}
+
+- (NSString*)layerReport {
+    AVSampleBufferDisplayLayer* layer = _layer;
+    return [NSString stringWithFormat:@"video, pending %zu, layer %s ready %d status %ld requesting %d",
+                                      self.pendingFrames, layer ? "set" : "nil",
+                                      (int)layer.isReadyForMoreMediaData, (long)layer.status,
+                                      (int)_requesting];
 }
 
 // The layer reported that only a flush will make it accept media again.

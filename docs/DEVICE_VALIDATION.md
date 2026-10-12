@@ -157,29 +157,75 @@ and adds the same objects on the JS thread under `_control`, which
 proof of it: a 1-in-3 crash clears six launches about 9 % of the time, so the
 item stays on the hardware list until more launches accumulate.
 
+### What the iPhone session of 2026-10-12 (evening) said
+
+Same phone, the tree at round 5 with rows 4, 5, 10 and 11 applied, the
+5-minute loop of the fixture broadcast from the Mac into one persistent key
+(`scripts/dev-broadcast.sh -s <dir>`), four launches, no crash.
+
+- **Ring and window (rows 4, 5).** Ring occupancy 1 to 6% of 2 MiB, the parse
+  window between 43 and 91 KB, flat across every run.
+- **24 fps sample duration (row 11).** 2882 frames displayed before the first
+  network trouble, 0 dropped, 0 late; the layer's own counters agree.
+- **Stall health (row 10).** "stream stalled" lands on the same line as the
+  underrun and "stream resumed" 0.3 to 4.7 s later; it flapped five times in
+  17 s while the input starved, which is accurate rather than pretty.
+- **Lag rejoin.** The phone's path starved for 30 s (DHT node down, peers
+  firewalled), the worklet crossed 10 s of lag, and the engine rejoined:
+  "stream reset" 0.8 s later, connected after 10 s, first frame after 17 s,
+  "stream resumed", and the clip played to `ended`.
+- **A finished broadcast joined after the fact** reports `ended` within 1 s
+  of connecting and the player stops.
+- **Swarm join.** 13 to 56 s from `joining` to a connection on this network,
+  then 4 to 5 s to the first frame (7 s on 2026-10-09).
+- **The layer that failed between sessions.** Twice, `play()` after a session
+  that had ended joined, logged first frames, and showed a frozen picture.
+  The pacing log added for it read: `paced 20 s on video, pending 21, layer
+set ready 0 status 2 requesting 1`. Status 2 is
+  `AVQueuedSampleBufferRenderingStatusFailed`: the view's layer had failed
+  after the previous session stopped watching it (the app was in the
+  background), and only a flush resets that status. The decoder now flushes
+  the layer when it attaches it; the next run logged `layer attached in
+failed state: Operation Interrupted` at `play()` and played 506 frames with
+  0 dropped. While wedged, the ring filled and the worklet never reported
+  lag: its lag check runs between packets, and the blocked IPC write never
+  let it run, which is the next finding.
+- **Pump counters** were per pump, not per session: a fresh `play()` showed
+  the previous run's bytes and `ahead 300 s`. Now reset on start, as Android's
+  `PlaybackStats.newSession` does.
+- **Network loss is not recovered.** Wi-Fi off for 20 s: "stream stalled" and
+  nothing after it. Airplane mode for 20 s: "stream stalled", "rejoining",
+  and the picture back after Wi-Fi returned. No log for either: the Mac's
+  console link to the phone rides on Wi-Fi and dropped with it, and `log
+collect --device-udid` answered "Device not configured". What the code
+  says: the worklet's only lag check is the predicate `remuxWebm` polls
+  between packets (`worklet/remux.js`), the engine rejoins only on a worklet
+  status, and nothing on either side watches an input that goes silent. The
+  airplane case recovered because the swarm reconnected and the next packet
+  made the predicate fire; the Wi-Fi case did not within the wait.
+
 ## Still to run on hardware
 
 - [ ] The 16.6 startup crash: keep counting launches of the 16.6 Release
-      build. A recurrence means the display-layer race was not the cause; the
-      next step is then a Debug device build or bisecting the target.
+      build. 10 of 10 clean so far (6 on 2026-10-12 afternoon, 4 that
+      evening). A recurrence means the display-layer race was not the cause;
+      the next step is then a Debug device build or bisecting the target.
 
-- [ ] Pixels after a background trip, with eyes on the phone.
-- [ ] The 2 MiB ring (round 5, row 4) and the "window N KB" figure in the
-      pump's 5 s summary (row 5): ring occupancy stays well under 100% and the
-      window stays flat across a 3-minute run.
-- [ ] `stop()` then `play()` again; memory flat across three cycles.
+- [ ] Network off for 20 s, then on: a silent input must end in a rejoin.
+      Today neither side watches for one (see the evening section); the Wi-Fi
+      case stayed at "stream stalled". Needs a console that survives the
+      network drop: the phone on a USB cable.
+- [ ] Pixels after a background trip, with eyes on the phone: the layer
+      recovered through the flush notification mid-session on 2026-10-12
+      (status 2 to 0, frames flowing); the picture itself still unconfirmed.
+- [ ] `stop()` then `play()`: works, including after a session that ended in
+      the background (the layer flush at attach). Memory across three cycles
+      still unmeasured.
 - [ ] Phone call during playback: Buffering "audio interrupted", then rejoin.
-- [ ] Player stalled for 10 s (debugger pause): worklet reports `lag ...`,
-      native rejoins at the live edge.
-- [ ] Broadcaster restarts into the same key: worklet reports `reconfigured`,
-      native rejoins (the 60 s fixture is too short for the unattended script
-      to reach this step).
-- [ ] Network off for 20 s: "stream stalled" once the renderer runs dry (round
-      5, row 10: it now fires on the pump's dry transition, not after 2 s of
-      empty reads), "stream resumed" and playback on reconnect.
-- [ ] Video sample duration from the container's DefaultDuration (row 11,
-      24 fps on the remuxed stream): frames presented, none dropped as late.
+- [ ] Broadcaster restarts into the same key mid-stream: worklet reports
+      `reconfigured`, native rejoins. (A restart after the clip ended joins as
+      a new session and plays; the mid-stream case is untested.)
 - [ ] Android: audio focus loss and regain.
-- [ ] The 7 s between the swarm connection and the first audio frame on the
-      iPhone, against 1 s on the simulator and 3 s on Android: measure where it
-      goes.
+- [ ] Swarm discovery on the phone: 13 to 56 s to a connection, 84 s once on
+      2026-10-12 afternoon. The 4 to 5 s from connection to first frame is in
+      line with Android.

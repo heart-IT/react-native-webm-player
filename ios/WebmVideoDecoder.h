@@ -59,6 +59,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Forwards to the layer watch's performance log. Main thread.
 - (void)logLayerPerformance;
 
+/// The pending queue and the layer's readiness, status and request state, for
+/// the pump's pacing log: which side of the pull stopped.
+- (NSString*)layerReport;
+
 /// The media clock in seconds, or negative before it starts. Set before frames
 /// flow; read on the decode callback and the render queue.
 @property(nonatomic, copy, nullable) double (^clock)(void);
