@@ -204,6 +204,36 @@ collect --device-udid` answered "Device not configured". What the code
   airplane case recovered because the swarm reconnected and the next packet
   made the predicate fire; the Wi-Fi case did not within the wait.
 
+### What the second iPhone session of 2026-10-12 said, over USB
+
+The console link rides on whichever transport CoreDevice picked: over Wi-Fi
+it dies with the network, over USB it survives a Wi-Fi drop (it still dropped
+once with the phone on the cable, when another app came to the front).
+
+- **Wi-Fi off 20 s, then on.** Last byte at 49.7 s; "stream stalled" at
+  55.5 s when the renderer ran dry; the worklet's silence watch reported
+  `stalled no data for 10738 ms at 91334 of 91334` at 60.3 s; rejoin in
+  0.5 s, "stream reset", connected at 79.6 s, first frame and "stream
+  resumed" at 83.3 s; 1493 frames after it, 0 dropped. The viewer's
+  impression was that the content restarted from the clip's start rather
+  than the live edge; the broadcast is the 60 s clip looped, each worklet
+  joins with a fresh storage directory and fetches the length from the peer
+  before seeking to the next fragment, and the log carries no offset or PTS
+  that could settle it. Open: log the join offset against the log length.
+- **Audio interruption (a Clock timer; the phone has no SIM).** "audio
+  interrupted" at 535.7 s, "interruption ended" and the rejoin at 543.9 s,
+  connected 14 s later, playing 4 s after that.
+- **Broadcaster killed and restarted into the same key mid-stream.** No
+  `reconfigured`: the worklet's peer died with the process, so the new
+  session's first fragment never reached it. The silence watch reported
+  `stalled` after 10.6 s, the engine rejoined, and playback resumed. The
+  join took 86 s.
+- **Stale peers.** After ten broadcaster restarts into one key in an hour,
+  the worklet saw ten firewalled peers for the topic and tried them three at
+  a time; joins took 56 to 86 s against 13 s on the first run. A broadcaster
+  concern (each `vcr record` is a new swarm identity), but it sets the
+  rejoin time a viewer sees.
+
 ## Still to run on hardware
 
 - [ ] The 16.6 startup crash: keep counting launches of the 16.6 Release
@@ -211,21 +241,17 @@ collect --device-udid` answered "Device not configured". What the code
       evening). A recurrence means the display-layer race was not the cause;
       the next step is then a Debug device build or bisecting the target.
 
-- [ ] Network off for 20 s, then on: the worklet's silence watch (10 s
-      without a muxed byte reports `stalled`, native rejoins) is in the tree
-      but has not run on the phone. The Wi-Fi case stayed at "stream stalled"
-      before it. Needs a console that survives the network drop: the phone on
-      a USB cable.
+- [ ] After a rejoin, is the picture at the live edge? Seen once as "started
+      from 0" (2026-10-12, second session); the worklet should report the
+      join offset against the log length so the next run can tell.
 - [ ] Pixels after a background trip, with eyes on the phone: the layer
       recovered through the flush notification mid-session on 2026-10-12
       (status 2 to 0, frames flowing); the picture itself still unconfirmed.
 - [ ] `stop()` then `play()`: works, including after a session that ended in
       the background (the layer flush at attach). Memory across three cycles
       still unmeasured.
-- [ ] Phone call during playback: Buffering "audio interrupted", then rejoin.
-- [ ] Broadcaster restarts into the same key mid-stream: worklet reports
-      `reconfigured`, native rejoins. (A restart after the clip ended joins as
-      a new session and plays; the mid-stream case is untested.)
+- [ ] A phone call, as against the timer interruption already verified: the
+      phone has no SIM.
 - [ ] Android: audio focus loss and regain.
 - [ ] Swarm discovery on the phone: 13 to 56 s to a connection, 84 s once on
       2026-10-12 afternoon. The 4 to 5 s from connection to first frame is in
