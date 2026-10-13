@@ -56,7 +56,7 @@ Rejected candidates, with reasons:
 
 Follow-ups noticed, outside this round's scope:
 
-- iOS waits 1.0 s before the first dataless rejoin, Android 0.5 s: `ios/WebmPlaybackPolicy.h:27-31` indexes `kDelaysSec` by the already-incremented count (`WebmPlaybackEngine.mm:220,227`), `HybridWebmPlayer.kt:320` starts at 500; README and CLAUDE.md say 0.5, 1, 2, 4, 4.
+- iOS waited 1.0 s before the first dataless rejoin and failed on the fourth, Android 0.5 s and the fifth. Closed in `bca3429`: `ios/WebmPlaybackPolicy.h` indexes the backoff by the rejoins already made since the last data (0.5, 1, 2, 4, 4 s) and `WebmPlaybackEngine.mm` fails when the fifth such rejoin's session ends without a byte, as `HybridWebmPlayer.kt` already did and README says ("five consecutive rejoins produced no data").
 - Opus `CodecDelay` (6.5 ms) / `SeekPreRoll` (80 ms) from the container are ignored on iOS; the pre-skip samples are enqueued (`ios/WebmAudioDecoder.mm:264-275`).
 - `ios/WebmAudioDecoder.mm:117` sizes `_pcm` at init and again at `:210`; the first is dead once `configure` runs.
 - `README.md:45` and `.github/workflows/ios-build.yml:31-33` disagreed on the iOS floor for VP9; closed in `ba6258b` with row 12: the CI comment now says only that the SDK must declare `VTRegisterSupplementalVideoDecoderIfAvailable` (candidate C2).
