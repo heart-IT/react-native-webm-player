@@ -1,7 +1,7 @@
 // Hand-assembled minimal WebM byte sequences shared by the demux tests and
 // the fuzzer seed. Every declared element size below is exact — the fuzzer
 // asserts at startup that kMinimalWebmHeader alone reaches
-// ParseState::Streaming, so a size that rots breaks the build loudly (R3-6).
+// ParseState::Streaming, so a size that rots breaks the build loudly.
 #pragma once
 
 #include <cstdint>
@@ -48,7 +48,7 @@ static const uint8_t kMinimalWebmHeader[] = {
 
 // Offset of the SamplingFrequency float's first payload byte (0x47, the
 // exponent byte of 48000.0f) inside kMinimalWebmHeader — for tests that
-// corrupt it into a huge value (R3-20's repro).
+// corrupt it into a huge value.
 inline constexpr size_t kSamplingRateExponentOffset =
     sizeof(kMinimalWebmHeader) - 11;
 
@@ -95,7 +95,7 @@ static const uint8_t kXiphLacedCluster2[] = {
 // mkvparser only surfaces a cluster once HasBlockEntries() has seen a real
 // block, so the prefix carries one; the rest of the declared body never all
 // fits, and a correct demuxer must surface a permanent error instead of
-// wedging (R3-5).
+// wedging.
 static const uint8_t kOversizedClusterPrefix[] = {
     0x1F, 0x43, 0xB6, 0x75,
     0x10, 0x30, 0x00, 0x00,  // 4-byte vint: body size = 0x300000 (3 MiB)

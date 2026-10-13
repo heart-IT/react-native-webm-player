@@ -86,6 +86,7 @@ jobs:
       # The binary list lives in run-suites.sh, shared with package.json's
       # test:asan/tsan/ubsan. Enumerating binaries here instead let the two
       # lists drift: CI silently skipped test_demux_hostile and
-      # test_demux_lacing, the suites that caught R3-23.
+      # test_demux_lacing, the suites that caught a cluster-final block lost
+      # across a feed boundary.
       - name: Run all suites
         run: sh tests/run-suites.sh tests/build

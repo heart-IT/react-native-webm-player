@@ -1,5 +1,5 @@
-// Hostile-input demux tests: untrusted track metadata (R3-20), a cluster
-// that can never fit the parse window (R3-5), and truncation mid-header —
+// Hostile-input demux tests: untrusted track metadata, a cluster that can
+// never fit the parse window, and truncation mid-header —
 // the real fixture arriving in trickles small enough that every element
 // boundary lands mid-chunk, exercising each "need more data" branch. Run
 // under all three sanitizer suites; the sampling-rate test exists
@@ -33,7 +33,7 @@ SilenceLogs g_silence_logs;
 
 using namespace media::demux;
 
-// ---- R3-20: SamplingFrequency beyond int range must not be UB ----
+// ---- SamplingFrequency beyond int range must not be UB ----
 
 TEST(huge_sampling_frequency_is_rejected_not_ub) {
     // The synthetic header stores 48000.0f at a known offset; raising the
@@ -91,7 +91,7 @@ TEST(valid_sampling_frequency_still_parses) {
     ASSERT_EQ(demuxer.trackInfo().audioSampleRate, 48000);
 }
 
-// ---- R3-5: a cluster larger than the parse window must error, not wedge ----
+// ---- A cluster larger than the parse window must error, not wedge ----
 
 TEST(oversized_cluster_surfaces_permanent_error) {
     // Valid header + one good cluster + a cluster declaring a 3 MiB body.

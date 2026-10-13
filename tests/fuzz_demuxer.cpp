@@ -32,7 +32,8 @@ static constexpr size_t kMinimalWebmHeaderSize = sizeof(webm_synth::kMinimalWebm
 
 // Startup self-check: the pristine seed must genuinely reach Streaming, or
 // every header-based phase silently degrades to fuzzing the first parser
-// stage only (R3-6 — a broken seed hid R3-20 from 100k CI iterations).
+// stage only: a seed with inconsistent element sizes once hid the
+// SamplingFrequency int-cast UB from 100k CI iterations.
 static void verifySeedReachesStreaming() {
     media::demux::WebmDemuxer demuxer;
     demuxer.feedData(kMinimalWebmHeader, kMinimalWebmHeaderSize);
