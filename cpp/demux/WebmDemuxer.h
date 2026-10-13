@@ -79,8 +79,9 @@ public:
 
     // Feed raw WebM bytes incrementally. Returns extracted packets (if any).
     // Bytes are copied into the internal StreamReader window, which is trimmed
-    // by deferred compaction on the following call. In the Error state the
-    // bytes are discarded until reset(); the owner rejoins the stream.
+    // by deferred compaction on the following call; a feed the window cannot
+    // hold is a permanent error. In the Error state the bytes are discarded
+    // until reset(); the owner rejoins the stream.
     // Returned reference is valid until the next feedData() or reset() call.
     const DemuxResult& feedData(const uint8_t* data, size_t len);
 
@@ -131,10 +132,6 @@ private:
     // return from Cluster::GetNext().
     int64_t lastEmittedAudioPtsUs_ = -1;
     int64_t lastEmittedVideoPtsUs_ = -1;
-
-    // The window-full warning fires on every feed while the stream is
-    // backpressured, so it is throttled.
-    int64_t lastWindowFullLogUs_ = 0;
 };
 
 }  // namespace media::demux

@@ -4,7 +4,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 
 namespace media::demux {
 
@@ -19,10 +18,5 @@ inline constexpr int kMaxParseRetries = 3;
 // real-world rate; WebM/Opus mandates 48 kHz). Values outside (0, this] are
 // attacker-chosen doubles whose int cast would be UB — treated as invalid.
 inline constexpr double kMaxAudioSampleRate = 192'000.0;
-
-// Minimum interval between repeats of the window-full warning. feedData()
-// runs at stream bitrate, so an unratelimited warning on a backpressured path
-// floods the log.
-inline constexpr int64_t kThrottledLogIntervalUs = 5'000'000;
 
 }  // namespace media::demux

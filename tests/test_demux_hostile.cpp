@@ -21,7 +21,7 @@
 #include "webm_synth.h"
 
 namespace {
-// The wedge tests flood the window; silence the (throttled) warnings.
+// Hostile metadata is logged as it is rejected (WebmTrackParser); silence it.
 struct SilenceLogs {
   SilenceLogs() {
     media::log::minLevel().store(media::log::Level::Error,
@@ -298,6 +298,73 @@ TEST(mid_cluster_feeds_keep_the_window_trimmed) {
     // bytes) and the Segment header (12) before the cluster.
     constexpr size_t kSegmentPayloadOffset = 48;
     ASSERT_LE(maxWindow, 2 * kFrameClusterBytes + kChunk + kSegmentPayloadOffset);
+}
+
+// ---- A full parse window is a permanent error, not a silent wedge ----
+//
+// The window's floor is the current cluster's start, so a cluster that runs
+// past kMaxBufferSize without ending fills it. Once a feed no longer fits,
+// nothing resident parses further and nothing later can arrive: the unfixed
+// demuxer answered "demuxer buffer overflow" on every feed with parseState
+// still Streaming, and the pump, which reports failed off that state, kept
+// draining the ring over frozen A/V with no rejoin (iPhone 11, 2026-10-12).
+
+namespace {
+
+// A SimpleBlock on track 1 carrying kBigPayloadBytes of filler: far below the
+// oversized-cluster guard, so the window fills through the per-block path.
+constexpr size_t kBigPayloadBytes = 60000;
+
+std::vector<uint8_t> bigBlock(uint16_t timecodeMs) {
+    constexpr size_t body = 4 + kBigPayloadBytes;  // 60004 = 0x00EA64, 3-byte vint
+    std::vector<uint8_t> b = {
+        0xA3, static_cast<uint8_t>(0x20 | (body >> 16)), static_cast<uint8_t>(body >> 8),
+        static_cast<uint8_t>(body),
+        0x81, static_cast<uint8_t>(timecodeMs >> 8), static_cast<uint8_t>(timecodeMs), 0x80,
+    };
+    b.resize(b.size() + kBigPayloadBytes, 0x5A);
+    return b;
+}
+
+}  // namespace
+
+TEST(unknown_size_cluster_past_the_window_surfaces_permanent_error) {
+    // Header, then one cluster of unknown size that never ends (exempt from the
+    // oversized-cluster guard, which needs a declared size).
+    std::vector<uint8_t> stream(
+        webm_synth::kMinimalWebmHeader,
+        webm_synth::kMinimalWebmHeader + sizeof(webm_synth::kMinimalWebmHeader));
+    const uint8_t clusterStart[] = {0x1F, 0x43, 0xB6, 0x75, 0xFF, 0xE7, 0x81, 0x00};
+    stream.insert(stream.end(), clusterStart, clusterStart + sizeof(clusterStart));
+    constexpr size_t kBlocks = 40;  // 40 × ~60 KB = 2.3 MiB > the 2 MiB window
+    for (size_t i = 0; i < kBlocks; ++i) {
+        auto b = bigBlock(static_cast<uint16_t>(i * 20));
+        stream.insert(stream.end(), b.begin(), b.end());
+    }
+
+    WebmDemuxer demuxer;
+    size_t packets = 0;
+    std::string firstError;
+    constexpr size_t kChunk = 65536;  // the pump's feed size
+    for (size_t offset = 0; offset < stream.size(); offset += kChunk) {
+        size_t chunk = std::min(kChunk, stream.size() - offset);
+        const auto& result = demuxer.feedData(stream.data() + offset, chunk);
+        packets += result.audioPackets.size();
+        if (!result.error.empty() && firstError.empty()) firstError = result.error;
+        if (demuxer.parseState() == ParseState::Error) break;
+    }
+    // Blocks inside the unknown-size cluster were parsed up to the fill, and
+    // the fill is terminal with the cause in the caller-visible error.
+    ASSERT_GT(packets, 0u);
+    ASSERT_EQ(demuxer.parseState(), ParseState::Error);
+    ASSERT_TRUE(firstError.find("parse window full") != std::string::npos);
+    // Every later feed reports the same permanent failure until reset(), which
+    // is what the engine's rejoin does; the next stream then parses afresh.
+    const auto& again = demuxer.feedData(stream.data(), 16);
+    ASSERT_TRUE(again.error.find("permanent parse failure") != std::string::npos);
+    demuxer.reset();
+    demuxer.feedData(webm_synth::kMinimalWebmHeader, sizeof(webm_synth::kMinimalWebmHeader));
+    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
 }
 
 TEST_MAIN("Hostile-Input Demux Tests")

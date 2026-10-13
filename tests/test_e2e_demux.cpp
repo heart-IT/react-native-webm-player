@@ -13,20 +13,6 @@
 #include "video/VP9HeaderParser.h"
 #include "OpusDecoderAdapter.h"
 #include "fixtures/webm_fixture.h"
-#include "common/MediaLog.h"
-
-namespace {
-// Several tests deliberately overflow the StreamReader window; on host builds
-// MediaLog writes those warnings to stderr and drowns the results.
-struct SilenceLogs {
-  SilenceLogs() {
-    media::log::minLevel().store(media::log::Level::Error,
-                                 std::memory_order_relaxed);
-  }
-};
-SilenceLogs g_silence_logs;
-}  // namespace
-
 using namespace media;
 using namespace media::demux;
 
@@ -311,18 +297,17 @@ TEST(decoded_audio_contains_nonzero_samples) {
     ASSERT_GT(energy, 0.0f);
 }
 
-TEST(stream_reader_rejects_data_beyond_max_buffer_size) {
-    // StreamReader::kMaxBufferSize is 2MB. First reach Streaming state with
-    // valid data, then flood with filler to exceed 2MB and verify overflow.
+TEST(a_full_window_is_a_permanent_parse_error) {
+    // StreamReader::kMaxBufferSize is 2 MiB and the window's floor is the
+    // current cluster's start. Filler after a valid stream is not a cluster,
+    // so the parser never gets past it: the window fills, and the first feed
+    // that does not fit must end the session (the pump reports failed off
+    // ParseState::Error and the engine rejoins) rather than leave the demuxer
+    // Streaming over frozen A/V.
     WebmDemuxer demuxer;
-
-    // Feed valid WebM to reach Streaming state (compaction only runs during parseBlocks)
     feedAll(demuxer, fixture::kWebmData, fixture::kWebmDataSize, 65536);
     ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
 
-    // Now flood with filler data. The demuxer is in Streaming state so it will
-    // call parseBlocks() each time (which won't find valid clusters), but the
-    // StreamReader will accumulate bytes until the 2MB cap.
     constexpr size_t kChunkSize = 65536;
     constexpr size_t kMaxBuffer = 2 * 1024 * 1024;  // Must match StreamReader::kMaxBufferSize
     constexpr size_t kTotalFiller = kMaxBuffer + 4 * kChunkSize;
@@ -330,16 +315,18 @@ TEST(stream_reader_rejects_data_beyond_max_buffer_size) {
     std::vector<uint8_t> filler(kChunkSize, 0xAA);
     size_t fed = 0;
     size_t packets = 0;
+    std::string firstError;
     while (fed < kTotalFiller) {
         const auto& result = demuxer.feedData(filler.data(), filler.size());
         packets += result.audioPackets.size() + result.videoPackets.size();
+        if (!result.error.empty() && firstError.empty()) firstError = result.error;
         fed += filler.size();
         ASSERT_LE(demuxer.bufferBytes(), kMaxBuffer);
     }
 
-    // Filler is not a cluster: nothing is emitted and the state holds.
     ASSERT_EQ(packets, size_t(0));
-    ASSERT_EQ(demuxer.parseState(), ParseState::Streaming);
+    ASSERT_EQ(demuxer.parseState(), ParseState::Error);
+    ASSERT_TRUE(firstError.find("parse window full") != std::string::npos);
 }
 
 TEST_MAIN("End-to-End Demux Tests")

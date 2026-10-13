@@ -11,23 +11,7 @@
 
 #include "mkvparser/mkvparser.h"
 
-#include "common/MediaLog.h"
-
-#include <chrono>
-
 namespace media::demux {
-
-namespace {
-// Single-threaded, so a plain timestamp suffices where the ring needs a CAS.
-bool throttledLog(int64_t& lastLogUs) {
-    int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch())
-                      .count();
-    if (now - lastLogUs < kThrottledLogIntervalUs) return false;
-    lastLogUs = now;
-    return true;
-}
-}  // namespace
 
 WebmDemuxer::WebmDemuxer()
     : reader_(std::make_unique<StreamReader>()) {}
@@ -56,30 +40,18 @@ const DemuxResult& WebmDemuxer::feedData(const uint8_t* data, size_t len) {
         pendingCompactPos_ = 0;
     }
 
-    {
-        if (!data || len == 0) {
-            return cachedResult_;
-        }
-        size_t accepted = reader_->append(data, len);
-        if (accepted < len) {
-            // Drop-new, the same policy as the ring. There used to be a
-            // parse-and-compact rescue here, but that parse emitted zero-copy
-            // packets pointing into the window and the compact/append that
-            // followed shifted or reallocated the very bytes those packets
-            // referenced — the caller received dangling pointers in this
-            // call's result. The window is trimmed by deferred compaction at
-            // the top of the next call, so a full window recovers one feed
-            // later at the cost of a counted gap.
-            if (throttledLog(lastWindowFullLogUs_)) {
-                MEDIA_LOG_W("WebmDemuxer: window full, dropped %zu/%zu bytes",
-                            len - accepted, len);
-            }
-        }
-
-        if (accepted == 0) {
-            cachedResult_.error = "demuxer buffer overflow";
-            return cachedResult_;
-        }
+    if (!data || len == 0) return cachedResult_;
+    if (reader_->append(data, len) < len) {
+        // The window's floor is the current cluster's start, so a full window
+        // holds one element the parser cannot get past: nothing resident parses
+        // further, nothing later can be accepted, and a byte dropped from a
+        // WebM stream leaves libwebm nothing to resync on. Permanent; the owner
+        // rejoins (iPhone 11, 2026-10-12: a full window froze A/V with no
+        // health change and no rejoin).
+        parseError_ = "parse window full";
+        state_ = ParseState::Error;
+        cachedResult_.error = "permanent parse failure: " + parseError_;
+        return cachedResult_;
     }
 
     // Advance parse state as far as possible
