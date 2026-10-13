@@ -103,7 +103,7 @@ With the 4 s margin the phone played the full 24 fps with no underrun and no
 drop before the display layer, and the picture still hung for about half a
 second every few seconds. The layer's own counters (`AVVideoPerformanceMetrics`
 through `sampleBufferRenderer`, logged beside the pump summary) showed 302 of
-3865 frames dropped as late, and the lead times added to the decoder showed
+3865 frames dropped as late, and the lead times then added to the decoder (cut again in `bc7f050`) showed
 frames leaving VideoToolbox 0.5 s behind the clock while the pull path added
 nothing. The cause was the pump: it submitted every audio packet of a 64 KB
 chunk (about 2.5 s of media, paced on the renderer) before any video frame of
@@ -193,12 +193,12 @@ failed state: Operation Interrupted` at `play()` and played 506 frames with
 - **Pump counters** were per pump, not per session: a fresh `play()` showed
   the previous run's bytes and `ahead 300 s`. Now reset on start, as Android's
   `PlaybackStats.newSession` does.
-- **Network loss is not recovered.** Wi-Fi off for 20 s: "stream stalled" and
+- **Network loss was not recovered** (fixed that evening by the worklet's silence watch, `0c534ea`; see the USB session below). Wi-Fi off for 20 s: "stream stalled" and
   nothing after it. Airplane mode for 20 s: "stream stalled", "rejoining",
   and the picture back after Wi-Fi returned. No log for either: the Mac's
   console link to the phone rides on Wi-Fi and dropped with it, and `log
 collect --device-udid` answered "Device not configured". What the code
-  says: the worklet's only lag check is the predicate `remuxWebm` polls
+  said: the worklet's only lag check is the predicate `remuxWebm` polls
   between packets (`worklet/remux.js`), the engine rejoins only on a worklet
   status, and nothing on either side watches an input that goes silent. The
   airplane case recovered because the swarm reconnected and the next packet
