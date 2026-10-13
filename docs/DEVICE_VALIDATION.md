@@ -130,8 +130,9 @@ own remux of the 5-minute fixture in 64 KB chunks: overflow at feed 32 with
 2.16 MB in. With both exits routed through the compaction schedule the full
 7.9 MB demuxes with the window peaking at 94 KB. The regression test is
 `mid_cluster_feeds_keep_the_window_trimmed` in `tests/test_demux_hostile.cpp`.
-Two things the run also showed stay open: the overflow error is not terminal
-for the pump (no health change, no rejoin), and compaction trims to libwebm's
+The run also showed the overflow error was not terminal for the pump (no health
+change, no rejoin); since `d23e3a1` a full window is a permanent parse error
+and the engine rejoins. Still open: compaction trims to libwebm's
 Segment-relative cluster position, the EBML and Segment headers short of the
 cluster. The fixed tree ran on the phone the same afternoon: the swarm join
 took 84 s this time, so the 3-minute window held 89 s of playback, 2.30 MB in,
