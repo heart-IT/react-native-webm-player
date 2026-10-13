@@ -42,7 +42,6 @@ include_directories(
     ${CPP_ROOT}/common
     ${CPP_ROOT}/playback
     ${CPP_ROOT}/demux
-    ${CPP_ROOT}/playback
     ${CPP_ROOT}/video
     ${CPP_ROOT}/third_party/libwebm
 )
