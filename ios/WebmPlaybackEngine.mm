@@ -43,7 +43,7 @@ void RunOnMain(void (^block)(void)) {
   std::recursive_mutex _control;
   WebmWorkletSource* _source;
   NSString* _key;
-  int _datalessSessions;
+  int _datalessRejoins;  // rejoins in a row that produced no data
   dispatch_block_t _pendingRejoin;
   // The worklet said `ended`: its exit is the broadcast finishing, not a loss.
   bool _streamEnded;
@@ -72,7 +72,7 @@ void RunOnMain(void (^block)(void)) {
   _clockStarted = false;
   _muted = false;
   _sessionReceivedData = false;
-  _datalessSessions = 0;
+  _datalessRejoins = 0;
   _streamEnded = false;
   _lastHealthStatus = @"idle";
   _lastHealthDetail = @"";
@@ -144,7 +144,7 @@ void RunOnMain(void (^block)(void)) {
   _failed = false;
   _clockStarted = false;
   _streamEnded = false;
-  _datalessSessions = 0;
+  _datalessRejoins = 0;
   _sessionReceivedData = false;
   _running = true;
   AVSampleBufferRenderSynchronizer* sync = _synchronizer;
@@ -216,15 +216,15 @@ void RunOnMain(void (^block)(void)) {
   [self cancelPendingRejoin];
 
   if (_sessionReceivedData.load()) {
-    _datalessSessions = 0;
-  } else if (++_datalessSessions >= kMaxDatalessSessions) {
+    _datalessRejoins = 0;
+  } else if (_datalessRejoins >= kMaxDatalessRejoins) {
     _failed = true;
     [self fireHealth:@"failed"
               detail:[NSString stringWithFormat:@"rejoin failed: %@", reason]];
     [self stop];
     return;
   }
-  double delay = WebmRejoinDelaySeconds(_datalessSessions);
+  double delay = WebmRejoinDelaySeconds(_datalessRejoins++);
   MEDIA_LOG_I("WebmPlaybackEngine: rejoining in %.1fs (%s)", delay, reason.UTF8String);
   [self fireHealth:@"buffering"
             detail:[NSString stringWithFormat:@"rejoining: %@", reason]];

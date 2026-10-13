@@ -18,14 +18,17 @@ constexpr double kLiveDelaySec = 4.0;
 // the occupancy as "ring %".
 constexpr size_t kRingCapacityBytes = 2u * 1024 * 1024;
 
-// Consecutive dataless sessions before the player reports Failed.
-constexpr int kMaxDatalessSessions = 5;
+// Rejoins in a row that produced no data before the player reports Failed:
+// the fifth such rejoin's session ending without a byte fails the player, as
+// Android's REJOIN_BACKOFF_MS.size does.
+constexpr int kMaxDatalessRejoins = 5;
 
-// Delay before the next rejoin. A session that delivered data resets the
-// count; the delay grows only across consecutive sessions that delivered
-// nothing.
-inline double WebmRejoinDelaySeconds(int datalessSessions) {
+// Delay before the next rejoin, indexed by the rejoins already made since the
+// last session that delivered data (0 after play() or after a session that
+// delivered): 0.5, 1, 2, 4, 4 s, Android's REJOIN_BACKOFF_MS. The index is
+// read before the count is incremented, so the first wait is 0.5 s.
+inline double WebmRejoinDelaySeconds(int datalessRejoins) {
   constexpr double kDelaysSec[] = {0.5, 1.0, 2.0, 4.0};
   constexpr int kLast = sizeof(kDelaysSec) / sizeof(kDelaysSec[0]) - 1;
-  return kDelaysSec[datalessSessions < kLast ? datalessSessions : kLast];
+  return kDelaysSec[datalessRejoins < kLast ? datalessRejoins : kLast];
 }
